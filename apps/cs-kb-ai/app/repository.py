@@ -76,6 +76,9 @@ def ensure_schema() -> None:
               change_summary text NOT NULL DEFAULT '',
               raw_text text NOT NULL,
               chunk_count integer NOT NULL DEFAULT 0,
+              document_type text NOT NULL DEFAULT 'unknown',
+              review_status text NOT NULL DEFAULT 'needs_review',
+              extraction_confidence numeric NOT NULL DEFAULT 0,
               created_by text NOT NULL DEFAULT 'system',
               approved_by text,
               effective_from timestamptz,
@@ -101,6 +104,9 @@ def ensure_schema() -> None:
             $$;
             """
         )
+        conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS document_type text NOT NULL DEFAULT 'unknown'")
+        conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS review_status text NOT NULL DEFAULT 'needs_review'")
+        conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS extraction_confidence numeric NOT NULL DEFAULT 0")
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS ai_chunks (
@@ -315,6 +321,9 @@ def create_document_version(
     status: str,
     created_by: str,
     change_summary: str,
+    document_type: str = "unknown",
+    review_status: str = "needs_review",
+    extraction_confidence: float = 0.0,
 ) -> dict[str, Any]:
     document_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
@@ -362,9 +371,10 @@ def create_document_version(
                 """
                 INSERT INTO ai_document_versions (
                   id, document_id, version_number, status, checksum, change_summary, raw_text,
-                  chunk_count, created_by, approved_by, effective_from, published_at
+                  chunk_count, document_type, review_status, extraction_confidence,
+                  created_by, approved_by, effective_from, published_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), CASE WHEN %s = 'published' THEN now() ELSE NULL END)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), CASE WHEN %s = 'published' THEN now() ELSE NULL END)
                 """,
                 (
                     version_id,
@@ -375,6 +385,9 @@ def create_document_version(
                     change_summary,
                     raw_text,
                     len(chunks),
+                    document_type,
+                    "approved" if status == "published" else review_status,
+                    extraction_confidence,
                     created_by,
                     created_by if status == "published" else None,
                     status,
@@ -397,6 +410,9 @@ def create_document_version(
                     "external_id": external_id,
                     "status": status,
                     "chunk_count": len(chunks),
+                    "document_type": document_type,
+                    "review_status": review_status,
+                    "extraction_confidence": extraction_confidence,
                 },
             )
 
@@ -409,6 +425,9 @@ def create_document_version(
         "status": status,
         "chunk_count": len(chunks),
         "checksum": checksum,
+        "document_type": document_type,
+        "review_status": "approved" if status == "published" else review_status,
+        "extraction_confidence": extraction_confidence,
         "metadata": metadata.model_dump(),
     }
 
@@ -484,7 +503,11 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str) -> di
     conn.execute(
         """
         UPDATE ai_document_versions
-        SET status = 'published', approved_by = %s, published_at = COALESCE(published_at, now()), archived_at = NULL
+        SET status = 'published',
+            review_status = 'approved',
+            approved_by = %s,
+            published_at = COALESCE(published_at, now()),
+            archived_at = NULL
         WHERE id = %s
         """,
         (actor, version_id),
@@ -493,7 +516,40 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str) -> di
         "UPDATE ai_documents SET current_version_id = %s, status = 'active', updated_at = now() WHERE id = %s",
         (version_id, row["document_id"]),
     )
-    return row
+    published = conn.execute(
+        """
+        SELECT v.id::text AS version_id,
+               v.document_id::text AS document_id,
+               d.external_id,
+               d.title,
+               v.version_number,
+               v.status,
+               v.checksum,
+               v.chunk_count,
+               v.document_type,
+               v.review_status,
+               v.extraction_confidence::float AS extraction_confidence,
+               d.metadata
+        FROM ai_document_versions v
+        JOIN ai_documents d ON d.id = v.document_id
+        WHERE v.id = %s
+        """,
+        (version_id,),
+    ).fetchone()
+    conn.execute(
+        """
+        UPDATE ai_chunks
+        SET metadata = jsonb_set(
+          jsonb_set(metadata, '{review_status}', '"approved"'::jsonb, true),
+          '{document_type}',
+          to_jsonb(%s::text),
+          true
+        )
+        WHERE version_id = %s
+        """,
+        (published["document_type"], version_id),
+    )
+    return dict(published)
 
 
 def archive_document(document_id: str, actor: str) -> None:
@@ -531,19 +587,52 @@ def list_documents() -> list[dict[str, Any]]:
             SELECT d.id::text AS document_id,
                    d.external_id,
                    d.title,
-                   COALESCE(c.metadata->>'source_filename', d.source_filename) AS source_filename,
+                   d.source_filename,
                    d.status,
-                   d.current_version_id::text AS latest_version_id,
+                   v.id::text AS latest_version_id,
                    v.version_number AS latest_version_number,
                    v.status AS latest_version_status,
+                   v.document_type AS latest_document_type,
+                   v.review_status AS latest_review_status,
+                   v.extraction_confidence::float AS latest_extraction_confidence,
                    d.updated_at,
                    d.metadata
             FROM ai_documents d
-            LEFT JOIN ai_document_versions v ON v.id = d.current_version_id
+            LEFT JOIN LATERAL (
+              SELECT *
+              FROM ai_document_versions
+              WHERE document_id = d.id
+              ORDER BY version_number DESC
+              LIMIT 1
+            ) v ON true
             ORDER BY d.updated_at DESC
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def rerank_structural_matches(query: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized_query = normalize_phrase(query)
+    query_tokens = [token for token in normalized_query.split() if len(token) >= 4]
+    if not query_tokens and not normalized_query:
+        return rows
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        sheet = normalize_phrase(str(metadata.get("sheet_name") or ""))
+        heading = normalize_phrase(str(row.get("heading") or ""))
+        section = normalize_phrase(str(row.get("section") or ""))
+        structural_text = " ".join([sheet, heading, section])
+        matched = sum(1 for token in query_tokens if token in structural_text)
+        phrase_boost = 0.0
+        if sheet and (sheet in normalized_query or normalized_query in sheet):
+            phrase_boost += 3.0
+        if heading and (heading in normalized_query or normalized_query in heading):
+            phrase_boost += 2.0
+        if matched:
+            row["score"] = float(row.get("score") or 0) + matched * 0.75 + phrase_boost
+        elif phrase_boost:
+            row["score"] = float(row.get("score") or 0) + phrase_boost
+    return sorted(rows, key=lambda row: float(row.get("score") or 0), reverse=True)
 
 
 def list_versions(document_id: str) -> list[dict[str, Any]]:
@@ -557,6 +646,9 @@ def list_versions(document_id: str) -> list[dict[str, Any]]:
                    status,
                    checksum,
                    chunk_count,
+                   document_type,
+                   review_status,
+                   extraction_confidence::float AS extraction_confidence,
                    change_summary,
                    published_at,
                    archived_at,
@@ -568,6 +660,290 @@ def list_versions(document_id: str) -> list[dict[str, Any]]:
             (document_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def list_chunks(document_id: str, version_id: str = "") -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        if not version_id:
+            current = conn.execute(
+                "SELECT current_version_id::text FROM ai_documents WHERE id = %s",
+                (document_id,),
+            ).fetchone()
+            if not current or not current["current_version_id"]:
+                return []
+            version_id = str(current["current_version_id"])
+
+        rows = conn.execute(
+            """
+            SELECT id::text AS chunk_id,
+                   document_id::text AS document_id,
+                   version_id::text AS version_id,
+                   chunk_index,
+                   section,
+                   heading,
+                   content,
+                   token_count,
+                   metadata,
+                   created_at
+            FROM ai_chunks
+            WHERE document_id = %s AND version_id = %s
+            ORDER BY chunk_index
+            """,
+            (document_id, version_id),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def list_extraction_units(document_id: str, version_id: str = "") -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        if not version_id:
+            current = conn.execute(
+                "SELECT current_version_id::text FROM ai_documents WHERE id = %s",
+                (document_id,),
+            ).fetchone()
+            if not current or not current["current_version_id"]:
+                return []
+            version_id = str(current["current_version_id"])
+
+        rows = conn.execute(
+            """
+            SELECT c.id::text AS unit_id,
+                   c.document_id::text AS document_id,
+                   c.version_id::text AS version_id,
+                   c.chunk_index AS unit_index,
+                   c.section,
+                   c.heading AS title,
+                   c.content,
+                   c.metadata,
+                   v.document_type,
+                   v.review_status,
+                   v.extraction_confidence::float AS extraction_confidence
+            FROM ai_chunks c
+            JOIN ai_document_versions v ON v.id = c.version_id
+            WHERE c.document_id = %s AND c.version_id = %s
+            ORDER BY c.chunk_index
+            """,
+            (document_id, version_id),
+        ).fetchall()
+
+    units = []
+    for row in rows:
+        item = dict(row)
+        metadata = item.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        source_type = str(metadata.get("source_type") or "")
+        document_type = str(item.get("document_type") or "")
+        units.append(
+            extraction_unit_from_row(item, document_type, source_type, metadata)
+        )
+    return units
+
+
+def extraction_unit_from_row(
+    item: dict[str, Any],
+    document_type: str,
+    source_type: str,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    confidence = metadata.get("confidence", item.get("extraction_confidence") or 0)
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        confidence_value = 0.0
+    return {
+        "unit_id": item["unit_id"],
+        "document_id": item["document_id"],
+        "version_id": item["version_id"],
+        "unit_index": item["unit_index"],
+        "unit_type": extraction_unit_type(document_type, source_type, metadata),
+        "title": item.get("title") or item.get("section") or "Extraction unit",
+        "content": item["content"],
+        "source_sheet": str(metadata.get("sheet_name") or ""),
+        "source_row": metadata.get("row_number"),
+        "source_page": metadata.get("page_number") or metadata.get("source_page"),
+        "source_bbox": metadata.get("bbox") or metadata.get("source_bbox") or [],
+        "confidence": confidence_value,
+        "review_status": metadata.get("review_status") or item.get("review_status") or "needs_review",
+        "metadata": metadata,
+    }
+
+
+def extraction_unit_type(document_type: str, source_type: str, metadata: dict[str, Any]) -> str:
+    if metadata.get("unit_type"):
+        return str(metadata["unit_type"])
+    if source_type == "spreadsheet":
+        return "rule_table_row"
+    if source_type in {"image", "diagram_pdf"} or document_type == "workflow_diagram":
+        return "workflow_or_asset_draft"
+    if document_type == "macro_script":
+        return "macro_or_script"
+    if metadata.get("sheet_name"):
+        return "table_unit"
+    return "text_section"
+
+
+def update_extraction_unit(
+    *,
+    unit_id: str,
+    title: str,
+    content: str,
+    unit_type: str,
+    confidence: float,
+    review_status: str,
+    metadata: dict[str, Any],
+    actor: str,
+    embedding: list[float],
+) -> dict[str, Any]:
+    with connection() as conn:
+        with conn.transaction():
+            conn.row_factory = dict_row
+            row = conn.execute(
+                """
+                SELECT c.id::text AS unit_id,
+                       c.document_id::text AS document_id,
+                       c.version_id::text AS version_id,
+                       c.chunk_index AS unit_index,
+                       c.section,
+                       c.heading AS title,
+                       c.content,
+                       c.metadata,
+                       v.status AS version_status,
+                       v.document_type,
+                       v.review_status,
+                       v.extraction_confidence::float AS extraction_confidence
+                FROM ai_chunks c
+                JOIN ai_document_versions v ON v.id = c.version_id
+                WHERE c.id = %s
+                FOR UPDATE
+                """,
+                (unit_id,),
+            ).fetchone()
+            if not row:
+                raise LookupError("extraction_unit_not_found")
+            if row["version_status"] != "draft":
+                raise ValueError("published_or_archived_versions_are_immutable")
+
+            existing_metadata = row.get("metadata") or {}
+            if not isinstance(existing_metadata, dict):
+                existing_metadata = {}
+            merged_metadata = {
+                **existing_metadata,
+                **metadata,
+                "unit_type": unit_type,
+                "confidence": confidence,
+                "review_status": review_status,
+                "reviewed_by": actor,
+            }
+            if review_status == "reviewed":
+                merged_metadata["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+
+            conn.execute(
+                """
+                UPDATE ai_chunks
+                SET section = %s,
+                    heading = %s,
+                    content = %s,
+                    token_count = %s,
+                    embedding = %s::vector,
+                    metadata = %s::jsonb
+                WHERE id = %s
+                """,
+                (
+                    unit_type,
+                    title,
+                    content,
+                    len(tokenize(content)),
+                    vector_literal(embedding),
+                    json.dumps(merged_metadata),
+                    unit_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE ai_document_versions
+                SET review_status = CASE
+                    WHEN review_status = 'approved' THEN review_status
+                    ELSE 'reviewed'
+                END
+                WHERE id = %s
+                """,
+                (row["version_id"],),
+            )
+            conn.execute(
+                "UPDATE ai_documents SET updated_at = now() WHERE id = %s",
+                (row["document_id"],),
+            )
+            audit_tx(
+                conn,
+                actor=actor,
+                action="extraction_unit_update",
+                entity_type="ai_chunk",
+                entity_id=unit_id,
+                metadata={
+                    "document_id": row["document_id"],
+                    "version_id": row["version_id"],
+                    "unit_type": unit_type,
+                    "review_status": review_status,
+                },
+            )
+            updated = conn.execute(
+                """
+                SELECT c.id::text AS unit_id,
+                       c.document_id::text AS document_id,
+                       c.version_id::text AS version_id,
+                       c.chunk_index AS unit_index,
+                       c.section,
+                       c.heading AS title,
+                       c.content,
+                       c.metadata,
+                       v.document_type,
+                       v.review_status,
+                       v.extraction_confidence::float AS extraction_confidence
+                FROM ai_chunks c
+                JOIN ai_document_versions v ON v.id = c.version_id
+                WHERE c.id = %s
+                """,
+                (unit_id,),
+            ).fetchone()
+
+    item = dict(updated)
+    updated_metadata = item.get("metadata") or {}
+    if not isinstance(updated_metadata, dict):
+        updated_metadata = {}
+    source_type = str(updated_metadata.get("source_type") or "")
+    return extraction_unit_from_row(
+        item,
+        str(item.get("document_type") or ""),
+        source_type,
+        updated_metadata,
+    )
+
+
+def version_raw_text(version_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        row = conn.execute(
+            """
+            SELECT v.id::text AS version_id,
+                   v.document_id::text AS document_id,
+                   d.title,
+                   v.version_number,
+                   v.status,
+                   v.raw_text,
+                   v.chunk_count,
+                   v.created_at
+            FROM ai_document_versions v
+            JOIN ai_documents d ON d.id = v.document_id
+            WHERE v.id = %s
+            """,
+            (version_id,),
+        ).fetchone()
+        if not row:
+            raise LookupError("version_not_found")
+        return dict(row)
 
 
 def list_taxonomy_intents(status: str = "active") -> list[dict[str, Any]]:
@@ -963,6 +1339,7 @@ def lexical_search(query: str, filters: RetrievalFilters, limit: int) -> list[di
     tsquery = lexical_tsquery(query)
     if not tsquery:
         return []
+    normalized_like = f"%{normalize_phrase(query)}%"
     where_sql, params = filter_sql(filters)
     with connection() as conn:
         conn.row_factory = dict_row
@@ -979,18 +1356,33 @@ def lexical_search(query: str, filters: RetrievalFilters, limit: int) -> list[di
                    c.heading,
                    c.content,
                    c.metadata,
-                   ts_rank_cd(to_tsvector('simple', immutable_unaccent(c.content)), to_tsquery('simple', %s)) AS score
+                   (
+                     ts_rank_cd(
+                       to_tsvector(
+                         'simple',
+                         immutable_unaccent(
+                           concat_ws(' ', c.heading, c.section, c.metadata->>'sheet_name', c.content)
+                         )
+                       ),
+                       to_tsquery('simple', %s)
+                     )
+                     + CASE WHEN immutable_unaccent(lower(COALESCE(c.metadata->>'sheet_name', ''))) LIKE %s THEN 1.2 ELSE 0 END
+                     + CASE WHEN immutable_unaccent(lower(COALESCE(c.heading, ''))) LIKE %s THEN 0.8 ELSE 0 END
+                   ) AS score
             FROM ai_chunks c
             JOIN ai_documents d ON d.id = c.document_id
             JOIN ai_document_versions v ON v.id = c.version_id
             WHERE {where_sql}
-              AND to_tsvector('simple', immutable_unaccent(c.content)) @@ to_tsquery('simple', %s)
+              AND to_tsvector(
+                    'simple',
+                    immutable_unaccent(concat_ws(' ', c.heading, c.section, c.metadata->>'sheet_name', c.content))
+                  ) @@ to_tsquery('simple', %s)
             ORDER BY score DESC, v.published_at DESC NULLS LAST
             LIMIT %s
             """,
-            [tsquery, *params, tsquery, limit],
+            [tsquery, normalized_like, normalized_like, *params, tsquery, limit],
         ).fetchall()
-        return [dict(row) for row in rows]
+        return rerank_structural_matches(query, [dict(row) for row in rows])
 
 
 def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:

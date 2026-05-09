@@ -71,12 +71,13 @@ type SearchFilters struct {
 }
 
 type SearchResponse struct {
-	Query       string         `json:"query"`
-	Results     []SearchResult `json:"results"`
-	Total       int            `json:"total"`
-	LatencyMS   int64          `json:"latency_ms"`
-	UsedModes   []string       `json:"used_modes"`
-	Suggestions []string       `json:"suggestions"`
+	Query           string           `json:"query"`
+	Results         []SearchResult   `json:"results"`
+	SemanticResults []SemanticResult `json:"semantic_results,omitempty"`
+	Total           int              `json:"total"`
+	LatencyMS       int64            `json:"latency_ms"`
+	UsedModes       []string         `json:"used_modes"`
+	Suggestions     []string         `json:"suggestions"`
 }
 
 type SearchResult struct {
@@ -90,6 +91,22 @@ type SearchResult struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 	Version    int       `json:"version"`
 	Confidence float64   `json:"confidence"`
+}
+
+type SemanticResult struct {
+	DocumentID    string         `json:"document_id"`
+	VersionID     string         `json:"version_id"`
+	ChunkID       string         `json:"chunk_id"`
+	Title         string         `json:"title"`
+	SourceFile    string         `json:"source_filename"`
+	VersionNumber int            `json:"version_number"`
+	ChunkIndex    int            `json:"chunk_index"`
+	Section       string         `json:"section"`
+	Heading       string         `json:"heading"`
+	Content       string         `json:"content"`
+	Score         float64        `json:"score"`
+	RankSource    []string       `json:"rank_source"`
+	Metadata      map[string]any `json:"metadata"`
 }
 
 type AISuggestRequest struct {

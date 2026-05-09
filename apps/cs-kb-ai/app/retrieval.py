@@ -6,7 +6,7 @@ from typing import Any
 from app.embedding import embed_text
 from app import repository
 from app.schemas import Citation, RetrievalRequest, RetrievalResponse, RetrievalResult
-from app.text_processing import expand_query
+from app.text_processing import expand_query, normalize_phrase, phrase_in_query
 
 
 RRF_K = 60
@@ -53,12 +53,13 @@ def retrieve(request: RetrievalRequest) -> RetrievalResponse:
         vector_rows = repository.vector_search(embed_text(normalized_query), request.filters, search_limit)
 
     if request.mode == "lexical":
-        fused_rows = rows_from_single_mode(lexical_rows, "lexical", request.limit)
+        fused_rows = rows_from_single_mode(lexical_rows, "lexical", search_limit)
     elif request.mode == "vector":
-        fused_rows = rows_from_single_mode(vector_rows, "vector", request.limit)
+        fused_rows = rows_from_single_mode(vector_rows, "vector", search_limit)
     else:
-        fused_rows = reciprocal_rank_fusion(lexical_rows, vector_rows, request.limit)
+        fused_rows = reciprocal_rank_fusion(lexical_rows, vector_rows, search_limit)
 
+    fused_rows = rerank_by_query_intent(normalized_query, fused_rows)[: request.limit]
     fused_rows = [row for row in fused_rows if is_reliable(row)]
     if not fused_rows:
         warnings.append("no_reliable_source")
@@ -133,6 +134,75 @@ def reciprocal_rank_fusion(
         key=lambda item: (item["score"], item["lexical_score"], item["vector_score"], -item["best_rank"]),
         reverse=True,
     )[:limit]
+
+
+def rerank_by_query_intent(normalized_query: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for row in rows:
+        item = dict(row)
+        boost = intent_boost(normalized_query, item)
+        if boost:
+            item["score"] = float(item.get("score") or 0) + boost
+            item["intent_boost"] = round(boost, 4)
+        output.append(item)
+    return sorted(
+        output,
+        key=lambda item: (
+            float(item.get("score") or 0),
+            float(item.get("intent_boost") or 0),
+            float(item.get("lexical_score") or 0),
+            float(item.get("vector_score") or 0),
+            -int(item.get("best_rank") or item.get("rrf_rank") or 999),
+        ),
+        reverse=True,
+    )
+
+
+def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
+    metadata = row.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "").strip()
+    text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or "")]))
+    boost = 0.0
+
+    if any_phrase(normalized_query, ["order id", "ma don hang"]) and any_phrase(normalized_query, ["huy", "khong cung cap", "co duoc cung cap", "bao mat"]):
+        if unit_type == "security_note":
+            boost += 0.08
+        if phrase_in_query("huy", text) and phrase_in_query("khong cung cap", text):
+            boost += 0.03
+
+    if any_phrase(normalized_query, ["khong xac dinh", "khong kiem tra", "khong tim duoc"]):
+        if unit_type == "decision_point" and any_phrase(text, ["xac dinh duoc chuyen xe don hang", "kiem tra va xac dinh"]):
+            boost += 0.08
+        if unit_type == "workflow_step" and any_phrase(text, ["chu dong kiem tra", "gan nhat tren he thong"]):
+            boost += 0.07
+
+    if any_phrase(normalized_query, ["khieu nai", "trong vong bao lau", "1h"]) and phrase_in_query("befood", normalized_query):
+        if unit_type == "operational_note" and any_phrase(text, ["trong vong 1h", "thoi gian khieu nai"]):
+            boost += 0.08
+
+    if phrase_in_query("chat", normalized_query) and any_phrase(normalized_query, ["trip id", "order id"]):
+        if unit_type == "workflow_step" and phrase_in_query("khung chat", text):
+            boost += 0.08
+
+    if any_phrase(normalized_query, ["chuyen khac", "don hang khac", "xin thong tin"]):
+        if unit_type == "workflow_step" and any_phrase(text, ["xin ten nha hang", "xin trip id order id"]):
+            boost += 0.08
+        if unit_type == "decision_point" and any_phrase(text, ["chuyen xe don hang khac", "buoc 3 1"]):
+            boost += 0.05
+
+    if any_phrase(normalized_query, ["script", "macro", "phan hoi mau"]):
+        if unit_type == "macro_script":
+            boost += 0.06
+    elif unit_type == "macro_script":
+        boost -= 0.015
+
+    return boost
+
+
+def any_phrase(haystack: str, phrases: list[str]) -> bool:
+    return any(phrase_in_query(normalize_phrase(phrase), haystack) for phrase in phrases)
 
 
 def to_result(row: dict[str, Any]) -> RetrievalResult:

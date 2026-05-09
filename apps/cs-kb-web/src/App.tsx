@@ -1,275 +1,226 @@
-import {
-  Archive,
-  Bot,
-  Check,
-  CheckCircle2,
-  Clipboard,
-  Copy,
-  DatabaseZap,
-  FileClock,
-  History,
-  Layers3,
-  Loader2,
-  Search,
-  ShieldCheck,
-  Sparkles,
-  ThumbsDown,
-  ThumbsUp,
-} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { AppShell } from "@/components/app-shell";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
+  defaultFilters,
+  defaultSynonymDraft,
+  defaultUpload,
+  type Workspace,
+} from "@/constants";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { cn } from "@/lib/utils";
-
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
-
-type Macro = {
-  title: string;
-  content: string;
-};
-
-type SOP = {
-  id: string;
-  code: string;
-  title: string;
-  summary: string;
-  audience: string[];
-  vertical: string;
-  category: string;
-  tags: string[];
-  case_reasons: string[];
-  status: string;
-  current_version_id: string;
-  owner_team: string;
-  updated_at: string;
-  current_version: {
-    id: string;
-    version_number: number;
-    status: string;
-    change_summary: string;
-    sections: {
-      when_to_apply: string;
-      input_requirements: string;
-      checklist: string[];
-      agent_script: string;
-      macro_response: Macro[];
-      sla?: string;
-      escalation?: string;
-      related_policies?: string[];
-    };
-  };
-  analytics: {
-    views: number;
-    macro_copy: number;
-    helpful: number;
-    not_helpful: number;
-  };
-};
-
-type SearchResult = {
-  sop_id: string;
-  title: string;
-  snippet: string;
-  category: string;
-  audience: string[];
-  vertical: string;
-  tags: string[];
-  updated_at: string;
-  version: number;
-  confidence: number;
-};
-
-type Homepage = {
-  recently_updated: SOP[];
-  most_viewed: SOP[];
-  category_shortcuts: Array<{ key: string; label: string }>;
-};
-
-type AISuggestion = {
-  answer: string;
-  suggested_sops: Array<{
-    sop_id: string;
-    title: string;
-    version: number;
-    confidence: number;
-  }>;
-  citations: Array<{ sop_id: string; version_id: string; section: string }>;
-  warnings: string[];
-};
-
-type FilterState = {
-  audience: string;
-  vertical: string;
-  category: string;
-};
-
-const defaultFilters: FilterState = {
-  audience: "all",
-  vertical: "all",
-  category: "all",
-};
-
-const filterOptions = {
-  audience: ["customer", "driver", "merchant", "internal"],
-  vertical: ["food", "payment", "safety", "delivery", "promotion"],
-  category: ["case_handling", "verification", "escalation", "policy"],
-};
-
-const navItems = [
-  { label: "Search", icon: Search, active: true },
-  { label: "Review", icon: Clipboard },
-  { label: "Analytics", icon: History },
-  { label: "Archive", icon: Archive },
-];
+  useAcceptSuggestion,
+  useArchiveDocument,
+  useAISuggest,
+  useCreateSynonym,
+  useDocumentChunks,
+  useDocuments,
+  useDocumentVersions,
+  useExtractionUnits,
+  useGenerateSuggestions,
+  useHomepage,
+  usePublishVersion,
+  useRetrieval,
+  useSearch,
+  useSOP,
+  useSyncSynonyms,
+  useSynonyms,
+  useSynonymSuggestions,
+  useTransitionSynonym,
+  useUploadDocument,
+  useUpdateExtractionUnit,
+} from "@/hooks/use-kb-api";
+import { compactFilters, fileExternalId, splitList, toSearchResult } from "@/lib/format";
+import type {
+  AISuggestion,
+  DocumentSummary,
+  ExtractionUnit,
+  ExtractionUnitUpdate,
+  FilterState,
+  Macro,
+  RetrievalResponse,
+  RetrievalResult,
+  SOP,
+  SynonymDraft,
+  SynonymGroup,
+  SynonymSuggestion,
+  UploadState,
+} from "@/types";
+import { DashboardWorkspace } from "@/workspaces/dashboard-workspace";
+import { DocumentsWorkspace } from "@/workspaces/documents-workspace";
+import { LookupWorkspace } from "@/workspaces/lookup-workspace";
+import { RetrievalWorkspace } from "@/workspaces/retrieval-workspace";
+import { SynonymsWorkspace } from "@/workspaces/synonyms-workspace";
 
 export function App() {
-  const [homepage, setHomepage] = useState<Homepage | null>(null);
-  const [query, setQuery] = useState("khong nhan du mon");
+  const [workspace, setWorkspace] = useState<Workspace>("dashboard");
+  const [query, setQuery] = useState("khach khong nhan du mon co duoc refund khong");
   const [filters, setFilters] = useState<FilterState>(defaultFilters);
-  const [results, setResults] = useState<SearchResult[]>([]);
+  const [retrievalMode, setRetrievalMode] = useState<RetrievalResponse["mode"]>("hybrid");
   const [selected, setSelected] = useState<SOP | null>(null);
-  const [aiSuggestion, setAiSuggestion] = useState<AISuggestion | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [booting, setBooting] = useState(true);
+  const [selectedDocumentMatch, setSelectedDocumentMatch] = useState<RetrievalResult | null>(null);
+  const [selectedDocument, setSelectedDocument] = useState<DocumentSummary | null>(null);
+  const [selectedChunkVersionId, setSelectedChunkVersionId] = useState("");
+  const [synonymStatus, setSynonymStatus] = useState("active");
+  const [upload, setUpload] = useState<UploadState>(defaultUpload);
+  const [synonymDraft, setSynonymDraft] = useState<SynonymDraft>(defaultSynonymDraft);
+  const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState("");
   const [copyError, setCopyError] = useState("");
 
+  const homepageQuery = useHomepage();
+  const documentsQuery = useDocuments();
+  const versionsQuery = useDocumentVersions(selectedDocument?.document_id);
+  const chunksQuery = useDocumentChunks(selectedDocument?.document_id, selectedChunkVersionId);
+  const extractionUnitsQuery = useExtractionUnits(selectedDocument?.document_id, selectedChunkVersionId);
+  const synonymsQuery = useSynonyms(synonymStatus);
+  const suggestionsQuery = useSynonymSuggestions();
+  const searchMutation = useSearch();
+  const sopMutation = useSOP();
+  const aiSuggestMutation = useAISuggest();
+  const retrievalMutation = useRetrieval();
+  const uploadMutation = useUploadDocument();
+  const publishMutation = usePublishVersion();
+  const updateExtractionUnitMutation = useUpdateExtractionUnit();
+  const archiveDocumentMutation = useArchiveDocument();
+  const createSynonymMutation = useCreateSynonym();
+  const transitionSynonymMutation = useTransitionSynonym();
+  const syncSynonymsMutation = useSyncSynonyms();
+  const generateSuggestionsMutation = useGenerateSuggestions();
+  const acceptSuggestionMutation = useAcceptSuggestion();
+
+  const homepage = homepageQuery.data;
+  const documents = useMemo(
+    () =>
+      [...(documentsQuery.data ?? [])].sort((left, right) => {
+        if (left.status !== right.status) {
+          return left.status === "active" ? -1 : 1;
+        }
+        return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+      }),
+    [documentsQuery.data],
+  );
+  const versions = versionsQuery.data ?? [];
+  const chunks = chunksQuery.data ?? [];
+  const extractionUnits = extractionUnitsQuery.data ?? [];
+  const synonyms = synonymsQuery.data ?? [];
+  const suggestions = suggestionsQuery.data ?? [];
+  const searchResults = searchMutation.data?.results ?? [];
+  const semanticResults = searchMutation.data?.semantic_results ?? [];
+  const retrieval = retrievalMutation.data ?? null;
+  const aiSuggestion = (aiSuggestMutation.data as AISuggestion | undefined) ?? null;
+
   useEffect(() => {
-    let active = true;
-
-    async function loadHomepage() {
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/v1/homepage`);
-        if (!response.ok) {
-          throw new Error("Homepage request failed");
-        }
-        const data = (await response.json()) as Homepage;
-        if (!active) {
-          return;
-        }
-        setHomepage(data);
-        setSelected(data.recently_updated[0] ?? null);
-      } catch {
-        if (active) {
-          setError(
-            "Cannot reach the SOP API. Check that cs-kb-api is running on port 8080.",
-          );
-        }
-      } finally {
-        if (active) {
-          setBooting(false);
-        }
-      }
+    if (!selected && homepage?.recently_updated[0]) {
+      setSelected(homepage.recently_updated[0]);
     }
+  }, [homepage, selected]);
 
-    loadHomepage();
-    runSearch(query, filters);
+  useEffect(() => {
+    const firstActiveDocument = documents.find((document) => document.status === "active") ?? documents[0];
+    if (!selectedDocument && firstActiveDocument) {
+      setSelectedDocument(firstActiveDocument);
+      setSelectedChunkVersionId(firstActiveDocument.latest_version_id ?? "");
+    }
+  }, [documents, selectedDocument]);
 
-    return () => {
-      active = false;
-    };
+  useEffect(() => {
+    if (selectedDocument?.latest_version_id && !selectedChunkVersionId) {
+      setSelectedChunkVersionId(selectedDocument.latest_version_id);
+    }
+  }, [selectedDocument, selectedChunkVersionId]);
+
+  useEffect(() => {
+    runSearch();
+    runRetrieval();
   }, []);
 
   const listSource = useMemo(() => {
-    if (results.length > 0) {
-      return results;
+    if (searchResults.length > 0) {
+      return searchResults;
     }
     return homepage?.most_viewed.map(toSearchResult) ?? [];
-  }, [homepage, results]);
+  }, [homepage, searchResults]);
 
-  async function runSearch(nextQuery = query, nextFilters = filters) {
-    setLoading(true);
-    setError("");
-    setAiSuggestion(null);
+  const feedbackTotal = selected
+    ? selected.analytics.helpful + selected.analytics.not_helpful
+    : 0;
+  const helpfulRate =
+    feedbackTotal && selected
+      ? Math.round((selected.analytics.helpful / feedbackTotal) * 100)
+      : 0;
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: nextQuery,
-          include_semantic: true,
-          filters: compactFilters(nextFilters),
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Search request failed");
-      }
-
-      const data = await response.json();
-      setResults(data.results ?? []);
-    } catch {
-      setResults([]);
-      setError(
-        "Search failed. Keyword SOP lookup should stay available even when AI is down.",
-      );
-    } finally {
-      setLoading(false);
-    }
+  function reportError(message: string) {
+    setError(message);
+    setNotice("");
   }
 
-  async function openSOP(id: string) {
+  function reportNotice(message: string) {
+    setNotice(message);
     setError("");
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/sops/${id}`);
-      if (!response.ok) {
-        throw new Error("SOP request failed");
-      }
-      setSelected(await response.json());
-      setAiSuggestion(null);
-    } catch {
-      setError("Cannot open this SOP. It may be archived or unavailable.");
-    }
   }
 
-  async function askAI() {
+  function runSearch(nextQuery = query, nextFilters = filters) {
+    searchMutation.mutate(
+      {
+        query: nextQuery,
+        include_semantic: true,
+        filters: compactFilters(nextFilters),
+      },
+      {
+        onError: () =>
+          reportError("Search failed. Keyword SOP lookup should stay available even when AI is down."),
+      },
+    );
+  }
+
+  function runRetrieval(nextQuery = query, mode = retrievalMode) {
+    retrievalMutation.mutate(
+      {
+        query: nextQuery,
+        mode,
+        limit: 6,
+        filters: {
+          ...compactFilters(filters),
+          status: ["published"],
+        },
+      },
+      {
+        onError: () => reportError("Retrieval failed. Check cs-kb-ai and Postgres/pgvector."),
+      },
+    );
+  }
+
+  function openSOP(id: string) {
+    sopMutation.mutate(id, {
+      onSuccess: (sop) => {
+        setSelected(sop);
+        setSelectedDocumentMatch(null);
+        setWorkspace("lookup");
+      },
+      onError: () => reportError("Cannot open this SOP. It may be archived or unavailable."),
+    });
+  }
+
+  function askAI() {
     if (!selected) {
       return;
     }
-
-    const response = await fetch(`${API_BASE_URL}/api/v1/ai/suggest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, sop_id: selected.id }),
-    });
-    setAiSuggestion(await response.json());
+    aiSuggestMutation.mutate(
+      { query, sop_id: selected.id },
+      { onError: () => reportError("AI suggestion failed.") },
+    );
   }
 
   async function copyMacro(macro: Macro) {
     setCopied("");
     setCopyError("");
-
     try {
       await navigator.clipboard.writeText(macro.content);
       setCopied(macro.title);
       window.setTimeout(() => setCopied(""), 1800);
     } catch {
-      setCopyError(
-        `Clipboard permission blocked. Macro selected: ${macro.title}`,
-      );
+      setCopyError(`Clipboard permission blocked. Macro selected: ${macro.title}`);
       window.setTimeout(() => setCopyError(""), 2600);
     }
   }
@@ -280,705 +231,284 @@ export function App() {
     runSearch(query, nextFilters);
   }
 
-  const selectedVersion = selected?.current_version;
-  const feedbackTotal = selected
-    ? selected.analytics.helpful + selected.analytics.not_helpful
-    : 0;
-  const helpfulRate =
-    feedbackTotal && selected
-      ? Math.round((selected.analytics.helpful / feedbackTotal) * 100)
-      : 0;
+  function handleUpload() {
+    if (!upload.file) {
+      reportError("Choose a TXT, MD, PDF, DOCX, Excel, or image file before uploading.");
+      return;
+    }
+    const maxBytes = 15 * 1024 * 1024;
+    const allowedExtensions = [".txt", ".md", ".markdown", ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".png", ".jpg", ".jpeg", ".webp"];
+    const lowerName = upload.file.name.toLowerCase();
+    const validType = allowedExtensions.some((extension) => lowerName.endsWith(extension));
+    if (!validType) {
+      reportError("Unsupported file type. Use TXT, MD, PDF, DOCX, Excel, PNG, JPG, or WebP.");
+      return;
+    }
+    if (upload.file.size > maxBytes) {
+      reportError("File is too large for the demo pipeline. Keep uploads under 15MB.");
+      return;
+    }
+
+    const form = new FormData();
+    form.append("file", upload.file);
+    form.append("external_id", upload.externalId || fileExternalId(upload.file.name));
+    form.append("title", upload.title || upload.file.name);
+    form.append("status", upload.status);
+    form.append("created_by", "cs-ops-ui");
+    form.append("change_summary", "Uploaded from CS KB web console");
+    form.append(
+      "metadata",
+      JSON.stringify({
+        audience: [upload.audience],
+        vertical: upload.vertical,
+        category: upload.category,
+        tags: splitList(upload.tags),
+        case_reasons: splitList(upload.caseReasons),
+        owner_team: upload.ownerTeam,
+        source: "web_upload",
+      }),
+    );
+
+    uploadMutation.mutate(form, {
+      onSuccess: (data) => {
+        reportNotice(`Uploaded ${data.title} v${data.version_number}, ${data.chunk_count} chunks extracted for review.`);
+        setSelectedChunkVersionId("");
+        setUpload((current) => ({ ...current, file: null, title: "", externalId: "" }));
+        setWorkspace("documents");
+      },
+      onError: () => reportError("Upload failed. Confirm file type, size, and AI service health."),
+    });
+  }
+
+  function publishVersion(versionId: string) {
+    const selectedVersionUnits = selectedChunkVersionId === versionId ? extractionUnits : [];
+    const pendingReviewCount = selectedVersionUnits.filter((unit) => unit.review_status === "needs_review").length;
+    const confirmed = window.confirm(
+      pendingReviewCount > 0
+        ? `This version still has ${pendingReviewCount} units marked needs_review. Publish anyway and lock this version?`
+        : "Publish this reviewed version and archive the previous published version?",
+    );
+    if (!confirmed) {
+      return;
+    }
+    publishMutation.mutate(
+      { versionId, actor: "cs-lead-ui" },
+      {
+        onSuccess: () => {
+          setSelectedChunkVersionId(versionId);
+          reportNotice("Version published. Previous published version was archived and Meilisearch was updated.");
+        },
+      },
+    );
+  }
+
+  function updateExtractionUnit(unit: ExtractionUnit, update: ExtractionUnitUpdate) {
+    updateExtractionUnitMutation.mutate(
+      { unitId: unit.unit_id, update },
+      {
+        onSuccess: () => reportNotice(`Saved extraction unit ${unit.unit_index}. Retrieval embedding was refreshed.`),
+        onError: () => reportError("Could not save this extraction unit. Published versions are immutable."),
+      },
+    );
+  }
+
+  function archiveDocument(document: DocumentSummary) {
+    const confirmed = window.confirm(`Archive "${document.title}"? It will be removed from active retrieval and Meilisearch.`);
+    if (!confirmed) {
+      return;
+    }
+    archiveDocumentMutation.mutate(
+      { documentId: document.document_id, actor: "cs-ops-ui" },
+      {
+        onSuccess: () => {
+          reportNotice(`Archived ${document.title}.`);
+          setSelectedDocument(null);
+          setSelectedChunkVersionId("");
+        },
+        onError: () => reportError("Archive failed. Check AI service and document state."),
+      },
+    );
+  }
+
+  function createSynonymGroup() {
+    createSynonymMutation.mutate(
+      {
+        canonical_key: synonymDraft.canonicalKey,
+        synonym_type: synonymDraft.synonymType,
+        domain: synonymDraft.domain,
+        audience: synonymDraft.audience,
+        status: synonymDraft.status,
+        created_by: "cs-ops-ui",
+        terms: splitList(synonymDraft.terms),
+      },
+      {
+        onSuccess: (group) => {
+          reportNotice(`Created synonym group ${group.canonical_key}.`);
+          setSynonymStatus(group.status);
+        },
+        onError: () => reportError("Could not create synonym group. Check required fields."),
+      },
+    );
+  }
+
+  function transitionSynonym(group: SynonymGroup, action: "submit-review" | "approve" | "archive") {
+    const actor = action === "approve" ? "cs-lead-ui" : "cs-ops-ui";
+    transitionSynonymMutation.mutate(
+      { groupId: group.id, action, actor },
+      { onSuccess: () => reportNotice(`Synonym ${action} completed for ${group.canonical_key}.`) },
+    );
+  }
+
+  function syncSynonyms() {
+    syncSynonymsMutation.mutate(undefined, {
+      onSuccess: (data) => reportNotice(`Synced ${data.synonym_count} synonym keys to Meilisearch.`),
+      onError: () => reportError("Meilisearch synonym sync failed."),
+    });
+  }
+
+  function generateSuggestions() {
+    generateSuggestionsMutation.mutate(undefined, {
+      onSuccess: (data) => reportNotice(`Generated ${data.length} new suggestion candidates.`),
+    });
+  }
+
+  function acceptSuggestion(suggestion: SynonymSuggestion) {
+    const canonical = suggestion.canonical_key || synonymDraft.canonicalKey || "manual_review";
+    acceptSuggestionMutation.mutate(
+      {
+        suggestionId: suggestion.id,
+        canonical_key: canonical,
+        synonym_type: "one_way",
+        actor: "cs-ops-ui",
+        submit_review: true,
+      },
+      { onSuccess: () => reportNotice(`Accepted suggestion into review as ${canonical}.`) },
+    );
+  }
+
+  const busyKey =
+    uploadMutation.isPending ? "upload" :
+    archiveDocumentMutation.isPending ? "archive-document" :
+    createSynonymMutation.isPending ? "create-synonym" :
+    syncSynonymsMutation.isPending ? "sync-synonyms" :
+    generateSuggestionsMutation.isPending ? "generate-suggestions" :
+    "";
 
   return (
-    <main className="min-h-svh bg-background text-foreground dark">
-      <a
-        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
-        href="#main-content"
-      >
-        Skip to main content
-      </a>
-
-      <div className="grid min-h-svh lg:grid-cols-[16rem_minmax(0,1fr)]">
-        <aside className="border-b bg-sidebar/80 px-4 py-4 lg:border-b-0 lg:border-r lg:px-5">
-          <div className="flex items-center gap-3">
-            <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
-              <ShieldCheck className="size-5" />
-            </div>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold">CS SOP KB</p>
-              <p className="truncate text-xs text-muted-foreground">
-                Approved knowledge
-              </p>
-            </div>
-          </div>
-
-          <nav
-            aria-label="Main navigation"
-            className="mt-5 grid grid-cols-2 gap-2 lg:grid-cols-1"
-          >
-            {navItems.map((item) => (
-              <Button
-                className={cn(
-                  "justify-start",
-                  item.active &&
-                  "bg-sidebar-accent text-sidebar-accent-foreground",
-                )}
-                key={item.label}
-                type="button"
-                variant={item.active ? "secondary" : "ghost"}
-              >
-                <item.icon data-icon="inline-start" className="size-4" />
-                {item.label}
-              </Button>
-            ))}
-          </nav>
-
-          <Separator className="my-5 hidden lg:block" />
-
-          <section className="hidden lg:block">
-            <div className="mb-3 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground">
-              <Layers3 className="size-3.5" />
-              Shortcuts
-            </div>
-            <div className="grid gap-2">
-              {homepage?.category_shortcuts.map((item) => (
-                <Button
-                  className="justify-between"
-                  key={item.key}
-                  onClick={() => updateFilter("category", item.key)}
-                  type="button"
-                  variant="outline"
-                >
-                  {item.label}
-                  <Badge variant="secondary">{item.key.split("_")[0]}</Badge>
-                </Button>
-              ))}
-            </div>
-          </section>
-
-          <section className="mt-5 hidden rounded-xl border bg-card p-3 text-sm lg:block">
-            <div className="flex items-center gap-2 font-medium">
-              <DatabaseZap className="size-4 text-primary" />
-              Source rules
-            </div>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              Agents see only latest published SOP versions. AI suggestions must
-              cite source sections.
-            </p>
-          </section>
-        </aside>
-
-        <section className="min-w-0" id="main-content">
-          <header className="border-b bg-background/95 px-4 py-4 supports-[backdrop-filter]:bg-background/80 md:px-6 lg:sticky lg:top-0 lg:z-20 lg:backdrop-blur">
-            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-              <div className="min-w-0">
-                <div className="mb-1 flex flex-wrap items-center gap-2">
-                  <Badge variant="outline">
-                    <CheckCircle2 data-icon="inline-start" className="size-3" />
-                    Latest published only
-                  </Badge>
-                  <Badge
-                    className="bg-info text-info-foreground"
-                    variant="secondary"
-                  >
-                    Agent view
-                  </Badge>
-                </div>
-                <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
-                  Search approved CS procedures
-                </h1>
-                <p className="mt-1 max-w-[72ch] text-sm text-muted-foreground">
-                  Fast lookup for SOPs, macro copy, escalation rules, and
-                  grounded AI suggestions.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2 text-right md:min-w-72">
-                <Metric
-                  label="SOPs"
-                  value={homepage?.most_viewed.length ?? 0}
-                />
-                <Metric label="Views" value={sumViews(homepage?.most_viewed)} />
-                <Metric label="AI mode" value="P1" />
-              </div>
-            </div>
-          </header>
-
-          <div className="grid gap-4 p-4 md:p-6 xl:grid-cols-[minmax(22rem,0.78fr)_minmax(34rem,1.22fr)]">
-            <section className="min-w-0 space-y-4">
-              <Card className="rounded-2xl">
-                <CardHeader className="pb-0">
-                  <CardTitle>Lookup queue</CardTitle>
-                  <CardDescription>
-                    Keyword first, semantic contract enabled, filters stay
-                    explicit.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4 pt-1">
-                  <div className="grid gap-2">
-                    <label
-                      className="text-xs font-medium text-muted-foreground"
-                      htmlFor="sop-search"
-                    >
-                      Search query
-                    </label>
-                    <div className="flex gap-2">
-                      <div className="relative min-w-0 flex-1">
-                        <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                        <Input
-                          className="pl-8"
-                          id="sop-search"
-                          onChange={(event) => setQuery(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                              runSearch();
-                            }
-                          }}
-                          placeholder="khong nhan du mon, CR_FOOD_MISSING_ITEM..."
-                          value={query}
-                        />
-                      </div>
-                      <Button
-                        disabled={loading}
-                        onClick={() => runSearch()}
-                        type="button"
-                      >
-                        {loading ? (
-                          <Loader2
-                            data-icon="inline-start"
-                            className="size-4 animate-spin"
-                          />
-                        ) : null}
-                        Search
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-2 sm:grid-cols-3">
-                    {Object.entries(filterOptions).map(([key, options]) => (
-                      <FilterSelect
-                        key={key}
-                        label={key}
-                        onValueChange={(value) =>
-                          updateFilter(key as keyof FilterState, value)
-                        }
-                        options={options}
-                        value={filters[key as keyof FilterState]}
-                      />
-                    ))}
-                  </div>
-
-                  {error ? (
-                    <div className="rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                      {error}
-                    </div>
-                  ) : null}
-                </CardContent>
-              </Card>
-
-              <Card className="rounded-2xl">
-                <CardHeader className="pb-1">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <CardTitle>
-                        {results.length > 0
-                          ? "Search results"
-                          : "Most viewed SOPs"}
-                      </CardTitle>
-                      <CardDescription>
-                        {loading
-                          ? "Searching published index"
-                          : `${listSource.length} visible items`}
-                      </CardDescription>
-                    </div>
-                    <Badge variant="outline">semantic-ready</Badge>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <ScrollArea className="h-[31rem] pr-3">
-                    <div className="space-y-2">
-                      {loading || booting ? (
-                        <ResultSkeleton />
-                      ) : listSource.length === 0 ? (
-                        <EmptyResults query={query} />
-                      ) : (
-                        listSource.map((item) => (
-                          <ResultButton
-                            item={item}
-                            key={item.sop_id}
-                            onClick={() => openSOP(item.sop_id)}
-                            selected={selected?.id === item.sop_id}
-                          />
-                        ))
-                      )}
-                    </div>
-                  </ScrollArea>
-                </CardContent>
-              </Card>
-            </section>
-
-            <article className="min-w-0">
-              {selected && selectedVersion ? (
-                <Card className="rounded-2xl">
-                  <CardHeader className="space-y-4">
-                    <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                      <div className="min-w-0">
-                        <div className="mb-2 flex flex-wrap items-center gap-2">
-                          <Badge variant="secondary">{selected.code}</Badge>
-                          <Badge variant="outline">
-                            v{selectedVersion.version_number}
-                          </Badge>
-                          <Badge
-                            className="bg-success text-success-foreground"
-                            variant="secondary"
-                          >
-                            published
-                          </Badge>
-                        </div>
-                        <CardTitle className="text-xl md:text-2xl">
-                          {selected.title}
-                        </CardTitle>
-                        <CardDescription className="mt-2 max-w-[72ch] text-sm leading-6">
-                          {selected.summary}
-                        </CardDescription>
-                      </div>
-
-                      <Button onClick={askAI} type="button" variant="outline">
-                        <Sparkles
-                          data-icon="inline-start"
-                          className="size-4 text-warning"
-                        />
-                        Ask AI
-                      </Button>
-                    </div>
-
-                    <div className="grid gap-2 sm:grid-cols-3">
-                      <Fact
-                        icon={FileClock}
-                        label="Updated"
-                        value={formatDate(selected.updated_at)}
-                      />
-                      <Fact
-                        icon={ShieldCheck}
-                        label="Owner"
-                        value={selected.owner_team}
-                      />
-                      <Fact
-                        icon={Check}
-                        label="Helpful"
-                        value={`${helpfulRate || 0}%`}
-                      />
-                    </div>
-                  </CardHeader>
-
-                  <CardContent className="space-y-5">
-                    <Tabs defaultValue="procedure">
-                      <TabsList className="grid w-full grid-cols-3">
-                        <TabsTrigger value="procedure">Procedure</TabsTrigger>
-                        <TabsTrigger value="macros">Macros</TabsTrigger>
-                        <TabsTrigger value="governance">Governance</TabsTrigger>
-                      </TabsList>
-
-                      <TabsContent className="mt-5 space-y-5" value="procedure">
-                        <TextBlock
-                          title="When to apply"
-                          value={selectedVersion.sections.when_to_apply}
-                        />
-                        <TextBlock
-                          title="Input requirements"
-                          value={selectedVersion.sections.input_requirements}
-                        />
-
-                        <section>
-                          <SectionTitle title="Handling checklist" />
-                          <ol className="mt-3 grid gap-2">
-                            {selectedVersion.sections.checklist.map(
-                              (step, index) => (
-                                <li
-                                  className="grid grid-cols-[2rem_minmax(0,1fr)] gap-3"
-                                  key={step}
-                                >
-                                  <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-sm font-semibold text-primary">
-                                    {index + 1}
-                                  </span>
-                                  <p className="min-w-0 rounded-xl border bg-muted/35 px-3 py-2 text-sm leading-6">
-                                    {step}
-                                  </p>
-                                </li>
-                              ),
-                            )}
-                          </ol>
-                        </section>
-
-                        <div className="grid gap-3 md:grid-cols-2">
-                          <TextBlock
-                            title="SLA"
-                            value={
-                              selectedVersion.sections.sla ??
-                              "No SLA configured."
-                            }
-                          />
-                          <TextBlock
-                            title="Escalation"
-                            value={
-                              selectedVersion.sections.escalation ??
-                              "No escalation configured."
-                            }
-                          />
-                        </div>
-                      </TabsContent>
-
-                      <TabsContent className="mt-5 space-y-3" value="macros">
-                        {selectedVersion.sections.macro_response.map(
-                          (macro) => (
-                            <div
-                              className="rounded-xl border bg-muted/25 p-3"
-                              key={macro.title}
-                            >
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <h3 className="text-sm font-semibold">
-                                    {macro.title}
-                                  </h3>
-                                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                                    {macro.content}
-                                  </p>
-                                </div>
-                                <Button
-                                  aria-label={`Copy macro ${macro.title}`}
-                                  onClick={() => copyMacro(macro)}
-                                  size="icon"
-                                  type="button"
-                                  variant="outline"
-                                >
-                                  <Copy className="size-4" />
-                                </Button>
-                              </div>
-                            </div>
-                          ),
-                        )}
-                        {copied ? (
-                          <div className="rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success">
-                            Copied: {copied}
-                          </div>
-                        ) : null}
-                        {copyError ? (
-                          <div className="rounded-xl border border-warning/25 bg-warning/10 px-3 py-2 text-sm text-warning">
-                            {copyError}
-                          </div>
-                        ) : null}
-                      </TabsContent>
-
-                      <TabsContent
-                        className="mt-5 space-y-4"
-                        value="governance"
-                      >
-                        <div className="grid gap-3 md:grid-cols-2">
-                          <GovernanceItem
-                            label="Change summary"
-                            value={selectedVersion.change_summary}
-                          />
-                          <GovernanceItem
-                            label="Version ID"
-                            value={selectedVersion.id}
-                          />
-                          <GovernanceItem
-                            label="Current version pointer"
-                            value={selected.current_version_id}
-                          />
-                          <GovernanceItem
-                            label="Case reasons"
-                            value={selected.case_reasons.join(", ")}
-                          />
-                        </div>
-
-                        <div className="flex flex-wrap gap-2">
-                          {selected.tags.map((tag) => (
-                            <Badge key={tag} variant="outline">
-                              {tag}
-                            </Badge>
-                          ))}
-                        </div>
-                      </TabsContent>
-                    </Tabs>
-
-                    {aiSuggestion ? (
-                      <AISuggestionPanel suggestion={aiSuggestion} />
-                    ) : null}
-
-                    <Separator />
-
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <p className="text-sm text-muted-foreground">
-                        Agent script:{" "}
-                        <span className="text-foreground">
-                          {selectedVersion.sections.agent_script}
-                        </span>
-                      </p>
-                      <div className="flex gap-2">
-                        <Button type="button" variant="outline">
-                          <ThumbsUp
-                            data-icon="inline-start"
-                            className="size-4"
-                          />
-                          Helpful
-                        </Button>
-                        <Button type="button" variant="outline">
-                          <ThumbsDown
-                            data-icon="inline-start"
-                            className="size-4"
-                          />
-                          Not useful
-                        </Button>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : (
-                <Card className="grid min-h-[40rem] place-items-center rounded-2xl">
-                  <CardContent className="max-w-sm text-center">
-                    <Search className="mx-auto size-9 text-muted-foreground" />
-                    <h2 className="mt-3 text-base font-semibold">
-                      Select a SOP
-                    </h2>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      Search or choose a popular SOP to inspect latest published
-                      content.
-                    </p>
-                  </CardContent>
-                </Card>
-              )}
-            </article>
-          </div>
-        </section>
-      </div>
-    </main>
-  );
-}
-
-function FilterSelect({
-  label,
-  onValueChange,
-  options,
-  value,
-}: {
-  label: string;
-  onValueChange: (value: string) => void;
-  options: string[];
-  value: string;
-}) {
-  return (
-    <div className="grid gap-1.5">
-      <label className="text-xs font-medium capitalize text-muted-foreground">
-        {label}
-      </label>
-      <Select onValueChange={onValueChange} value={value}>
-        <SelectTrigger className="w-full" size="default">
-          <SelectValue placeholder={label} />
-        </SelectTrigger>
-        <SelectContent align="start">
-          <SelectItem value="all">All {label}</SelectItem>
-          {options.map((option) => (
-            <SelectItem key={option} value={option}>
-              {option}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
-
-function ResultButton({
-  item,
-  onClick,
-  selected,
-}: {
-  item: SearchResult;
-  onClick: () => void;
-  selected: boolean;
-}) {
-  return (
-    <button
-      className={cn(
-        "w-full rounded-xl border bg-card p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
-        selected && "border-primary bg-primary/5",
-      )}
-      onClick={onClick}
-      type="button"
+    <AppShell
+      documentCount={documents.length}
+      error={error || (homepageQuery.error ? "Cannot reach the API. Check Docker Compose and port 8080." : "")}
+      latency={retrieval ? `${retrieval.latency_ms}ms` : "n/a"}
+      notice={notice}
+      onDismissError={() => setError("")}
+      onDismissNotice={() => setNotice("")}
+      onWorkspaceChange={setWorkspace}
+      synonymCount={synonyms.length}
+      workspace={workspace}
     >
-      <div className="flex items-start justify-between gap-3">
-        <h3 className="min-w-0 text-sm font-semibold leading-5">
-          {item.title}
-        </h3>
-        <Badge variant="secondary">v{item.version}</Badge>
-      </div>
-      <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
-        {item.snippet}
-      </p>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Badge variant="outline">{item.category}</Badge>
-        <Badge variant="outline">{item.vertical}</Badge>
-        <span className="text-xs text-muted-foreground">
-          {formatDate(item.updated_at)}
-        </span>
-      </div>
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
-        <div
-          className="h-full rounded-full bg-primary"
-          style={{ width: `${Math.max(item.confidence * 100, 8)}%` }}
+      {workspace === "dashboard" ? (
+        <DashboardWorkspace
+          documents={documents}
+          homepage={homepage}
+          onRunSearch={() => runSearch()}
+          onWorkspaceChange={setWorkspace}
+          query={query}
+          setQuery={setQuery}
+          synonyms={synonyms}
         />
-      </div>
-    </button>
+      ) : null}
+
+      {workspace === "lookup" ? (
+        <LookupWorkspace
+          aiSuggestion={aiSuggestion}
+          booting={homepageQuery.isLoading}
+          copied={copied}
+          copyError={copyError}
+          feedbackRate={helpfulRate}
+          filters={filters}
+          listSource={listSource}
+          loading={searchMutation.isPending}
+          onAskAI={askAI}
+          onCopyMacro={copyMacro}
+          onSelectDocumentMatch={(match) => {
+            setSelectedDocumentMatch(match);
+            setSelected(null);
+          }}
+          onOpenSOP={openSOP}
+          onRunSearch={() => runSearch()}
+          onUpdateFilter={updateFilter}
+          query={query}
+          selected={selected}
+          selectedDocumentMatch={selectedDocumentMatch}
+          selectedVersion={selected?.current_version}
+          semanticResults={semanticResults}
+          setQuery={setQuery}
+        />
+      ) : null}
+
+      {workspace === "retrieval" ? (
+        <RetrievalWorkspace
+          busy={retrievalMutation.isPending}
+          filters={filters}
+          mode={retrievalMode}
+          onModeChange={setRetrievalMode}
+          onRetrieve={() => runRetrieval()}
+          onUpdateFilter={updateFilter}
+          query={query}
+          retrieval={retrieval}
+          setQuery={setQuery}
+        />
+      ) : null}
+
+      {workspace === "documents" ? (
+        <DocumentsWorkspace
+          busyKey={busyKey || (publishMutation.isPending ? "publishing" : "")}
+          chunks={chunks}
+          chunksLoading={chunksQuery.isFetching}
+          documents={documents}
+          extractionUnits={extractionUnits}
+          extractionUnitsLoading={extractionUnitsQuery.isFetching}
+          onArchiveDocument={archiveDocument}
+          onInspectVersion={setSelectedChunkVersionId}
+          onPublishVersion={publishVersion}
+          onRefreshDocuments={() => documentsQuery.refetch()}
+          onSelectDocument={(documentId) => {
+            const document = documents.find((item) => item.document_id === documentId);
+            if (document) {
+              setSelectedDocument(document);
+              setSelectedChunkVersionId(document.latest_version_id ?? "");
+            }
+          }}
+          onUpdateExtractionUnit={updateExtractionUnit}
+          onUpload={handleUpload}
+          savingUnitId={updateExtractionUnitMutation.variables?.unitId ?? ""}
+          selectedDocument={selectedDocument}
+          selectedChunkVersionId={selectedChunkVersionId}
+          setSelectedDocument={setSelectedDocument}
+          setUpload={setUpload}
+          upload={upload}
+          versions={versions}
+        />
+      ) : null}
+
+      {workspace === "synonyms" ? (
+        <SynonymsWorkspace
+          busyKey={busyKey}
+          draft={synonymDraft}
+          onAcceptSuggestion={acceptSuggestion}
+          onCreate={createSynonymGroup}
+          onGenerateSuggestions={generateSuggestions}
+          onRefreshSuggestions={() => suggestionsQuery.refetch()}
+          onRefreshSynonyms={() => synonymsQuery.refetch()}
+          onSetStatus={(status) => setSynonymStatus(status === "all" ? "" : status)}
+          onSync={syncSynonyms}
+          onTransition={transitionSynonym}
+          setDraft={setSynonymDraft}
+          status={synonymStatus}
+          suggestions={suggestions}
+          synonyms={synonyms}
+        />
+      ) : null}
+    </AppShell>
   );
-}
-
-function AISuggestionPanel({ suggestion }: { suggestion: AISuggestion }) {
-  return (
-    <section className="rounded-2xl border border-warning/25 bg-warning/10 p-4">
-      <div className="flex items-center gap-2">
-        <Bot className="size-4 text-warning" />
-        <h3 className="text-sm font-semibold">Grounded AI suggestion</h3>
-      </div>
-      <p className="mt-2 text-sm leading-6">{suggestion.answer}</p>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {(suggestion.citations ?? []).map((citation) => (
-          <Badge
-            key={`${citation.version_id}-${citation.section}`}
-            variant="outline"
-          >
-            {citation.sop_id} / {citation.section}
-          </Badge>
-        ))}
-        {(suggestion.warnings ?? []).map((warning) => (
-          <Badge
-            className="border-warning/30 text-warning"
-            key={warning}
-            variant="outline"
-          >
-            {warning}
-          </Badge>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="rounded-xl border bg-card px-3 py-2">
-      <div className="text-base font-semibold tabular-nums">{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-    </div>
-  );
-}
-
-function Fact({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: typeof FileClock;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-xl border bg-muted/25 p-3">
-      <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-        <Icon className="size-3.5" />
-        {label}
-      </div>
-      <p className="mt-1 truncate text-sm font-semibold">{value}</p>
-    </div>
-  );
-}
-
-function TextBlock({ title, value }: { title: string; value: string }) {
-  return (
-    <section>
-      <SectionTitle title={title} />
-      <p className="mt-2 rounded-xl border bg-muted/25 px-3 py-2 text-sm leading-6 text-muted-foreground">
-        {value}
-      </p>
-    </section>
-  );
-}
-
-function SectionTitle({ title }: { title: string }) {
-  return <h3 className="text-sm font-semibold">{title}</h3>;
-}
-
-function GovernanceItem({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border bg-muted/25 p-3">
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className="mt-1 break-words text-sm">{value}</p>
-    </div>
-  );
-}
-
-function EmptyResults({ query }: { query: string }) {
-  return (
-    <div className="rounded-xl border border-dashed p-6 text-center">
-      <Search className="mx-auto size-8 text-muted-foreground" />
-      <h3 className="mt-3 text-sm font-semibold">No published SOP matched</h3>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Try a tag, CRM case reason, or a shorter phrase for{" "}
-        <span className="font-medium text-foreground">{query}</span>.
-      </p>
-    </div>
-  );
-}
-
-function ResultSkeleton() {
-  return (
-    <>
-      {[0, 1, 2].map((item) => (
-        <div className="rounded-xl border p-3" key={item}>
-          <Skeleton className="h-4 w-3/4" />
-          <Skeleton className="mt-3 h-3 w-full" />
-          <Skeleton className="mt-2 h-3 w-2/3" />
-          <div className="mt-4 flex gap-2">
-            <Skeleton className="h-5 w-16 rounded-full" />
-            <Skeleton className="h-5 w-20 rounded-full" />
-          </div>
-        </div>
-      ))}
-    </>
-  );
-}
-
-function toSearchResult(sop: SOP): SearchResult {
-  return {
-    sop_id: sop.id,
-    title: sop.title,
-    snippet: sop.summary,
-    category: sop.category,
-    audience: sop.audience,
-    vertical: sop.vertical,
-    tags: sop.tags,
-    updated_at: sop.updated_at,
-    version: sop.current_version.version_number,
-    confidence: 0.8,
-  };
-}
-
-function compactFilters(filters: FilterState) {
-  return {
-    audience: filters.audience === "all" ? [] : [filters.audience],
-    vertical: filters.vertical === "all" ? [] : [filters.vertical],
-    category: filters.category === "all" ? [] : [filters.category],
-  };
-}
-
-function sumViews(sops?: SOP[]) {
-  return sops?.reduce((sum, sop) => sum + sop.analytics.views, 0) ?? 0;
-}
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "2-digit",
-    year: "numeric",
-  }).format(new Date(value));
 }

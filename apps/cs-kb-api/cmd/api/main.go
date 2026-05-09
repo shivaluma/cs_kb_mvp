@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"time"
@@ -12,7 +13,11 @@ import (
 
 func main() {
 	cfg := config.Load()
-	store := service.NewMemoryStore()
+	store, err := service.NewStore(context.Background(), cfg)
+	if err != nil {
+		log.Fatalf("store init failed: %v", err)
+	}
+	defer store.Close()
 	handler := apihttp.NewHandler(store, cfg)
 
 	server := &http.Server{

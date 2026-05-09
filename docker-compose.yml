@@ -33,6 +33,9 @@ services:
       AI_ADDR: 0.0.0.0
       DATABASE_URL: ${DATABASE_URL:-postgres://cs_kb:cs_kb@postgres:5432/cs_kb?sslmode=disable}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/auto}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
     ports:
       - "${AI_PORT:-8090}:8090"
     depends_on:

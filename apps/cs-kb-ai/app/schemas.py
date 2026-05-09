@@ -9,6 +9,16 @@ from pydantic import BaseModel, Field
 DocumentStatus = Literal["active", "archived"]
 VersionStatus = Literal["draft", "published", "archived"]
 RetrievalMode = Literal["lexical", "vector", "hybrid"]
+DocumentType = Literal[
+    "text_sop",
+    "policy_table",
+    "workflow_diagram",
+    "asset_sop",
+    "macro_script",
+    "training_material",
+    "unknown",
+]
+ReviewStatus = Literal["needs_review", "reviewed", "approved"]
 SynonymType = Literal["regular", "one_way", "typo_correction", "placeholder"]
 SynonymStatus = Literal["draft", "in_review", "active", "archived", "rejected"]
 SuggestionStatus = Literal["pending", "accepted", "rejected", "archived"]
@@ -38,6 +48,10 @@ class DocumentMetadata(BaseModel):
     case_reasons: list[str] = Field(default_factory=list)
     owner_team: str = ""
     source: str = "upload"
+    document_type: DocumentType = "unknown"
+    source_type: str = "upload"
+    review_status: ReviewStatus = "needs_review"
+    extraction_confidence: float = 0.0
 
 
 class DocumentVersionResponse(BaseModel):
@@ -49,6 +63,9 @@ class DocumentVersionResponse(BaseModel):
     status: VersionStatus
     chunk_count: int
     checksum: str
+    document_type: DocumentType = "unknown"
+    review_status: ReviewStatus = "needs_review"
+    extraction_confidence: float = 0.0
     metadata: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
@@ -62,6 +79,9 @@ class DocumentSummary(BaseModel):
     latest_version_id: Optional[str] = None
     latest_version_number: Optional[int] = None
     latest_version_status: Optional[VersionStatus] = None
+    latest_document_type: Optional[DocumentType] = None
+    latest_review_status: Optional[ReviewStatus] = None
+    latest_extraction_confidence: Optional[float] = None
     updated_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -73,9 +93,63 @@ class VersionSummary(BaseModel):
     status: VersionStatus
     checksum: str
     chunk_count: int
+    document_type: DocumentType = "unknown"
+    review_status: ReviewStatus = "needs_review"
+    extraction_confidence: float = 0.0
     change_summary: str
     published_at: Optional[datetime] = None
     archived_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class DocumentChunkSummary(BaseModel):
+    chunk_id: str
+    document_id: str
+    version_id: str
+    chunk_index: int
+    section: str
+    heading: str = ""
+    content: str
+    token_count: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ExtractionUnit(BaseModel):
+    unit_id: str
+    document_id: str
+    version_id: str
+    unit_index: int
+    unit_type: str
+    title: str
+    content: str
+    source_sheet: str = ""
+    source_row: int | None = None
+    source_page: int | None = None
+    source_bbox: list[float] = Field(default_factory=list)
+    confidence: float = 0.0
+    review_status: ReviewStatus = "needs_review"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtractionUnitUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=1)
+    unit_type: str = Field(min_length=1, max_length=80)
+    confidence: float = Field(default=0.75, ge=0, le=1)
+    review_status: ReviewStatus = "reviewed"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    actor: str = "cs-ops-ui"
+
+
+class VersionRawTextResponse(BaseModel):
+    version_id: str
+    document_id: str
+    title: str
+    version_number: int
+    status: VersionStatus
+    raw_text: str
+    chunk_count: int
     created_at: datetime
 
 

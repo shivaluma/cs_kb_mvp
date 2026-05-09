@@ -6,12 +6,16 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 from app import repository
+from app.embedding import embed_text
 from app.ingestion import prepare_document_version
 from app.retrieval import retrieve
 from app.schemas import (
     DocumentMetadata,
+    DocumentChunkSummary,
     DocumentSummary,
     DocumentVersionResponse,
+    ExtractionUnit,
+    ExtractionUnitUpdateRequest,
     IndexSOPVersionRequest,
     RetrievalFilters,
     RetrievalRequest,
@@ -26,6 +30,7 @@ from app.schemas import (
     SynonymSuggestion,
     SynonymSuggestionAcceptRequest,
     SynonymSuggestionGenerateRequest,
+    VersionRawTextResponse,
     VersionSummary,
 )
 from app.text_processing import expand_query
@@ -49,7 +54,7 @@ async def upload_document(
     file: UploadFile = File(...),
     external_id: str = Form(""),
     title: str = Form(""),
-    status: str = Form("published"),
+    status: str = Form("draft"),
     metadata: str = Form("{}"),
     created_by: str = Form("system"),
     change_summary: str = Form(""),
@@ -62,7 +67,7 @@ async def upload_document(
     if not data:
         raise HTTPException(status_code=400, detail="empty_file")
 
-    raw_text, digest, chunks, warnings = prepare_document_version(
+    raw_text, digest, chunks, warnings, enrichment = prepare_document_version(
         filename=file.filename or "document.txt",
         content_type=file.content_type or "text/plain",
         data=data,
@@ -71,6 +76,7 @@ async def upload_document(
     if not chunks:
         raise HTTPException(status_code=400, detail={"error": "no_chunks_created", "warnings": warnings})
 
+    parsed_metadata = parsed_metadata.model_copy(update=enrichment)
     version = repository.create_document_version(
         external_id=external_id or digest,
         title=title or file.filename or digest,
@@ -83,6 +89,9 @@ async def upload_document(
         status=status,
         created_by=created_by,
         change_summary=change_summary,
+        document_type=enrichment["document_type"],
+        review_status="approved" if status == "published" else enrichment["review_status"],
+        extraction_confidence=enrichment["extraction_confidence"],
     )
     return DocumentVersionResponse(**version, warnings=warnings)
 
@@ -95,6 +104,45 @@ def list_documents() -> list[DocumentSummary]:
 @app.get("/ai/v1/documents/{document_id}/versions", response_model=list[VersionSummary])
 def list_document_versions(document_id: str) -> list[VersionSummary]:
     return [VersionSummary(**row) for row in repository.list_versions(document_id)]
+
+
+@app.get("/ai/v1/documents/{document_id}/chunks", response_model=list[DocumentChunkSummary])
+def list_document_chunks(document_id: str, version_id: str = "") -> list[DocumentChunkSummary]:
+    return [DocumentChunkSummary(**row) for row in repository.list_chunks(document_id, version_id)]
+
+
+@app.get("/ai/v1/documents/{document_id}/extraction-units", response_model=list[ExtractionUnit])
+def list_document_extraction_units(document_id: str, version_id: str = "") -> list[ExtractionUnit]:
+    return [ExtractionUnit(**row) for row in repository.list_extraction_units(document_id, version_id)]
+
+
+@app.patch("/ai/v1/extraction-units/{unit_id}", response_model=ExtractionUnit)
+def update_extraction_unit(unit_id: str, request: ExtractionUnitUpdateRequest) -> ExtractionUnit:
+    try:
+        unit = repository.update_extraction_unit(
+            unit_id=unit_id,
+            title=request.title,
+            content=request.content,
+            unit_type=request.unit_type,
+            confidence=request.confidence,
+            review_status=request.review_status,
+            metadata=request.metadata,
+            actor=request.actor,
+            embedding=embed_text(" ".join([request.title, request.content])),
+        )
+        return ExtractionUnit(**unit)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/ai/v1/versions/{version_id}/raw", response_model=VersionRawTextResponse)
+def get_version_raw_text(version_id: str) -> VersionRawTextResponse:
+    try:
+        return VersionRawTextResponse(**repository.version_raw_text(version_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/ai/v1/versions/{version_id}/publish")
@@ -214,12 +262,13 @@ def index_sop_version(request: IndexSOPVersionRequest) -> dict[str, Any]:
         tags=request.metadata.tags,
         source="sop_version",
     )
-    _, digest, chunks, warnings = prepare_document_version(
+    _, digest, chunks, warnings, enrichment = prepare_document_version(
         filename=f"{request.sop_id}-{request.version_id}.txt",
         content_type="text/plain",
         data=data,
         metadata=metadata,
     )
+    metadata = metadata.model_copy(update=enrichment)
     version = repository.create_document_version(
         external_id=f"sop:{request.sop_id}",
         title=request.title,
@@ -232,6 +281,9 @@ def index_sop_version(request: IndexSOPVersionRequest) -> dict[str, Any]:
         status="published",
         created_by="api",
         change_summary=f"Indexed SOP version {request.version_id}",
+        document_type=enrichment["document_type"],
+        review_status="approved",
+        extraction_confidence=enrichment["extraction_confidence"],
     )
     return {"indexed": True, **version, "warnings": warnings}
 

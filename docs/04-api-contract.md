@@ -70,11 +70,13 @@ AI service internal base path: `/ai/v1`
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/documents` | List indexed documents |
-| `POST` | `/documents/upload` | Upload PDF/DOCX/TXT/MD, extract text, chunk, embed, and create version |
+| `POST` | `/documents/upload` | Upload messy source files, classify, extract draft units, chunk, embed, and create a draft/published version |
 | `GET` | `/documents/{id}/versions` | List document versions |
+| `GET` | `/documents/{id}/extraction-units` | List classified extraction units for curation review. Workflow PDFs can produce `decision_point`, `workflow_step`, `macro_script`, `operational_note`, and `security_note` units |
+| `PATCH` | `/extraction-units/{id}` | Update a draft extraction unit title, content, unit type, confidence, review status, metadata, and regenerated embedding |
 | `POST` | `/documents/{id}/archive` | Archive document and hide from retrieval |
 | `POST` | `/versions/{id}/publish` | Publish version and archive previous published version |
-| `POST` | `/retrieve` | Hybrid retrieval using lexical + pgvector + RRF |
+| `POST` | `/retrieve` | Hybrid retrieval using lexical + pgvector + RRF + workflow-aware reranking |
 | `GET` | `/search/taxonomy/intents` | List controlled search intents |
 | `GET` | `/search/synonyms` | List synonym groups |
 | `POST` | `/search/synonyms` | Create synonym group draft |
