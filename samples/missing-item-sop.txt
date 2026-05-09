@@ -1,0 +1,24 @@
+# Food Missing Item SOP
+
+When to apply:
+Use this SOP when a customer reports that an order is missing an item, has the wrong item, or is missing topping in a food order.
+
+Input requirements:
+The agent must check order ID, delivered item list, customer evidence, delivery timestamp, merchant note, and item value before promising any refund.
+
+Handling checklist:
+1. Verify the order status is completed.
+2. Compare the customer's report with the order detail.
+3. Ask for a photo if evidence is missing.
+4. Check merchant note or support history for packaging confirmation.
+5. If the missing item is confirmed, refund only the value of the missing item according to the approved refund policy.
+6. If evidence is unclear or refund value exceeds threshold, escalate to CS Lead.
+
+Macro response:
+Em da tiep nhan thong tin don hang cua anh/chi va se kiem tra voi cac ben lien quan truoc khi cap nhat huong xu ly.
+
+SLA:
+Update customer within 24 hours when merchant verification is required.
+
+Escalation:
+Escalate when the refund value exceeds threshold, customer has repeated dispute history, or policy condition is unclear.

@@ -1,0 +1,75 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: ./apps/cs-kb-web/Dockerfile
+    environment:
+      VITE_API_BASE_URL: http://localhost:${API_PORT:-8080}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: ./apps/cs-kb-api
+    environment:
+      API_ADDR: :8080
+      DATABASE_URL: ${DATABASE_URL:-postgres://cs_kb:cs_kb@postgres:5432/cs_kb?sslmode=disable}
+      MEILI_HOST: ${MEILI_HOST:-http://meilisearch:7700}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-dev_master_key}
+      AI_BASE_URL: ${AI_BASE_URL:-http://ai:8090}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      - postgres
+      - meilisearch
+      - ai
+
+  ai:
+    build:
+      context: ./apps/cs-kb-ai
+    environment:
+      AI_ADDR: 0.0.0.0
+      DATABASE_URL: ${DATABASE_URL:-postgres://cs_kb:cs_kb@postgres:5432/cs_kb?sslmode=disable}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+    ports:
+      - "${AI_PORT:-8090}:8090"
+    depends_on:
+      - postgres
+      - qdrant
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cs_kb}
+      POSTGRES_USER: ${POSTGRES_USER:-cs_kb}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cs_kb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.10
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-dev_master_key}
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7700:7700"
+    volumes:
+      - meili_data:/meili_data
+
+  qdrant:
+    image: qdrant/qdrant:v1.11.5
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  postgres_data:
+  meili_data:
+  qdrant_data:

@@ -1,0 +1,12 @@
+# Food Missing Item SOP Draft Override
+
+When to apply:
+Use this SOP draft for a special pineapple override test case.
+
+Handling checklist:
+1. Verify the pineapple override marker.
+2. Confirm this content is not searchable while the version is draft.
+3. After publishing, retrieval should cite version 3 only.
+
+Macro response:
+This pineapple override macro exists only for retrieval lifecycle verification.
