@@ -577,6 +577,16 @@ class ExtractionUnitUpdateRequest(BaseModel):
     actor: str = "cs-ops-ui"
 
 
+class ExtractionUnitCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=1)
+    unit_type: str = Field(min_length=1, max_length=80)
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    review_status: ReviewStatus = "needs_review"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    actor: str = "cs-ops-ui"
+
+
 class VersionRawTextResponse(BaseModel):
     version_id: str
     document_id: str

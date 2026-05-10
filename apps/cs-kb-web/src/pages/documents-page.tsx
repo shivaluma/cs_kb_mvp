@@ -5,6 +5,7 @@ import { defaultUpload } from "@/constants";
 import {
   useArchiveDocument,
   useBulkReviewVersion,
+  useCreateExtractionUnit,
   useDocumentChunks,
   useDocumentMetadataPreview,
   useDocuments,
@@ -19,7 +20,7 @@ import {
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { fileExternalId, splitList } from "@/lib/format";
 import { useFeedback } from "@/providers/feedback-context";
-import type { DocumentSummary, ExtractionUnit, ExtractionUnitUpdate, UploadState } from "@/types";
+import type { DocumentSummary, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, UploadState } from "@/types";
 
 const DocumentsWorkspace = lazy(() =>
   import("@/workspaces/documents-workspace").then((module) => ({ default: module.DocumentsWorkspace })),
@@ -57,6 +58,7 @@ export function DocumentsPage() {
   const metadataPreviewMutation = useDocumentMetadataPreview();
   const publishMutation = usePublishVersion();
   const bulkReviewMutation = useBulkReviewVersion();
+  const createExtractionUnitMutation = useCreateExtractionUnit();
   const updateExtractionUnitMutation = useUpdateExtractionUnit();
   const archiveDocumentMutation = useArchiveDocument();
 
@@ -246,6 +248,16 @@ export function DocumentsPage() {
     );
   }
 
+  function createExtractionUnit(versionId: string, unit: ExtractionUnitCreate) {
+    createExtractionUnitMutation.mutate(
+      { versionId, unit },
+      {
+        onSuccess: () => reportNotice(`Created ${unit.unit_type} review stub. Fill it from source evidence before approval.`),
+        onError: () => reportError("Could not create this workflow unit. Only editable draft versions can be changed."),
+      },
+    );
+  }
+
   function archiveDocument(document: DocumentSummary) {
     const confirmed = window.confirm(`Archive "${document.title}"? It will be removed from active retrieval and Meilisearch.`);
     if (!confirmed) {
@@ -270,6 +282,7 @@ export function DocumentsPage() {
     archiveDocumentMutation.isPending ? "archive-document" :
     publishMutation.isPending ? "publishing" :
     bulkReviewMutation.isPending ? "bulk-review" :
+    createExtractionUnitMutation.isPending ? "create-unit" :
     "";
 
   return (
@@ -284,6 +297,7 @@ export function DocumentsPage() {
         metadataPreview={metadataPreviewMutation.data ?? null}
         onArchiveDocument={archiveDocument}
         onBulkReviewVersion={bulkReviewVersion}
+        onCreateExtractionUnit={createExtractionUnit}
         onFileSelected={previewFileMetadata}
         onInspectVersion={(versionId) => setParams({ version: versionId })}
         onPublishVersion={publishVersion}

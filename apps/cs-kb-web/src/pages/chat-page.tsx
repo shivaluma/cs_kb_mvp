@@ -3,11 +3,11 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { RouteLoading } from "@/components/route-loading";
 import { workspacePaths } from "@/constants";
-import { useGroundedChat } from "@/hooks/api/chat";
+import { useChatModelRoutes, useGroundedChat } from "@/hooks/api/chat";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { compactFilters } from "@/lib/format";
 import { useFeedback } from "@/providers/feedback-context";
-import type { ChatMessage, ChatThreadMessage, FilterState, RetrievalResult } from "@/types";
+import type { ChatMessage, ChatModelRoute, ChatThreadMessage, FilterState, RetrievalResult } from "@/types";
 
 const ChatWorkspace = lazy(() =>
   import("@/workspaces/chat-workspace").then((module) => ({ default: module.ChatWorkspace })),
@@ -25,8 +25,10 @@ export function ChatPage() {
   const { reportError, reportNotice } = useFeedback();
   const initialQuestion = getParam("q", "");
   const initialQuestionSent = useRef(false);
+  const chatModelRoutesQuery = useChatModelRoutes();
   const groundedChatMutation = useGroundedChat();
   const [messages, setMessages] = useState<ChatThreadMessage[]>([]);
+  const [modelRoute, setModelRoute] = useState<ChatModelRoute>("auto");
 
   useEffect(() => {
     if (!initialQuestion || initialQuestionSent.current) {
@@ -65,6 +67,7 @@ export function ChatPage() {
         question: trimmed,
         limit: 6,
         conversation,
+        model_route: modelRoute,
         filters: {
           ...compactFilters(chatFilters),
           status: ["published"],
@@ -136,9 +139,13 @@ export function ChatPage() {
     <Suspense fallback={<RouteLoading label="Loading SOP chat" />}>
       <ChatWorkspace
         busy={groundedChatMutation.isPending}
+        fallbackModel={chatModelRoutesQuery.data?.fallback_model}
         messages={messages}
+        modelRoutes={chatModelRoutesQuery.data?.routes}
+        modelRoute={modelRoute}
         onAsk={askGroundedChat}
         onCopy={copyText}
+        onModelRouteChange={setModelRoute}
         onOpenDocument={openDocumentSource}
         onOpenQuickSource={openQuickSource}
       />

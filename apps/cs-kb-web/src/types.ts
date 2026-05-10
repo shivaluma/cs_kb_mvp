@@ -116,6 +116,21 @@ export type ChatMessage = {
   content: string;
 };
 
+export type ChatModelRoute = "auto" | "simple" | "policy" | "high_risk" | "complex";
+
+export type ChatModelRouteConfig = {
+  route: ChatModelRoute;
+  label: string;
+  model: string;
+  description: string;
+};
+
+export type ChatModelRoutesResponse = {
+  default_route: ChatModelRoute;
+  routes: ChatModelRouteConfig[];
+  fallback_model: string;
+};
+
 export type GroundedChatResponse = {
   question: string;
   answer: string;
@@ -250,6 +265,8 @@ export type ExtractionUnitUpdate = {
   metadata: Record<string, unknown>;
   actor: string;
 };
+
+export type ExtractionUnitCreate = ExtractionUnitUpdate;
 
 export type DocumentChunk = {
   chunk_id: string;

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Archive, BookOpen, CheckCircle2, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, Network, RefreshCw, ShieldCheck, TriangleAlert, Upload, WandSparkles } from "lucide-react";
+import { Archive, BookOpen, CheckCircle2, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, Network, Plus, RefreshCw, ShieldCheck, TriangleAlert, Upload, WandSparkles } from "lucide-react";
 
 import { DocumentFact, ReadinessCheck } from "@/components/operations";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +12,7 @@ import { ExtractionReviewEditor } from "@/components/extraction-review-editor";
 import { API_BASE_URL } from "@/config";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionUnit, ExtractionUnitUpdate, UploadState, VersionRawText, VersionSummary } from "@/types";
+import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, UploadState, VersionRawText, VersionSummary } from "@/types";
 
 type WorkflowGraphMetadata = {
   workflow_id?: string;
@@ -30,6 +30,17 @@ type WorkflowGraphMetadata = {
 type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
 type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
 type ReviewFilter = "needs_review" | "reviewed" | "approved" | "atomic" | "all";
+type RequiredWorkflowUnit = {
+  key: string;
+  label: string;
+  types: string[];
+};
+type WorkflowRequirementStatus = RequiredWorkflowUnit & {
+  candidateUnits: ExtractionUnit[];
+  matchingUnits: ExtractionUnit[];
+  reviewedUnits: ExtractionUnit[];
+  status: "missing" | "needs_review" | "ready";
+};
 
 export function DocumentsWorkspace({
   busyKey,
@@ -40,6 +51,7 @@ export function DocumentsWorkspace({
   extractionUnitsLoading,
   onArchiveDocument,
   onBulkReviewVersion,
+  onCreateExtractionUnit,
   onInspectVersion,
   onFileSelected,
   onPublishVersion,
@@ -66,6 +78,7 @@ export function DocumentsWorkspace({
   extractionUnitsLoading: boolean;
   onArchiveDocument: (document: DocumentSummary) => void;
   onBulkReviewVersion: (versionId: string, scope?: "all" | "atomic", reviewStatus?: "reviewed" | "approved", force?: boolean) => void;
+  onCreateExtractionUnit: (versionId: string, unit: ExtractionUnitCreate) => void;
   onInspectVersion: (versionId: string) => void;
   onFileSelected: (file: File | null) => void;
   onPublishVersion: (versionId: string) => void;
@@ -134,6 +147,18 @@ export function DocumentsWorkspace({
   const missingWorkflowUnits = requiredWorkflowUnits.filter(
     (required) => !extractionUnits.some((unit) => required.types.includes(unit.unit_type) && unit.review_status !== "needs_review"),
   );
+  const workflowRequirementStatuses = requiredWorkflowUnits.map((required) => {
+    const matchingUnits = extractionUnits.filter((unit) => required.types.includes(unit.unit_type));
+    const reviewedUnits = matchingUnits.filter((unit) => unit.review_status !== "needs_review");
+    const status: WorkflowRequirementStatus["status"] = reviewedUnits.length ? "ready" : matchingUnits.length ? "needs_review" : "missing";
+    return {
+      ...required,
+      candidateUnits: candidateUnitsForRequirement(required, atomicUnits),
+      matchingUnits,
+      reviewedUnits,
+      status,
+    };
+  });
   const validationRuleCount = extractionUnits.filter((unit) => unit.unit_type === "validation_rule").length;
   const reviewStats = extractionUnits.reduce(
     (acc, unit) => {
@@ -675,6 +700,27 @@ export function DocumentsWorkspace({
           </CardContent>
         </Card>
 
+        {requiredWorkflowUnits.length ? (
+          <WorkflowRequirementsPanel
+            busy={busyKey === "create-unit"}
+            canEdit={canEditSelectedVersion}
+            defaultEffectiveFrom={defaultEffectiveFrom}
+            onCreate={(requirement) => {
+              if (!selectedVersion) {
+                return;
+              }
+              onCreateExtractionUnit(selectedVersion.version_id, buildWorkflowRequirementStub(requirement, selectedDocument, selectedVersion, defaultEffectiveFrom));
+              setReviewFilter("needs_review");
+            }}
+            onConvertCandidate={(unit, requirement) => {
+              onUpdateExtractionUnit(unit, buildWorkflowRequirementConversion(unit, requirement, defaultEffectiveFrom));
+              setReviewFilter("needs_review");
+            }}
+            onShowReviewQueue={() => setReviewFilter("needs_review")}
+            requirements={workflowRequirementStatuses}
+          />
+        ) : null}
+
         {workflowRequiresGraph ? (
           <WorkflowGraphPanel
             graph={workflowGraph}
@@ -1037,6 +1083,101 @@ function ValidationPill({ text, valid }: { text: string; valid: boolean }) {
     <div className={cn("rounded-lg border px-2 py-1 text-[11px]", valid ? "bg-secondary text-secondary-foreground" : "border-destructive/30 bg-destructive/10 text-destructive")}>
       {valid ? "OK" : "Block"}: {text}
     </div>
+  );
+}
+
+function WorkflowRequirementsPanel({
+  busy,
+  canEdit,
+  defaultEffectiveFrom,
+  onConvertCandidate,
+  onCreate,
+  onShowReviewQueue,
+  requirements,
+}: {
+  busy: boolean;
+  canEdit: boolean;
+  defaultEffectiveFrom: string;
+  onConvertCandidate: (unit: ExtractionUnit, requirement: RequiredWorkflowUnit) => void;
+  onCreate: (requirement: RequiredWorkflowUnit) => void;
+  onShowReviewQueue: () => void;
+  requirements: WorkflowRequirementStatus[];
+}) {
+  const missingCount = requirements.filter((requirement) => requirement.status !== "ready").length;
+  return (
+    <Card className="rounded-xl">
+      <CardHeader className="border-b pb-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle>Required workflow units</CardTitle>
+            <CardDescription>
+              Review these workflow-specific units before publish. Missing items can be created as review stubs, then filled from source evidence.
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={missingCount ? "destructive" : "secondary"}>
+              {missingCount ? `${missingCount} need action` : "ready"}
+            </Badge>
+            <Badge variant="outline">effective {defaultEffectiveFrom}</Badge>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-3 pt-4">
+        {requirements.map((requirement) => {
+          const candidate = requirement.candidateUnits[0];
+          const needsReview = requirement.status === "needs_review";
+          const missing = requirement.status === "missing";
+          return (
+            <article className="rounded-xl border bg-muted/10 p-3" key={requirement.key}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={requirement.status === "ready" ? "secondary" : requirement.status === "needs_review" ? "outline" : "destructive"}>
+                      {requirement.status === "ready" ? "reviewed" : requirement.status === "needs_review" ? "needs review" : "missing"}
+                    </Badge>
+                    <Badge variant="outline">{requirement.key}</Badge>
+                  </div>
+                  <h3 className="mt-2 text-sm font-semibold">{requirement.label}</h3>
+                  <p className="mt-1 max-w-[72ch] text-xs leading-5 text-muted-foreground">
+                    {workflowRequirementGuidance(requirement.key)}
+                  </p>
+                  {candidate && missing ? (
+                    <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                      Candidate source: <span className="font-medium text-foreground">{candidate.title}</span>
+                    </p>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {needsReview ? (
+                    <Button onClick={onShowReviewQueue} size="sm" type="button" variant="outline">
+                      Review existing
+                    </Button>
+                  ) : null}
+                  {missing && candidate ? (
+                    <Button
+                      disabled={!canEdit}
+                      onClick={() => onConvertCandidate(candidate, requirement)}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      <WandSparkles data-icon="inline-start" className="size-4" />
+                      Prepare candidate
+                    </Button>
+                  ) : null}
+                  {missing ? (
+                    <Button disabled={!canEdit || busy} onClick={() => onCreate(requirement)} size="sm" type="button" variant="secondary">
+                      {busy ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Plus data-icon="inline-start" className="size-4" />}
+                      Create review stub
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1711,6 +1852,96 @@ function requiredUnitTypesFromExtraction(...units: Array<ExtractionUnit | undefi
     label: readableUnitType(unitType),
     types: unitType === "decision_rule" ? ["decision_rule", "decision_point"] : [unitType],
   }));
+}
+
+function candidateUnitsForRequirement(required: RequiredWorkflowUnit, units: ExtractionUnit[]) {
+  const tokens = requirementTokens(required);
+  return units
+    .filter((unit) => !required.types.includes(unit.unit_type))
+    .map((unit) => {
+      const haystack = normalizeWorkflowKey(`${unit.unit_type} ${unit.title} ${unit.content} ${JSON.stringify(unit.metadata)}`);
+      const tokenScore = tokens.reduce((score, token) => score + (haystack.includes(token) ? 1 : 0), 0);
+      const candidateBoost = unit.unit_type.startsWith("candidate_") || unit.review_status === "needs_review" ? 1 : 0;
+      return { score: tokenScore + candidateBoost, unit };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.unit.unit_index - right.unit.unit_index)
+    .slice(0, 3)
+    .map((item) => item.unit);
+}
+
+function requirementTokens(required: RequiredWorkflowUnit) {
+  const base = `${required.key} ${required.label}`;
+  return normalizeWorkflowKey(base)
+    .split(" ")
+    .filter((token) => token.length >= 4);
+}
+
+function buildWorkflowRequirementConversion(
+  unit: ExtractionUnit,
+  requirement: RequiredWorkflowUnit,
+  defaultEffectiveFrom: string,
+): ExtractionUnitUpdate {
+  return {
+    title: unit.title.trim() || requirement.label,
+    content: unit.content.trim(),
+    unit_type: requirement.key,
+    confidence: Math.max(0.55, Number(unit.confidence) || 0.55),
+    review_status: "needs_review",
+    actor: "cs-ops-ui",
+    metadata: {
+      ...unit.metadata,
+      converted_from_unit_type: unit.unit_type,
+      effective_from: String(unit.metadata.effective_from ?? defaultEffectiveFrom),
+      required_workflow_unit: true,
+      required_workflow_unit_key: requirement.key,
+      review_status: "needs_review",
+      unit_type: requirement.key,
+    },
+  };
+}
+
+function buildWorkflowRequirementStub(
+  requirement: RequiredWorkflowUnit,
+  selectedDocument: DocumentSummary | null,
+  selectedVersion: VersionSummary,
+  defaultEffectiveFrom: string,
+): ExtractionUnitCreate {
+  const isWorkflow = selectedDocument?.latest_document_type === "workflow_diagram";
+  return {
+    title: requirement.label,
+    content: `TODO: Curate ${requirement.label} from the source evidence before approval. Do not publish this placeholder.`,
+    unit_type: requirement.key,
+    confidence: 0.5,
+    review_status: "needs_review",
+    actor: "cs-ops-ui",
+    metadata: {
+      created_from_readiness_panel: true,
+      document_type: selectedDocument?.latest_document_type ?? selectedVersion.document_type ?? "workflow_diagram",
+      effective_from: defaultEffectiveFrom,
+      manual_curation_status: "created_stub",
+      required_workflow_unit: true,
+      required_workflow_unit_key: requirement.key,
+      review_status: "needs_review",
+      source_evidence_only: true,
+      source_page: isWorkflow ? 1 : undefined,
+      page_number: isWorkflow ? 1 : undefined,
+      source_ref_acknowledged: false,
+      source_ref_quality: isWorkflow ? "page_only" : "none",
+      unit_type: requirement.key,
+    },
+  };
+}
+
+function workflowRequirementGuidance(unitType: string) {
+  const guidance: Record<string, string> = {
+    workflow_overview: "Short document-level workflow summary for quick orientation. It should not replace the full SOP page.",
+    verification_dependency: "Dependency or prerequisite evidence, for example which source rule, account verification rule, or related policy must be checked first.",
+    decision_point: "A decision question with clear branch outcomes. For workflow diagrams, Yes/No paths should be human-confirmed.",
+    decision_rule: "A decision question with clear branch outcomes. For workflow diagrams, Yes/No paths should be human-confirmed.",
+    related_document: "Related SOP, policy, source file, or dependency that an agent or lead must open for the complete context.",
+  };
+  return guidance[unitType] ?? "Required by extraction metadata for this workflow. Curate it from source evidence, then mark reviewed or approved.";
 }
 
 function collectRequiredUnitTypes(value: unknown, output: Set<string>) {

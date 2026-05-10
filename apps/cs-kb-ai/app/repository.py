@@ -1515,6 +1515,139 @@ def update_extraction_unit(
     )
 
 
+def create_extraction_unit(
+    *,
+    version_id: str,
+    title: str,
+    content: str,
+    unit_type: str,
+    confidence: float,
+    review_status: str,
+    metadata: dict[str, Any],
+    actor: str,
+    embedding: list[float],
+) -> dict[str, Any]:
+    with connection() as conn:
+        with conn.transaction():
+            conn.row_factory = dict_row
+            version = conn.execute(
+                """
+                SELECT v.id::text AS version_id,
+                       v.document_id::text AS document_id,
+                       v.status AS version_status,
+                       v.document_type,
+                       v.review_status,
+                       v.extraction_confidence::float AS extraction_confidence
+                FROM ai_document_versions v
+                WHERE v.id = %s
+                FOR UPDATE
+                """,
+                (version_id,),
+            ).fetchone()
+            if not version:
+                raise LookupError("document_version_not_found")
+            if version["version_status"] != "draft":
+                raise ValueError("published_or_archived_versions_are_immutable")
+
+            next_index = conn.execute(
+                "SELECT COALESCE(MAX(chunk_index), -1) + 1 AS next_index FROM ai_chunks WHERE version_id = %s",
+                (version_id,),
+            ).fetchone()["next_index"]
+            unit_id = str(uuid.uuid4())
+            merged_metadata = {
+                **(metadata or {}),
+                "unit_type": unit_type,
+                "confidence": confidence,
+                "review_status": review_status,
+                "reviewed_by": actor,
+                "manual_curation_status": "created_stub",
+                "source_evidence_only": True,
+                "publish_blocked": True,
+                "publish_blocked_reason": "manual_review_required",
+            }
+            conn.execute(
+                """
+                INSERT INTO ai_chunks (
+                  id, document_id, version_id, chunk_index, section, heading, content,
+                  token_count, embedding, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s::jsonb)
+                """,
+                (
+                    unit_id,
+                    version["document_id"],
+                    version_id,
+                    next_index,
+                    pg_text(unit_type),
+                    pg_text(title),
+                    pg_text(content),
+                    len(tokenize(content)),
+                    vector_literal(embedding),
+                    pg_text(json.dumps(merged_metadata)),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE ai_document_versions
+                SET review_status = CASE
+                    WHEN review_status = 'approved' THEN review_status
+                    ELSE 'reviewed'
+                END,
+                    chunk_count = (SELECT COUNT(*) FROM ai_chunks WHERE version_id = %s)
+                WHERE id = %s
+                """,
+                (version_id, version_id),
+            )
+            conn.execute(
+                "UPDATE ai_documents SET updated_at = now() WHERE id = %s",
+                (version["document_id"],),
+            )
+            audit_tx(
+                conn,
+                actor=actor,
+                action="extraction_unit_create",
+                entity_type="ai_chunk",
+                entity_id=unit_id,
+                metadata={
+                    "document_id": version["document_id"],
+                    "version_id": version_id,
+                    "unit_type": unit_type,
+                    "review_status": review_status,
+                },
+            )
+            created = conn.execute(
+                """
+                SELECT c.id::text AS unit_id,
+                       c.document_id::text AS document_id,
+                       c.version_id::text AS version_id,
+                       c.chunk_index AS unit_index,
+                       c.section,
+                       c.heading AS title,
+                       c.content,
+                       c.metadata,
+                       v.document_type,
+                       v.review_status,
+                       v.extraction_confidence::float AS extraction_confidence
+                FROM ai_chunks c
+                JOIN ai_document_versions v ON v.id = c.version_id
+                WHERE c.id = %s
+                """,
+                (unit_id,),
+            ).fetchone()
+
+    item = dict(created)
+    created_metadata = item.get("metadata") or {}
+    if not isinstance(created_metadata, dict):
+        created_metadata = {}
+    source_type = str(created_metadata.get("source_type") or "")
+    return extraction_unit_from_row(
+        item,
+        str(item.get("document_type") or ""),
+        source_type,
+        created_metadata,
+    )
+
+
 def version_raw_text(version_id: str) -> dict[str, Any]:
     with connection() as conn:
         conn.row_factory = dict_row

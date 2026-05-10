@@ -6,6 +6,7 @@ import type {
   DocumentMetadataPreview,
   DocumentSummary,
   ExtractionUnit,
+  ExtractionUnitCreate,
   ExtractionUnitUpdate,
   VersionRawText,
   VersionSummary,
@@ -218,6 +219,23 @@ export function useUpdateExtractionUnit() {
               : chunk,
           ) ?? current,
       );
+    },
+  });
+}
+
+export function useCreateExtractionUnit() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { versionId: string; unit: ExtractionUnitCreate }) =>
+      apiPost<ExtractionUnit>(`/api/v1/ai/versions/${payload.versionId}/extraction-units`, payload.unit),
+    onSuccess: (unit) => {
+      queryClient.setQueriesData<ExtractionUnit[]>(
+        { queryKey: ["ai-extraction-units"] },
+        (current) => (current ? [...current, unit].sort((left, right) => left.unit_index - right.unit_index) : [unit]),
+      );
+      queryClient.invalidateQueries({ queryKey: ["ai-document-chunks"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-documents"] });
     },
   });
 }

@@ -1,4 +1,4 @@
-import { AlertTriangle, BookOpen, Clipboard, Loader2, MessageSquareText, Search, Send, ShieldCheck, type LucideIcon } from "lucide-react";
+import { AlertTriangle, BookOpen, Clipboard, Loader2, MessageSquareText, Search, Send, ShieldCheck, SlidersHorizontal, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { EmptyPanel } from "@/components/common";
@@ -6,24 +6,67 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { ChatThreadMessage, RetrievalResult } from "@/types";
+import type { ChatModelRoute, ChatModelRouteConfig, ChatThreadMessage, RetrievalResult } from "@/types";
+
+const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
+  {
+    route: "auto",
+    label: "Auto route",
+    model: "rule-based router",
+    description: "Cho system tự chọn theo intent, risk và độ phức tạp của câu hỏi.",
+  },
+  {
+    route: "simple",
+    label: "Gemini Flash Lite",
+    model: "google/gemini-2.5-flash-lite",
+    description: "Simple factual SOP Q&A, nhanh và rẻ cho câu hỏi tra cứu ngắn.",
+  },
+  {
+    route: "policy",
+    label: "Kimi K2.5 Policy",
+    model: "moonshotai/kimi-k2.5",
+    description: "Policy, decision, exception Q&A cần reasoning tốt hơn.",
+  },
+  {
+    route: "high_risk",
+    label: "Kimi K2.5 High Risk",
+    model: "moonshotai/kimi-k2.5",
+    description: "Refund, payment, account, privacy, ZT với grounding/citation chặt hơn.",
+  },
+  {
+    route: "complex",
+    label: "Kimi K2.6 Complex",
+    model: "moonshotai/kimi-k2.6",
+    description: "Multi-SOP synthesis hoặc macro polished từ nhiều nguồn published.",
+  },
+];
 
 export function ChatWorkspace({
   busy,
+  fallbackModel,
   messages,
+  modelRoutes,
+  modelRoute,
   onAsk,
   onCopy,
+  onModelRouteChange,
   onOpenDocument,
   onOpenQuickSource,
 }: {
   busy: boolean;
+  fallbackModel?: string;
   messages: ChatThreadMessage[];
+  modelRoutes?: ChatModelRouteConfig[];
+  modelRoute: ChatModelRoute;
   onAsk: (question: string) => void;
   onCopy: (text: string) => void;
+  onModelRouteChange: (route: ChatModelRoute) => void;
   onOpenDocument: (source: RetrievalResult) => void;
   onOpenQuickSource: (source: RetrievalResult) => void;
 }) {
   const [draft, setDraft] = useState("");
+  const routeOptions = modelRoutes?.length ? modelRoutes : FALLBACK_CHAT_MODEL_ROUTES;
+  const selectedModelRoute = routeOptions.find((route) => route.route === modelRoute) ?? routeOptions[0];
   const examples = useMemo(
     () => [
       "case này cần kiểm tra thông tin nào trước?",
@@ -61,6 +104,7 @@ export function ChatWorkspace({
               <Badge variant="outline">published only</Badge>
               <Badge variant="outline">citations required</Badge>
               <Badge variant="outline">no policy invention</Badge>
+              <Badge variant={modelRoute === "auto" ? "secondary" : "default"}>{selectedModelRoute.label}</Badge>
             </div>
           </div>
         </div>
@@ -127,6 +171,43 @@ export function ChatWorkspace({
       </section>
 
       <aside className="space-y-4">
+        <Card className="rounded-xl">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <SlidersHorizontal className="size-4" />
+              Model test route
+            </CardTitle>
+            <CardDescription>Override router để so sánh chất lượng model trên cùng một bộ SOP published.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 text-sm">
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">Route</span>
+              <select
+                className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={busy}
+                onChange={(event) => onModelRouteChange(event.target.value as ChatModelRoute)}
+                value={modelRoute}
+              >
+                {routeOptions.map((route) => (
+                  <option key={route.route} value={route.route}>
+                    {route.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="rounded-lg border bg-background p-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant={modelRoute === "auto" ? "secondary" : "default"}>
+                  {modelRoute === "auto" ? "auto" : "manual"}
+                </Badge>
+                <Badge variant="outline">{selectedModelRoute.model}</Badge>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedModelRoute.description}</p>
+              {fallbackModel ? <p className="mt-2 text-[11px] text-muted-foreground">Fallback: {fallbackModel}</p> : null}
+            </div>
+          </CardContent>
+        </Card>
+
         <Card className="rounded-xl">
           <CardHeader>
             <CardTitle>Guardrails</CardTitle>

@@ -24,6 +24,7 @@ from app.schemas import (
     DocumentSummary,
     DocumentVersionResponse,
     ExtractionUnit,
+    ExtractionUnitCreateRequest,
     ExtractionUnitUpdateRequest,
     GroundedChatRequest,
     GroundedChatResponse,
@@ -86,6 +87,46 @@ def healthz() -> dict[str, Any]:
         "service": "cs-kb-ai",
         "retrieval_store": "postgres_pgvector",
         "services": services,
+    }
+
+
+@app.get("/ai/v1/chat/model-routes")
+def chat_model_routes() -> dict[str, Any]:
+    return {
+        "default_route": "auto",
+        "routes": [
+            {
+                "route": "auto",
+                "label": "Auto route",
+                "model": "rule-based router",
+                "description": "Route by question intent, risk signals, and retrieval complexity.",
+            },
+            {
+                "route": "simple",
+                "label": "Gemini Flash Lite",
+                "model": settings.openrouter_chat_simple_model,
+                "description": "Simple factual SOP Q&A.",
+            },
+            {
+                "route": "policy",
+                "label": "Kimi K2.5 Policy",
+                "model": settings.openrouter_chat_policy_model,
+                "description": "Policy, decision, and exception Q&A.",
+            },
+            {
+                "route": "high_risk",
+                "label": "Kimi K2.5 High Risk",
+                "model": settings.openrouter_chat_high_risk_model,
+                "description": "Refund, payment, account, privacy, ZT, and stricter citation-gated answers.",
+            },
+            {
+                "route": "complex",
+                "label": "Kimi K2.6 Complex",
+                "model": settings.openrouter_chat_complex_model,
+                "description": "Multi-SOP synthesis and polished macro drafting from published sources.",
+            },
+        ],
+        "fallback_model": settings.openrouter_chat_fallback_model,
     }
 
 
@@ -440,6 +481,27 @@ def update_extraction_unit(unit_id: str, request: ExtractionUnitUpdateRequest) -
     try:
         unit = repository.update_extraction_unit(
             unit_id=unit_id,
+            title=request.title,
+            content=request.content,
+            unit_type=request.unit_type,
+            confidence=request.confidence,
+            review_status=request.review_status,
+            metadata=request.metadata,
+            actor=request.actor,
+            embedding=embed_text(" ".join([request.title, request.content])),
+        )
+        return ExtractionUnit(**unit)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/versions/{version_id}/extraction-units", response_model=ExtractionUnit)
+def create_extraction_unit(version_id: str, request: ExtractionUnitCreateRequest) -> ExtractionUnit:
+    try:
+        unit = repository.create_extraction_unit(
+            version_id=version_id,
             title=request.title,
             content=request.content,
             unit_type=request.unit_type,
