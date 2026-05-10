@@ -22,6 +22,7 @@ DocumentType = Literal[
     "unknown",
 ]
 ReviewStatus = Literal["needs_review", "reviewed", "approved"]
+BulkReviewScope = Literal["all", "atomic"]
 ExtractionUnitType = Literal[
     "full_sop",
     "routing_rule",
@@ -484,6 +485,13 @@ class DocumentVersionResponse(BaseModel):
     extraction_confidence: float = 0.0
     metadata: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+
+
+class BulkReviewVersionRequest(BaseModel):
+    actor: str = "system"
+    review_status: ReviewStatus = "reviewed"
+    scope: BulkReviewScope = "all"
+    force: bool = False
 
 
 class DocumentMetadataPreviewResponse(BaseModel):

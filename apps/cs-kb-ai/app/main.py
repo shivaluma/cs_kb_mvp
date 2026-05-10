@@ -17,6 +17,7 @@ from app.embedding import embed_text
 from app.ingestion import prepare_document_version, preview_document_metadata
 from app.retrieval import retrieve
 from app.schemas import (
+    BulkReviewVersionRequest,
     DocumentMetadata,
     DocumentMetadataPreviewResponse,
     DocumentChunkSummary,
@@ -485,15 +486,15 @@ def publish_version(version_id: str, payload: dict[str, str] | None = None) -> d
 
 
 @app.post("/ai/v1/versions/{version_id}/bulk-review")
-def bulk_review_version(version_id: str, payload: dict[str, str] | None = None) -> dict[str, Any]:
+def bulk_review_version(version_id: str, payload: BulkReviewVersionRequest | None = None) -> dict[str, Any]:
     try:
-        data = payload or {}
+        data = payload or BulkReviewVersionRequest()
         return repository.bulk_review_version(
             version_id,
-            data.get("actor", "system"),
-            data.get("review_status", "reviewed"),
-            data.get("scope", "all"),
-            bool(data.get("force", False)),
+            data.actor,
+            data.review_status,
+            data.scope,
+            data.force,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
