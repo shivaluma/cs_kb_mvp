@@ -17,6 +17,18 @@ from app.config import settings
 
 WORD_RE = re.compile(r"[\w]+", re.UNICODE)
 HEADING_RE = re.compile(r"^\s*(#{1,6}\s+|[A-Z][A-Z0-9 _/-]{5,}:)\s*(.+?)\s*$")
+BULLET_RE = re.compile(r"^\s*(?:[-*•‣▪]|\d+[.)]|[a-zA-Z][.)])\s+")
+SENTENCE_END_RE = re.compile(r"(?<=[.!?。！？])\s+")
+INCOMPLETE_CONNECTOR_RE = re.compile(
+    r"(?:^|\s)(nếu|neu|thì|thi|đối với|doi voi|trường hợp|truong hop|bao gồm|bao gom|và|va|hoặc|hoac|or|and)\s*$",
+    re.IGNORECASE,
+)
+CONDITION_RE = re.compile(r"(?:^|\s)(nếu|neu|trường hợp|truong hop|đối với|doi voi|khi|when|if)\b", re.IGNORECASE)
+ACTION_RE = re.compile(
+    r"(?:^|\s)(thì|thi|cần|can|phải|phai|xử lý|xu ly|chuyển|chuyen|kiểm tra|kiem tra|gửi|gui|tạo|tao|thực hiện|thuc hien|không được|khong duoc|được phép|duoc phep|must|should|do not)\b",
+    re.IGNORECASE,
+)
+NOTE_RE = re.compile(r"^\s*(lưu ý|luu y|note|warning|cảnh báo|canh bao|script|sla|zt)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -215,6 +227,17 @@ def extract_spreadsheet(filename: str, data: bytes) -> tuple[str, list[str], lis
             continue
         raw_blocks.append(f"# {sheet_name}")
         for chunk in sheet_chunks:
+            source_refs = chunk.metadata.get("source_refs") if isinstance(chunk.metadata, dict) else []
+            if source_refs and isinstance(source_refs[0], dict):
+                source_refs[0]["source_file"] = filename
+            chunk = Chunk(
+                chunk_index=chunk.chunk_index,
+                section=chunk.section,
+                heading=chunk.heading,
+                content=chunk.content,
+                token_count=chunk.token_count,
+                metadata={**chunk.metadata, "source_filename": filename, "source_refs": source_refs},
+            )
             raw_blocks.append(f"## {chunk.heading}\n{chunk.content}")
             chunks.append(chunk)
 
@@ -304,7 +327,9 @@ def spreadsheet_row_chunks(
 ) -> list[Chunk]:
     content = row_to_text(values, headers)
     heading = row_heading(values, headers, context)
-    if len(tokenize(content)) <= settings.chunk_target_tokens:
+    rule_id = f"{slugify(sheet_name) or 'sheet'}_row_{row_number}"
+    max_atomic_tokens = max(settings.chunk_target_tokens * 4, 1000)
+    if len(tokenize(content)) <= max_atomic_tokens:
         return [spreadsheet_chunk(index, section, sheet_name, row_number, context, heading, content, values, headers)]
 
     key_lines = []
@@ -337,22 +362,28 @@ def spreadsheet_row_chunks(
                     cell_content,
                     values,
                     headers,
+                    {"rule_id": rule_id, "parent_rule_id": rule_id, "split_from_row": True, "split_part": part_index + 1},
                 )
             )
     return chunks or [spreadsheet_chunk(index, section, sheet_name, row_number, context, heading, content, values, headers)]
 
 
 def split_text_by_tokens(value: str, target_tokens: int) -> list[str]:
-    words = tokenize_raw(value)
-    if len(words) <= target_tokens:
+    if len(tokenize(value)) <= target_tokens:
         return [value]
-    parts = []
-    step = max(target_tokens - min(settings.chunk_overlap_tokens, 32), 80)
-    for start in range(0, len(words), step):
-        segment = words[start : start + target_tokens]
-        if segment:
-            parts.append(" ".join(segment))
-    return parts
+    sentences = split_sentences(value)
+    parts: list[str] = []
+    current: list[str] = []
+    for sentence in sentences:
+        candidate = " ".join([*current, sentence]).strip()
+        if current and len(tokenize(candidate)) > target_tokens:
+            parts.append(" ".join(current).strip())
+            current = [sentence]
+        else:
+            current.append(sentence)
+    if current:
+        parts.append(" ".join(current).strip())
+    return repair_incomplete_text_parts(parts)
 
 
 def spreadsheet_chunk(
@@ -365,10 +396,12 @@ def spreadsheet_chunk(
     content: str,
     values: list[str] | None = None,
     headers: list[str] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> Chunk:
     context_lines = [f"Ngữ cảnh: {item}" for item in context[-3:]]
     body = "\n".join([*context_lines, content]).strip()
     resolved_heading = heading or (context[-1] if context else f"{sheet_name} dòng {row_number}")
+    rule_id = f"{slugify(sheet_name) or 'sheet'}_row_{row_number}"
     return Chunk(
         chunk_index=index,
         section=section,
@@ -381,6 +414,12 @@ def spreadsheet_chunk(
             "headers": headers or [],
             "row_values": values or [],
             "source_type": "spreadsheet",
+            "unit_type": "table_row",
+            "rule_id": rule_id,
+            "parent_unit_id": rule_id,
+            "section_path": [sheet_name],
+            "source_refs": [{"source_type": "excel", "source_file": "", "sheet": sheet_name, "row_start": row_number, "row_end": row_number, "column_names": headers or []}],
+            **(extra_metadata or {}),
         },
     )
 
@@ -646,51 +685,249 @@ def workflow_identifier(filename: str, raw_text: str) -> str:
 def chunk_text(text: str, target_tokens: int | None = None, overlap_tokens: int | None = None) -> list[Chunk]:
     target = target_tokens or settings.chunk_target_tokens
     overlap = overlap_tokens or settings.chunk_overlap_tokens
-    paragraphs = split_paragraphs(text)
-
+    units = repair_logical_units(parse_logical_units(text))
     chunks: list[Chunk] = []
-    current_words: list[str] = []
-    current_heading = ""
-    current_section = "body"
+    current: list[dict[str, Any]] = []
+    current_tokens = 0
 
     def flush() -> None:
-        nonlocal current_words
-        if not current_words:
+        nonlocal current, current_tokens
+        if not current:
             return
-        content = " ".join(current_words).strip()
-        if content:
-            chunks.append(
-                Chunk(
-                    chunk_index=len(chunks),
-                    section=current_section,
-                    heading=current_heading,
-                    content=content,
-                    token_count=len(tokenize(content)),
-                )
-            )
-        current_words = current_words[-overlap:] if overlap > 0 else []
+        chunks.append(chunk_from_units(len(chunks), current))
+        if overlap > 0 and current:
+            overlap_units: list[dict[str, Any]] = []
+            overlap_count = 0
+            for unit in reversed(current):
+                unit_tokens = int(unit.get("token_count") or len(tokenize(str(unit.get("text") or ""))))
+                if overlap_units and overlap_count + unit_tokens > overlap:
+                    break
+                overlap_units.insert(0, unit)
+                overlap_count += unit_tokens
+            current = overlap_units if overlap_units != current else []
+            current_tokens = sum(int(unit.get("token_count") or 0) for unit in current)
+        else:
+            current = []
+            current_tokens = 0
 
-    for paragraph in paragraphs:
-        heading = detect_heading(paragraph)
-        if heading:
-            flush()
-            current_heading = heading
-            current_section = slugify(heading)[:80] or "body"
+    for unit in units:
+        unit_tokens = int(unit.get("token_count") or len(tokenize(str(unit.get("text") or ""))))
+        if unit_tokens > target:
+            if current:
+                flush()
+            for split_unit in split_large_logical_unit(unit, target):
+                chunks.append(chunk_from_units(len(chunks), [split_unit]))
+            current = []
+            current_tokens = 0
             continue
-
-        words = tokenize_raw(paragraph)
-        if not words:
-            continue
-
-        if len(current_words) + len(words) > target:
+        if current and current_tokens + unit_tokens > target:
             flush()
-        current_words.extend(words)
-
-        while len(current_words) >= target + overlap:
-            flush()
+        current.append(unit)
+        current_tokens += unit_tokens
 
     flush()
-    return chunks
+    return reindex_chunks(chunks)
+
+
+def parse_logical_units(text: str) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    section_path: list[str] = []
+    pending_bullet: list[str] = []
+    pending_bullet_start = 0
+
+    def flush_bullet() -> None:
+        nonlocal pending_bullet, pending_bullet_start
+        if not pending_bullet:
+            return
+        content = "\n".join(pending_bullet).strip()
+        units.append(logical_unit(content, "bullet", section_path, pending_bullet_start))
+        pending_bullet = []
+        pending_bullet_start = 0
+
+    paragraphs = split_paragraphs(text)
+    for index, paragraph in enumerate(paragraphs):
+        heading = detect_heading(paragraph)
+        if heading:
+            flush_bullet()
+            section_path = update_section_path(section_path, heading)
+            continue
+        if BULLET_RE.match(paragraph):
+            if pending_bullet:
+                flush_bullet()
+            pending_bullet = [paragraph]
+            pending_bullet_start = index
+            continue
+        if pending_bullet and looks_like_bullet_continuation(paragraph):
+            pending_bullet.append(paragraph)
+            continue
+        flush_bullet()
+        for sentence in split_sentences(paragraph):
+            units.append(logical_unit(sentence, "sentence", section_path, index))
+    flush_bullet()
+    return units
+
+
+def logical_unit(text: str, unit_type: str, section_path: list[str], source_index: int) -> dict[str, Any]:
+    normalized = text.strip()
+    return {
+        "text": normalized,
+        "logical_type": "note" if is_note_text(normalized) else unit_type,
+        "section_path": list(section_path),
+        "source_index": source_index,
+        "token_count": len(tokenize(normalized)),
+    }
+
+
+def update_section_path(section_path: list[str], heading: str) -> list[str]:
+    normalized = heading.strip()
+    if not normalized:
+        return section_path
+    if re.match(r"^\d+\.\d+", normalized):
+        return [*section_path[:1], normalized]
+    if re.match(r"^\d+", normalized):
+        return [normalized]
+    return [normalized]
+
+
+def split_sentences(text: str) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if BULLET_RE.match(stripped):
+        return [stripped]
+    parts = [part.strip() for part in SENTENCE_END_RE.split(stripped) if part.strip()]
+    if len(parts) <= 1:
+        return [stripped]
+    return parts
+
+
+def looks_like_bullet_continuation(paragraph: str) -> bool:
+    if BULLET_RE.match(paragraph) or detect_heading(paragraph):
+        return False
+    return True
+
+
+def is_note_text(text: str) -> bool:
+    return bool(NOTE_RE.search(text))
+
+
+def repair_logical_units(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    repaired: list[dict[str, Any]] = []
+    last_rule_or_step_index: int | None = None
+    index = 0
+    while index < len(units):
+        unit = dict(units[index])
+        text = str(unit.get("text") or "")
+        while index + 1 < len(units) and should_merge_with_next(text):
+            index += 1
+            next_unit = units[index]
+            text = "\n".join([text, str(next_unit.get("text") or "")]).strip()
+            unit["text"] = text
+            unit["token_count"] = len(tokenize(text))
+        if is_note_text(text):
+            if last_rule_or_step_index is not None:
+                parent_id = repaired[last_rule_or_step_index].setdefault("unit_id", logical_unit_id(repaired[last_rule_or_step_index], last_rule_or_step_index))
+                unit["attached_to"] = parent_id
+            else:
+                unit["review_status"] = "needs_review"
+                unit["attachment_status"] = "needs_review_no_parent"
+        elif CONDITION_RE.search(normalize_phrase(text)) or unit.get("logical_type") in {"sentence", "bullet"}:
+            last_rule_or_step_index = len(repaired)
+        repaired.append(unit)
+        index += 1
+    return repaired
+
+
+def should_merge_with_next(text: str) -> bool:
+    normalized = normalize_phrase(text)
+    return bool(INCOMPLETE_CONNECTOR_RE.search(normalized)) or (has_condition(text) and not has_action(text))
+
+
+def has_condition(text: str) -> bool:
+    return bool(CONDITION_RE.search(normalize_phrase(text)))
+
+
+def has_action(text: str) -> bool:
+    return bool(ACTION_RE.search(normalize_phrase(text)))
+
+
+def split_large_logical_unit(unit: dict[str, Any], target_tokens: int) -> list[dict[str, Any]]:
+    text = str(unit.get("text") or "")
+    if unit.get("logical_type") == "bullet":
+        return [unit]
+    sentences = split_sentences(text)
+    if len(sentences) <= 1:
+        return [unit]
+    output: list[dict[str, Any]] = []
+    current: list[str] = []
+    for sentence in sentences:
+        candidate = " ".join([*current, sentence]).strip()
+        if current and len(tokenize(candidate)) > target_tokens:
+            output.append({**unit, "text": " ".join(current).strip(), "token_count": len(tokenize(" ".join(current)))})
+            current = [sentence]
+        else:
+            current.append(sentence)
+    if current:
+        output.append({**unit, "text": " ".join(current).strip(), "token_count": len(tokenize(" ".join(current)))})
+    return repair_logical_units(output)
+
+
+def repair_incomplete_text_parts(parts: list[str]) -> list[str]:
+    repaired: list[str] = []
+    index = 0
+    while index < len(parts):
+        text = parts[index]
+        while index + 1 < len(parts) and should_merge_with_next(text):
+            index += 1
+            text = f"{text} {parts[index]}".strip()
+        repaired.append(text)
+        index += 1
+    return repaired
+
+
+def chunk_from_units(index: int, units: list[dict[str, Any]]) -> Chunk:
+    first = units[0]
+    section_path = first.get("section_path") or []
+    section = slugify(" / ".join(section_path))[:80] or "body"
+    heading = " / ".join(section_path[-2:])[:180] if section_path else ""
+    content = "\n".join(str(unit.get("text") or "") for unit in units).strip()
+    parent_unit_id = str(first.get("attached_to") or first.get("unit_id") or logical_unit_id(first, index))
+    unit_type = infer_chunk_unit_type(units)
+    return Chunk(
+        chunk_index=index,
+        section=section,
+        heading=heading,
+        content=content,
+        token_count=len(tokenize(content)),
+        metadata={
+            "document_title": "",
+            "section_path": section_path,
+            "parent_unit_id": parent_unit_id,
+            "unit_type": unit_type,
+            "logical_unit_types": [unit.get("logical_type") for unit in units],
+            "attached_to": first.get("attached_to", ""),
+            "review_status": first.get("review_status", ""),
+            "attachment_status": first.get("attachment_status", ""),
+            "overlap_strategy": "logical_unit",
+        },
+    )
+
+
+def logical_unit_id(unit: dict[str, Any], index: int) -> str:
+    section = slugify(" ".join(unit.get("section_path") or []))[:40] or "body"
+    text = slugify(str(unit.get("text") or ""))[:48] or f"unit_{index}"
+    return f"{section}_{text}".strip("_")
+
+
+def infer_chunk_unit_type(units: list[dict[str, Any]]) -> str:
+    if any(unit.get("logical_type") == "note" for unit in units):
+        return "operational_note"
+    if any(unit.get("logical_type") == "bullet" for unit in units):
+        return "checklist"
+    text = "\n".join(str(unit.get("text") or "") for unit in units)
+    if has_condition(text):
+        return "candidate_rule"
+    return "text_section"
 
 
 def checksum(data: bytes) -> str:

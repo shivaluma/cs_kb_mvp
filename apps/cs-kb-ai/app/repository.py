@@ -762,7 +762,8 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
     document_metadata = version.get("metadata") or {}
     if not isinstance(document_metadata, dict):
         document_metadata = {}
-    if str(document_metadata.get("extraction_status") or "").startswith("failed"):
+    document_extraction_status = str(document_metadata.get("extraction_status") or "")
+    if document_extraction_status == "failed" or document_extraction_status.startswith("failed"):
         failures.append("extraction_failed_validation")
 
     has_full_sop = False
@@ -780,14 +781,21 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
     workflow_unit_status_by_type: dict[str, bool] = {}
     required_unit_types: set[str] = set()
     missing_source_refs = 0
+    atomic_units = 0
+    degraded_unconverted = 0
     for row in rows:
         metadata = row.get("metadata") or {}
         if not isinstance(metadata, dict):
             metadata = {}
-        if str(metadata.get("extraction_status") or "").startswith("failed"):
+        unit_extraction_status = str(metadata.get("extraction_status") or "")
+        if unit_extraction_status == "failed" or unit_extraction_status.startswith("failed"):
             failures.append("extraction_failed_validation")
         unit_type = str(metadata.get("unit_type") or row.get("section") or "")
         retrieval_scope = str(metadata.get("retrieval_scope") or "")
+        if retrieval_scope != "document" and unit_type != "full_sop" and not unit_type.startswith("candidate_"):
+            atomic_units += 1
+        if is_degraded_unconverted(metadata):
+            degraded_unconverted += 1
         text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or ""), json.dumps(metadata, ensure_ascii=False)]))
         if unit_type:
             workflow_unit_status_by_type[unit_type] = workflow_unit_status_by_type.get(unit_type, False) or is_reviewed_status(metadata.get("review_status"))
@@ -814,6 +822,10 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
 
     if not has_full_sop:
         failures.append("missing_full_sop_layer")
+    if version["document_type"] in {"policy_table", "policy_rule", "workflow_diagram"} and atomic_units == 0:
+        failures.append("missing_production_atomic_units")
+    if degraded_unconverted:
+        failures.append(f"{degraded_unconverted}_degraded_units_need_manual_curation")
     if pending_units:
         failures.append(f"{pending_units}_units_need_review")
     if not has_owner:
@@ -846,6 +858,17 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
 
     if failures:
         raise ValueError("publish_readiness_failed:" + ",".join(failures))
+
+
+def is_degraded_unconverted(metadata: dict[str, Any]) -> bool:
+    extraction_status = str(metadata.get("extraction_status") or "")
+    if extraction_status != "degraded":
+        return False
+    return not (
+        metadata.get("manual_curation_status") == "converted"
+        and metadata.get("extraction_status") == "manually_curated"
+        and metadata.get("review_status") == "approved"
+    )
 
 
 def bulk_review_version(version_id: str, actor: str, review_status: str = "reviewed", scope: str = "all", force: bool = False) -> dict[str, Any]:
@@ -1324,6 +1347,17 @@ def update_extraction_unit(
                 "review_status": review_status,
                 "reviewed_by": actor,
             }
+            if (
+                existing_metadata.get("extraction_status") == "degraded"
+                and review_status == "approved"
+                and not unit_type.startswith("candidate_")
+            ):
+                merged_metadata["extraction_status"] = "manually_curated"
+                merged_metadata["extraction_lifecycle_status"] = "reviewed"
+                merged_metadata["manual_curation_status"] = "converted"
+                merged_metadata["publish_blocked"] = False
+                merged_metadata["publish_blocked_reason"] = ""
+                merged_metadata["source_evidence_only"] = False
             if review_status == "reviewed":
                 merged_metadata["reviewed_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -1920,6 +1954,10 @@ def filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
     # Default retrieval is strict latest-published only.
     if statuses == ["published"]:
         clauses.append("d.current_version_id = v.id")
+        clauses.append("COALESCE(c.metadata->>'review_status', '') = 'approved'")
+        clauses.append("COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)")
+        params.append(["structured", "manually_curated"])
+        clauses.append("COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'")
 
     if filters.document_ids:
         clauses.append("c.document_id = ANY(%s)")

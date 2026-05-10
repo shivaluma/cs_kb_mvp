@@ -46,6 +46,12 @@ ExtractionUnitType = Literal[
     "related_document",
     "follow_up_rule",
     "text_section",
+    "candidate_section",
+    "candidate_rule",
+    "candidate_warning",
+    "candidate_table_row",
+    "candidate_workflow_text",
+    "candidate_step",
 ]
 SynonymType = Literal["regular", "one_way", "typo_correction", "placeholder"]
 SynonymStatus = Literal["draft", "in_review", "active", "archived", "rejected"]
@@ -81,8 +87,17 @@ class DocumentMetadata(BaseModel):
     review_status: ReviewStatus = "needs_review"
     extraction_confidence: float = 0.0
     extraction_status: str = "pending_review"
+    extraction_lifecycle_status: str = "uploaded"
     extraction_error: str = ""
     extraction_warnings: list[str] = Field(default_factory=list)
+    ai_error: str | None = None
+    publish_blocked: bool = False
+    publish_blocked_reason: str = ""
+    source_ref_quality: str = "none"
+    requires_human_review: bool = True
+    effective_from: str = ""
+    required_unit_types: list[str] = Field(default_factory=list)
+    risk_level: str = ""
 
 
 class SourceRef(BaseModel):

@@ -34,6 +34,12 @@ const UNIT_TYPES = [
   "follow_up_rule",
   "rule_table_row",
   "text_section",
+  "candidate_section",
+  "candidate_rule",
+  "candidate_warning",
+  "candidate_table_row",
+  "candidate_workflow_text",
+  "candidate_step",
 ];
 
 type Draft = {
