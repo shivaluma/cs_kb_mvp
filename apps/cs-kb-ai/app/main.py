@@ -95,9 +95,10 @@ def qdrant_health() -> dict[str, Any]:
             "detail": "QDRANT_URL is not configured; retrieval is using Postgres pgvector",
         }
     target = settings.qdrant_url.rstrip("/") + "/readyz"
+    headers = {"api-key": settings.qdrant_api_key} if settings.qdrant_api_key else None
     start = time.perf_counter()
     try:
-        response = httpx.get(target, timeout=3)
+        response = httpx.get(target, headers=headers, timeout=3)
         latency_ms = int((time.perf_counter() - start) * 1000)
         if response.status_code < 300:
             return {

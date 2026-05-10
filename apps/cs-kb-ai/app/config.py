@@ -22,6 +22,7 @@ class Settings:
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()
+        self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "").strip()
 
 
 settings = Settings()
