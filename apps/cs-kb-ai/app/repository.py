@@ -871,6 +871,74 @@ def is_degraded_unconverted(metadata: dict[str, Any]) -> bool:
     )
 
 
+def promoted_unit_type(unit_type: str, document_type: str) -> str:
+    mapping = {
+        "candidate_section": "text_section",
+        "candidate_rule": "policy_rule",
+        "candidate_warning": "warning",
+        "candidate_table_row": "policy_rule",
+        "candidate_workflow_text": "workflow_overview",
+        "candidate_step": "workflow_step",
+    }
+    if unit_type in mapping:
+        return mapping[unit_type]
+    if unit_type.startswith("candidate_"):
+        return "workflow_step" if document_type == "workflow_diagram" else "text_section"
+    return unit_type
+
+
+def promote_degraded_candidates_tx(conn: Connection[Any], version_id: str, document_type: str, actor: str, scope: str) -> int:
+    rows = conn.execute(
+        """
+        SELECT id::text AS id, section, metadata
+        FROM ai_chunks
+        WHERE version_id = %s
+          AND COALESCE(metadata->>'extraction_status', '') = 'degraded'
+          AND (
+            %s = 'all'
+            OR COALESCE(metadata->>'retrieval_scope', '') <> 'document'
+            AND COALESCE(metadata->>'unit_type', '') <> 'full_sop'
+          )
+        FOR UPDATE
+        """,
+        (version_id, scope),
+    ).fetchall()
+    promoted_count = 0
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        existing_unit_type = str(metadata.get("unit_type") or row.get("section") or "text_section")
+        next_unit_type = promoted_unit_type(existing_unit_type, document_type)
+        next_metadata = {
+            **metadata,
+            "unit_type": next_unit_type,
+            "original_unit_type": metadata.get("original_unit_type") or existing_unit_type,
+            "review_status": "approved",
+            "reviewed_by": actor,
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "extraction_status": "manually_curated",
+            "extraction_lifecycle_status": "reviewed",
+            "manual_curation_status": "converted",
+            "manual_curation_method": "bulk_force_approve",
+            "publish_blocked": False,
+            "publish_blocked_reason": "",
+            "source_evidence_only": False,
+            "source_ref_acknowledged": True,
+        }
+        conn.execute(
+            """
+            UPDATE ai_chunks
+            SET section = %s,
+                metadata = %s::jsonb
+            WHERE id = %s
+            """,
+            (next_unit_type, json.dumps(next_metadata), row["id"]),
+        )
+        promoted_count += 1
+    return promoted_count
+
+
 def bulk_review_version(version_id: str, actor: str, review_status: str = "reviewed", scope: str = "all", force: bool = False) -> dict[str, Any]:
     if review_status not in {"reviewed", "approved"}:
         raise ValueError("invalid_review_status")
@@ -933,6 +1001,9 @@ def bulk_review_version(version_id: str, actor: str, review_status: str = "revie
                 """,
                 (review_status, actor, datetime.now(timezone.utc).isoformat(), effective_from, version_id, scope),
             ).rowcount
+            promoted_count = 0
+            if force and review_status == "approved":
+                promoted_count = promote_degraded_candidates_tx(conn, version_id, row["document_type"], actor, scope)
             remaining_needs_review = conn.execute(
                 """
                 SELECT COUNT(*) AS count
@@ -961,7 +1032,7 @@ def bulk_review_version(version_id: str, actor: str, review_status: str = "revie
                 action="document_version_bulk_review",
                 entity_type="ai_document_version",
                 entity_id=version_id,
-                metadata={"review_status": review_status, "scope": scope, "force": force, "updated_count": updated_count},
+                metadata={"review_status": review_status, "scope": scope, "force": force, "updated_count": updated_count, "promoted_count": promoted_count},
             )
             return {
                 "version_id": version_id,
@@ -970,6 +1041,7 @@ def bulk_review_version(version_id: str, actor: str, review_status: str = "revie
                 "scope": scope,
                 "remaining_needs_review": int(remaining_needs_review or 0),
                 "updated_count": int(updated_count or 0),
+                "promoted_count": promoted_count,
             }
 
 

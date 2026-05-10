@@ -35,6 +35,14 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertIn(["structured", "manually_curated"], params)
         self.assertIn("COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'", where_sql)
 
+    def test_force_approve_promotes_candidate_unit_types(self) -> None:
+        self.assertEqual(repository.promoted_unit_type("candidate_rule", "policy_rule"), "policy_rule")
+        self.assertEqual(repository.promoted_unit_type("candidate_table_row", "policy_table"), "policy_rule")
+        self.assertEqual(repository.promoted_unit_type("candidate_step", "workflow_diagram"), "workflow_step")
+        self.assertEqual(repository.promoted_unit_type("candidate_workflow_text", "workflow_diagram"), "workflow_overview")
+        self.assertEqual(repository.promoted_unit_type("candidate_section", "policy_rule"), "text_section")
+        self.assertEqual(repository.promoted_unit_type("full_sop", "policy_rule"), "full_sop")
+
 
 if __name__ == "__main__":
     unittest.main()
