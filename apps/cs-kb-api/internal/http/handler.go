@@ -5,22 +5,25 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"cs-kb-api/internal/config"
+	"cs-kb-api/internal/logging"
 	"cs-kb-api/internal/model"
 	"cs-kb-api/internal/service"
 )
 
 type Handler struct {
-	store *service.Store
-	cfg   config.Config
+	store  *service.Store
+	cfg    config.Config
+	logger *slog.Logger
 }
 
-func NewHandler(store *service.Store, cfg config.Config) *Handler {
-	return &Handler{store: store, cfg: cfg}
+func NewHandler(store *service.Store, cfg config.Config, logger *slog.Logger) *Handler {
+	return &Handler{store: store, cfg: cfg, logger: logger}
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -64,7 +67,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ai/retrieve", h.proxyAI("/ai/v1/retrieve"))
 	mux.HandleFunc("POST /api/v1/ai/chat", h.proxyAI("/ai/v1/chat"))
 
-	return cors(mux)
+	return logging.Middleware(h.logger, cors(mux))
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -281,7 +284,7 @@ func (h *Handler) proxyAIVersionRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) proxyAIVersionSourcePage(w http.ResponseWriter, r *http.Request) {
-	h.proxyAI("/ai/v1/versions/" + r.PathValue("id") + "/source/pages/" + r.PathValue("page"))(w, r)
+	h.proxyAI("/ai/v1/versions/"+r.PathValue("id")+"/source/pages/"+r.PathValue("page"))(w, r)
 }
 
 func (h *Handler) proxyAIDocumentUpload(w http.ResponseWriter, r *http.Request) {
@@ -341,13 +344,17 @@ func (h *Handler) proxyAISynonymSuggestionAccept(w http.ResponseWriter, r *http.
 func (h *Handler) syncMeilisearchSynonyms(w http.ResponseWriter, r *http.Request) {
 	payloadURL := strings.TrimRight(h.cfg.AIBaseURL, "/") + "/ai/v1/search/synonyms/meilisearch"
 	client := &http.Client{Timeout: 30 * time.Second}
+	start := time.Now()
+	h.logger.InfoContext(r.Context(), "synonym sync payload fetch started", "target", payloadURL)
 	resp, err := client.Get(payloadURL)
 	if err != nil {
+		h.logger.ErrorContext(r.Context(), "synonym sync payload fetch failed", "target", payloadURL, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_service_unavailable"})
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		h.logger.ErrorContext(r.Context(), "synonym sync payload fetch returned non-2xx", "target", payloadURL, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds())
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 		return
@@ -375,6 +382,7 @@ func (h *Handler) syncMeilisearchSynonyms(w http.ResponseWriter, r *http.Request
 
 		meiliResp, err := client.Do(req)
 		if err != nil {
+			h.logger.ErrorContext(r.Context(), "synonym sync meili update failed", "index", index, "target", target, "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "meilisearch_unavailable"})
 			return
 		}
@@ -398,6 +406,7 @@ func (h *Handler) syncMeilisearchSynonyms(w http.ResponseWriter, r *http.Request
 		"synonym_count": len(synonyms),
 		"indexes":       results,
 	})
+	h.logger.InfoContext(r.Context(), "synonym sync completed", "synonym_count", len(synonyms), "duration_ms", time.Since(start).Milliseconds())
 }
 
 func (h *Handler) retrieveAI(ctx context.Context, req model.SearchRequest) ([]model.SemanticResult, error) {
@@ -429,11 +438,13 @@ func (h *Handler) retrieveAI(ctx context.Context, req model.SearchRequest) ([]mo
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(httpReq)
 	if err != nil {
+		h.logger.WarnContext(ctx, "AI retrieve unavailable", "target", target, "error", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		body, _ := io.ReadAll(resp.Body)
+		h.logger.WarnContext(ctx, "AI retrieve returned non-2xx", "target", target, "status", resp.StatusCode, "body", truncateLogBody(body))
 		return nil, http.ErrAbortHandler
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
@@ -444,13 +455,22 @@ func (h *Handler) retrieveAI(ctx context.Context, req model.SearchRequest) ([]mo
 
 func (h *Handler) proxyAIWithBody(path string, timeout time.Duration, after func(context.Context, int, []byte)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		target := strings.TrimRight(h.cfg.AIBaseURL, "/") + path
 		if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
 		}
+		h.logger.InfoContext(r.Context(), "AI proxy request started",
+			"request_id", logging.RequestID(r.Context()),
+			"method", r.Method,
+			"path", r.URL.Path,
+			"target", target,
+			"timeout_ms", timeout.Milliseconds(),
+		)
 
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy request build failed", "target", target, "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ai_proxy_request_failed"})
 			return
 		}
@@ -459,6 +479,7 @@ func (h *Handler) proxyAIWithBody(path string, timeout time.Duration, after func
 
 		resp, err := (&http.Client{Timeout: timeout}).Do(req)
 		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy request failed", "target", target, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_service_unavailable"})
 			return
 		}
@@ -466,6 +487,7 @@ func (h *Handler) proxyAIWithBody(path string, timeout time.Duration, after func
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy response read failed", "target", target, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_proxy_read_failed"})
 			return
 		}
@@ -483,18 +505,28 @@ func (h *Handler) proxyAIWithBody(path string, timeout time.Duration, after func
 		}
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
+		h.logProxyCompletion(r.Context(), "AI proxy request completed", target, resp.StatusCode, time.Since(start), body)
 	}
 }
 
 func (h *Handler) proxyAI(path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		target := strings.TrimRight(h.cfg.AIBaseURL, "/") + path
 		if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
 		}
+		h.logger.InfoContext(r.Context(), "AI proxy request started",
+			"request_id", logging.RequestID(r.Context()),
+			"method", r.Method,
+			"path", r.URL.Path,
+			"target", target,
+			"timeout_ms", int64(30*time.Second/time.Millisecond),
+		)
 
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy request build failed", "target", target, "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ai_proxy_request_failed"})
 			return
 		}
@@ -504,10 +536,17 @@ func (h *Handler) proxyAI(path string) http.HandlerFunc {
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy request failed", "target", target, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_service_unavailable"})
 			return
 		}
 		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy response read failed", "target", target, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_proxy_read_failed"})
+			return
+		}
 
 		for key, values := range resp.Header {
 			if strings.EqualFold(key, "Content-Length") {
@@ -518,19 +557,30 @@ func (h *Handler) proxyAI(path string) http.HandlerFunc {
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = w.Write(body)
+		h.logProxyCompletion(r.Context(), "AI proxy request completed", target, resp.StatusCode, time.Since(start), body)
 	}
 }
 
 func (h *Handler) proxyAIWithMethod(path string, method string, timeout time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		target := strings.TrimRight(h.cfg.AIBaseURL, "/") + path
 		if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
 		}
+		h.logger.InfoContext(r.Context(), "AI proxy request started",
+			"request_id", logging.RequestID(r.Context()),
+			"method", method,
+			"original_method", r.Method,
+			"path", r.URL.Path,
+			"target", target,
+			"timeout_ms", timeout.Milliseconds(),
+		)
 
 		req, err := http.NewRequestWithContext(r.Context(), method, target, r.Body)
 		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy request build failed", "target", target, "method", method, "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ai_proxy_request_failed"})
 			return
 		}
@@ -539,10 +589,17 @@ func (h *Handler) proxyAIWithMethod(path string, method string, timeout time.Dur
 
 		resp, err := (&http.Client{Timeout: timeout}).Do(req)
 		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy request failed", "target", target, "method", method, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_service_unavailable"})
 			return
 		}
 		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			h.logger.ErrorContext(r.Context(), "AI proxy response read failed", "target", target, "method", method, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "error", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_proxy_read_failed"})
+			return
+		}
 
 		for key, values := range resp.Header {
 			if strings.EqualFold(key, "Content-Length") {
@@ -553,8 +610,27 @@ func (h *Handler) proxyAIWithMethod(path string, method string, timeout time.Dur
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = w.Write(body)
+		h.logProxyCompletion(r.Context(), "AI proxy request completed", target, resp.StatusCode, time.Since(start), body)
 	}
+}
+
+func (h *Handler) logProxyCompletion(ctx context.Context, message string, target string, status int, duration time.Duration, body []byte) {
+	attrs := []any{
+		"request_id", logging.RequestID(ctx),
+		"target", target,
+		"upstream_status", status,
+		"duration_ms", duration.Milliseconds(),
+	}
+	if status >= 500 {
+		h.logger.ErrorContext(ctx, message, append(attrs, "body", truncateLogBody(body))...)
+		return
+	}
+	if status >= 400 {
+		h.logger.WarnContext(ctx, message, append(attrs, "body", truncateLogBody(body))...)
+		return
+	}
+	h.logger.InfoContext(ctx, message, attrs...)
 }
 
 func suggestions(query string, resultCount int) []string {
@@ -578,6 +654,14 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func truncateLogBody(data []byte) string {
+	text := strings.TrimSpace(string(data))
+	if len(text) > 1000 {
+		return text[:1000] + "...(truncated)"
+	}
+	return text
 }
 
 func cors(next http.Handler) http.Handler {

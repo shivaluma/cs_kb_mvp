@@ -20,6 +20,7 @@ services:
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-dev_master_key}
       AI_BASE_URL: ${AI_BASE_URL:-http://ai:8090}
       SEED_DEMO_SOPS: ${SEED_DEMO_SOPS:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${API_PORT:-8080}:8080"
     depends_on:

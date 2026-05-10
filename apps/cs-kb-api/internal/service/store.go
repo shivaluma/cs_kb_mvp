@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -25,6 +26,7 @@ type Store struct {
 	db     *pgxpool.Pool
 	cfg    config.Config
 	client *http.Client
+	logger *slog.Logger
 }
 
 type meiliSearchResponse struct {
@@ -66,10 +68,11 @@ type aiChunkDocument struct {
 	CaseReasons   any            `json:"case_reasons"`
 }
 
-func NewStore(ctx context.Context, cfg config.Config) (*Store, error) {
+func NewStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Store, error) {
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required; set it in .env or .env.local before running the API")
 	}
+	logger.InfoContext(ctx, "postgres pool init started", "connect_timeout_seconds", int(cfg.DatabaseConnectTimeout.Seconds()))
 	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
@@ -81,22 +84,29 @@ func NewStore(ctx context.Context, cfg config.Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create postgres pool: %w", err)
 	}
-	store := &Store{db: pool, cfg: cfg, client: &http.Client{Timeout: 10 * time.Second}}
+	store := &Store{db: pool, cfg: cfg, client: &http.Client{Timeout: 10 * time.Second}, logger: logger}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
+	logger.InfoContext(ctx, "postgres ping succeeded")
 	if err := store.EnsureSchema(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("ensure postgres schema: %w", err)
 	}
+	logger.InfoContext(ctx, "postgres schema ensured")
 	if cfg.SeedDemoSOPs {
 		if err := store.Seed(ctx); err != nil {
 			pool.Close()
 			return nil, err
 		}
+		logger.InfoContext(ctx, "demo SOP seed completed")
 	}
-	_ = store.IndexPublishedSOPs(ctx)
+	if err := store.IndexPublishedSOPs(ctx); err != nil {
+		logger.WarnContext(ctx, "initial meilisearch indexing failed", "error", err)
+	} else {
+		logger.InfoContext(ctx, "initial meilisearch indexing completed")
+	}
 	return store, nil
 }
 
@@ -472,6 +482,7 @@ func (s *Store) IndexPublishedSOPs(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.logger.InfoContext(ctx, "index published SOPs started", "count", len(sops))
 	docs := make([]meiliSOPDocument, 0, len(sops))
 	for _, sop := range sops {
 		docs = append(docs, sopToMeiliDocument(sop))
@@ -487,7 +498,15 @@ func (s *Store) IndexAIDocument(ctx context.Context, payload map[string]any) err
 	if documentID == "" {
 		return nil
 	}
-	_ = s.DeleteAIChunksFromMeili(ctx, documentID)
+	s.logger.InfoContext(ctx, "index AI document started",
+		"document_id", documentID,
+		"version_id", payload["version_id"],
+		"status", payload["status"],
+		"title", payload["title"],
+	)
+	if err := s.DeleteAIChunksFromMeili(ctx, documentID); err != nil {
+		s.logger.WarnContext(ctx, "delete existing AI chunks from meili failed", "document_id", documentID, "error", err)
+	}
 	if err := s.ensureMeiliIndex(ctx, "ai_documents", []string{"status", "vertical", "category", "tags", "case_reasons"}); err != nil {
 		return err
 	}
@@ -512,7 +531,11 @@ func (s *Store) IndexAIDocument(ctx context.Context, payload map[string]any) err
 	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_documents/documents?primaryKey=document_id", []map[string]any{doc}, nil); err != nil {
 		return err
 	}
-	return s.indexAIChunks(ctx, payload, metadata)
+	if err := s.indexAIChunks(ctx, payload, metadata); err != nil {
+		return err
+	}
+	s.logger.InfoContext(ctx, "index AI document completed", "document_id", documentID)
+	return nil
 }
 
 func (s *Store) DeleteAIDocumentFromMeili(ctx context.Context, documentID string) error {
@@ -538,17 +561,20 @@ func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metad
 		return nil
 	}
 	target := strings.TrimRight(s.cfg.AIBaseURL, "/") + "/ai/v1/documents/" + documentID + "/chunks?version_id=" + versionID
+	s.logger.DebugContext(ctx, "AI chunks fetch started", "document_id", documentID, "version_id", versionID, "target", target)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return err
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "AI chunks fetch failed", "document_id", documentID, "version_id", versionID, "target", target, "error", err)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
+		s.logger.ErrorContext(ctx, "AI chunks fetch returned non-2xx", "document_id", documentID, "version_id", versionID, "target", target, "status", resp.StatusCode, "body", truncateLogBody(data))
 		return fmt.Errorf("ai chunk read failed: %s", strings.TrimSpace(string(data)))
 	}
 	var chunks []struct {
@@ -592,12 +618,17 @@ func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metad
 		})
 	}
 	if len(docs) == 0 {
+		s.logger.WarnContext(ctx, "AI chunks fetch returned no chunks", "document_id", documentID, "version_id", versionID)
 		return nil
 	}
 	if err := s.ensureMeiliIndex(ctx, "ai_chunks", []string{"document_id", "version_id", "status", "vertical", "category", "tags", "case_reasons"}); err != nil {
 		return err
 	}
-	return s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents?primaryKey=chunk_id", docs, nil)
+	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents?primaryKey=chunk_id", docs, nil); err != nil {
+		return err
+	}
+	s.logger.InfoContext(ctx, "AI chunks indexed", "document_id", documentID, "version_id", versionID, "chunk_count", len(docs))
+	return nil
 }
 
 func (s *Store) DeleteSOPFromMeili(ctx context.Context, sopID string) error {
@@ -681,13 +712,16 @@ func (s *Store) indexSOPVersionAI(ctx context.Context, sop model.SOP) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "AI SOP version index request failed", "sop_id", sop.ID, "version_id", sop.CurrentVersion.ID, "error", err)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
+		s.logger.ErrorContext(ctx, "AI SOP version index returned non-2xx", "sop_id", sop.ID, "version_id", sop.CurrentVersion.ID, "status", resp.StatusCode, "body", truncateLogBody(body))
 		return fmt.Errorf("ai sop index failed: %s", strings.TrimSpace(string(body)))
 	}
+	s.logger.InfoContext(ctx, "AI SOP version index completed", "sop_id", sop.ID, "version_id", sop.CurrentVersion.ID)
 	return nil
 }
 
@@ -754,6 +788,7 @@ func (s *Store) ensureMeiliIndex(ctx context.Context, index string, filterable [
 }
 
 func (s *Store) meiliRequest(ctx context.Context, method, path string, payload any, target any) error {
+	start := time.Now()
 	var body io.Reader
 	if payload != nil {
 		data, err := json.Marshal(payload)
@@ -762,7 +797,8 @@ func (s *Store) meiliRequest(ctx context.Context, method, path string, payload a
 		}
 		body = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(s.cfg.MeiliHost, "/")+path, body)
+	url := strings.TrimRight(s.cfg.MeiliHost, "/") + path
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return err
 	}
@@ -772,17 +808,28 @@ func (s *Store) meiliRequest(ctx context.Context, method, path string, payload a
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "meilisearch request failed", "method", method, "path", path, "duration_ms", time.Since(start).Milliseconds(), "error", err)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 && !(method == http.MethodPost && resp.StatusCode == http.StatusConflict) {
 		data, _ := io.ReadAll(resp.Body)
+		s.logger.ErrorContext(ctx, "meilisearch returned non-2xx", "method", method, "path", path, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "body", truncateLogBody(data))
 		return fmt.Errorf("meili %s %s failed: %s", method, path, strings.TrimSpace(string(data)))
 	}
+	s.logger.DebugContext(ctx, "meilisearch request completed", "method", method, "path", path, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds())
 	if target != nil {
 		return json.NewDecoder(resp.Body).Decode(target)
 	}
 	return nil
+}
+
+func truncateLogBody(data []byte) string {
+	text := strings.TrimSpace(string(data))
+	if len(text) > 1000 {
+		return text[:1000] + "...(truncated)"
+	}
+	return text
 }
 
 func sopToMeiliDocument(sop model.SOP) meiliSOPDocument {

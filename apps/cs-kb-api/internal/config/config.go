@@ -10,6 +10,7 @@ type Config struct {
 	APIAddr                string
 	DatabaseURL            string
 	DatabaseConnectTimeout time.Duration
+	LogLevel               string
 	MeiliHost              string
 	MeiliMasterKey         string
 	AIBaseURL              string
@@ -21,6 +22,7 @@ func Load() Config {
 		APIAddr:                getEnv("API_ADDR", ":8080"),
 		DatabaseURL:            getEnv("DATABASE_URL", ""),
 		DatabaseConnectTimeout: getEnvDurationSeconds("DATABASE_CONNECT_TIMEOUT_SECONDS", 5*time.Second),
+		LogLevel:               getEnv("LOG_LEVEL", "info"),
 		MeiliHost:              getEnv("MEILI_HOST", "http://localhost:7700"),
 		MeiliMasterKey:         getEnv("MEILI_MASTER_KEY", "dev_master_key"),
 		AIBaseURL:              getEnv("AI_BASE_URL", "http://localhost:8090"),

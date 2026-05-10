@@ -36,9 +36,11 @@ MEILI_MASTER_KEY=...
 AI_BASE_URL=https://<ai-domain-or-internal-url>
 SEED_DEMO_SOPS=false
 DATABASE_CONNECT_TIMEOUT_SECONDS=10
+LOG_LEVEL=info
 ```
 
 `DATABASE_URL` must point to Postgres with `pgvector` installed.
+Set `LOG_LEVEL=debug` temporarily when debugging Dokploy upstream issues. API logs are JSON and include `request_id`, HTTP status, latency, AI proxy target/status, and Meilisearch failures.
 
 ### `cs-kb-ai`
 
