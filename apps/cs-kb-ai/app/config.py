@@ -19,10 +19,18 @@ class Settings:
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
         self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
+        self.openrouter_extraction_model = os.getenv("OPENROUTER_EXTRACTION_MODEL", self.openrouter_model)
+        self.openrouter_vision_model = os.getenv("OPENROUTER_VISION_MODEL", self.openrouter_extraction_model)
+        self.openrouter_metadata_model = os.getenv("OPENROUTER_METADATA_MODEL", self.openrouter_model)
+        self.openrouter_chat_model = os.getenv("OPENROUTER_CHAT_MODEL", self.openrouter_model)
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()
         self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "").strip()
+        self.embedding_provider = os.getenv("EMBEDDING_PROVIDER", "local_hash").strip().lower()
+        self.embedding_base_url = os.getenv("EMBEDDING_BASE_URL", self.openrouter_base_url).strip()
+        self.embedding_api_key = os.getenv("EMBEDDING_API_KEY", self.openrouter_api_key).strip()
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "").strip()
 
 
 settings = Settings()

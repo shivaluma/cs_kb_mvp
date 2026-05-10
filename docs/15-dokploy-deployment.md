@@ -55,8 +55,14 @@ Environment:
 DATABASE_URL=postgres://...
 OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=google/gemini-2.5-flash-lite
-OPENROUTER_WORKFLOW_MODEL=google/gemini-2.5-flash-lite
-OPENROUTER_AUDIT_MODEL=deepseek/deepseek-v3.2
+OPENROUTER_EXTRACTION_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_VISION_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_METADATA_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_CHAT_MODEL=deepseek/deepseek-v3.2
+EMBEDDING_PROVIDER=local_hash
+EMBEDDING_BASE_URL=
+EMBEDDING_API_KEY=
+EMBEDDING_MODEL=
 PUBLIC_APP_URL=https://<web-domain>
 QDRANT_URL=https://<qdrant-domain-or-internal-url> # optional, shown as not configured when empty
 QDRANT_API_KEY=...

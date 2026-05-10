@@ -200,7 +200,7 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
         boost += 0.025
 
     risk_level = normalize_phrase(str(metadata.get("risk_level") or ""))
-    if risk_level in {"high", "critical"} and any(token in query_tokens for token in {"risk", "zt", "bao", "mat", "compliance"}):
+    if risk_level in {"high", "critical"} and any(token in query_tokens for token in {"risk", "rui", "ro", "bao", "mat", "security", "compliance", "tuan", "thu"}):
         boost += 0.025
 
     return boost

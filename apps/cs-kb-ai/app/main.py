@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app import repository
@@ -199,6 +199,116 @@ async def upload_document(
         extraction_confidence=enrichment["extraction_confidence"],
     )
     return DocumentVersionResponse(**version, warnings=warnings)
+
+
+@app.post("/ai/v1/documents/upload-async", response_model=DocumentVersionResponse)
+async def upload_document_async(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    external_id: str = Form(""),
+    title: str = Form(""),
+    metadata: str = Form("{}"),
+    created_by: str = Form("system"),
+    change_summary: str = Form("Uploaded for background extraction"),
+) -> DocumentVersionResponse:
+    parsed_metadata = parse_metadata(metadata)
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty_file")
+
+    digest = hashlib.sha256(data).hexdigest()
+    pending_metadata = parsed_metadata.model_copy(
+        update={
+            "review_status": "needs_review",
+            "extraction_confidence": 0.0,
+            "extraction_status": "extracting",
+            "extraction_error": "",
+            "extraction_warnings": ["background_extraction_queued"],
+        }
+    )
+    version = repository.create_document_version(
+        external_id=external_id or digest,
+        title=title or file.filename or digest,
+        source_filename=file.filename or "document.txt",
+        content_type=file.content_type or "application/octet-stream",
+        checksum=digest,
+        raw_text=best_effort_raw_text(data),
+        raw_data=data,
+        chunks=[],
+        metadata=pending_metadata,
+        status="draft",
+        created_by=created_by,
+        change_summary=change_summary,
+        document_type=pending_metadata.document_type,
+        review_status="needs_review",
+        extraction_confidence=0.0,
+    )
+    background_tasks.add_task(
+        run_background_extraction,
+        document_id=version["document_id"],
+        version_id=version["version_id"],
+        filename=file.filename or "document.txt",
+        content_type=file.content_type or "application/octet-stream",
+        data=data,
+        metadata=parsed_metadata,
+        actor=created_by,
+    )
+    return DocumentVersionResponse(**version, warnings=["background_extraction_queued"])
+
+
+def run_background_extraction(
+    *,
+    document_id: str,
+    version_id: str,
+    filename: str,
+    content_type: str,
+    data: bytes,
+    metadata: DocumentMetadata,
+    actor: str,
+) -> None:
+    try:
+        raw_text, _digest, chunks, warnings, enrichment = prepare_document_version(
+            filename=filename,
+            content_type=content_type,
+            data=data,
+            metadata=metadata,
+        )
+        extracted_metadata = metadata.model_copy(update=enrichment)
+        repository.replace_document_version_extraction(
+            document_id=document_id,
+            version_id=version_id,
+            raw_text=raw_text,
+            chunks=chunks,
+            metadata=extracted_metadata,
+            document_type=enrichment["document_type"],
+            review_status=enrichment["review_status"],
+            extraction_confidence=enrichment["extraction_confidence"],
+            actor=actor,
+            change_summary="Background extraction completed",
+        )
+    except Exception as exc:
+        failure_reason = str(exc)
+        failed_metadata = metadata.model_copy(
+            update={
+                "review_status": "needs_review",
+                "extraction_confidence": 0.0,
+                "extraction_status": "failed_validation",
+                "extraction_error": failure_reason,
+                "extraction_warnings": [failure_reason],
+            }
+        )
+        repository.replace_document_version_extraction(
+            document_id=document_id,
+            version_id=version_id,
+            raw_text=best_effort_raw_text(data),
+            chunks=[],
+            metadata=failed_metadata,
+            document_type=failed_metadata.document_type,
+            review_status="needs_review",
+            extraction_confidence=0.0,
+            actor=actor,
+            change_summary=f"Background extraction failed: {failure_reason[:180]}",
+        )
 
 
 @app.post("/ai/v1/documents/metadata-preview", response_model=DocumentMetadataPreviewResponse)

@@ -43,11 +43,11 @@ Example request:
 
 ```json
 {
-  "query": "khong nhan du mon",
+  "query": "quy trình xác minh thông tin",
   "filters": {
-    "audience": ["customer"],
-    "vertical": ["food"],
-    "tags": ["missing_item"]
+    "audience": ["customer", "driver"],
+    "vertical": ["account"],
+    "tags": ["account_verification"]
   },
   "include_semantic": true
 }

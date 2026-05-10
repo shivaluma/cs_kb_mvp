@@ -37,6 +37,12 @@ AI_BASE_URL=http://localhost:8090
 MEILI_HOST=http://localhost:7700
 QDRANT_URL=https://YOUR_QDRANT_HOST
 QDRANT_API_KEY=YOUR_QDRANT_API_KEY
+OPENROUTER_API_KEY=YOUR_OPENROUTER_KEY
+OPENROUTER_EXTRACTION_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_VISION_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_METADATA_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_CHAT_MODEL=deepseek/deepseek-v3.2
+EMBEDDING_PROVIDER=local_hash
 ```
 
 `DATABASE_CONNECT_TIMEOUT_SECONDS` makes API startup fail fast when cloud

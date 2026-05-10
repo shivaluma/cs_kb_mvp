@@ -55,6 +55,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/ai/documents", h.proxyAI("/ai/v1/documents"))
 	mux.HandleFunc("POST /api/v1/ai/documents/metadata-preview", h.proxyAIDocumentMetadataPreview)
 	mux.HandleFunc("POST /api/v1/ai/documents/upload", h.proxyAIDocumentUpload)
+	mux.HandleFunc("POST /api/v1/ai/documents/upload-async", h.proxyAIDocumentUploadAsync)
 	mux.HandleFunc("GET /api/v1/ai/documents/{id}/versions", h.proxyAIDocumentVersions)
 	mux.HandleFunc("GET /api/v1/ai/documents/{id}/chunks", h.proxyAIDocumentChunks)
 	mux.HandleFunc("GET /api/v1/ai/documents/{id}/extraction-units", h.proxyAIDocumentExtractionUnits)
@@ -389,6 +390,10 @@ func (h *Handler) proxyAIDocumentUpload(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	})(w, r)
+}
+
+func (h *Handler) proxyAIDocumentUploadAsync(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithBody("/ai/v1/documents/upload-async", 30*time.Second, nil)(w, r)
 }
 
 func (h *Handler) proxyAIDocumentMetadataPreview(w http.ResponseWriter, r *http.Request) {

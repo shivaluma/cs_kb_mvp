@@ -45,6 +45,7 @@ type Draft = {
   riskLevel: string;
   effectiveFrom: string;
   sourceRefAcknowledged: boolean;
+  workflowGraphJson: string;
 };
 
 export function ExtractionReviewEditor({
@@ -66,10 +67,13 @@ export function ExtractionReviewEditor({
   }, [initialDraft]);
 
   const changed = JSON.stringify(draft) !== JSON.stringify(initialDraft);
-  const valid = draft.title.trim().length > 0 && draft.content.trim().length > 0 && Number.isFinite(Number(draft.confidence));
+  const workflowGraphError = workflowGraphJsonError(draft.workflowGraphJson);
+  const valid = draft.title.trim().length > 0 && draft.content.trim().length > 0 && Number.isFinite(Number(draft.confidence)) && !workflowGraphError;
   const confidence = Math.max(0, Math.min(Number(draft.confidence) || 0, 1));
 
   function buildUpdate(reviewStatus = draft.reviewStatus): ExtractionUnitUpdate {
+    const workflowGraph = parseWorkflowGraphJson(draft.workflowGraphJson);
+    const workflowGraphPatch = workflowGraph ? workflowGraphMetadataPatch(workflowGraph) : {};
     return {
       title: draft.title.trim(),
       content: draft.content.trim(),
@@ -82,6 +86,7 @@ export function ExtractionReviewEditor({
         risk_level: draft.riskLevel,
         effective_from: draft.effectiveFrom,
         source_ref_acknowledged: draft.sourceRefAcknowledged,
+        ...workflowGraphPatch,
       },
     };
   }
@@ -119,10 +124,11 @@ export function ExtractionReviewEditor({
 
       <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_11rem_9rem]">
         <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Title
+          Retrieval title
           <Input
             disabled={disabled}
             onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
+            placeholder="Short searchable label, not the full rule"
             value={draft.title}
           />
         </label>
@@ -158,7 +164,7 @@ export function ExtractionReviewEditor({
       </div>
 
       <label className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
-        Curated content
+        Unit content
         <textarea
           className="min-h-28 rounded-xl border border-input bg-background px-3 py-2 text-sm leading-6 shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={disabled}
@@ -166,6 +172,25 @@ export function ExtractionReviewEditor({
           value={draft.content}
         />
       </label>
+
+      {unit.metadata.workflow_graph ? (
+        <label className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
+          Workflow graph JSON
+          <textarea
+            className={cn(
+              "min-h-44 rounded-xl border border-input bg-background px-3 py-2 font-mono text-xs leading-5 shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50",
+              workflowGraphError && "border-destructive focus-visible:border-destructive focus-visible:ring-destructive/20",
+            )}
+            disabled={disabled}
+            onChange={(event) => setDraft((current) => ({ ...current, workflowGraphJson: event.target.value }))}
+            spellCheck={false}
+            value={draft.workflowGraphJson}
+          />
+          <span className={cn("text-[11px] leading-4 text-muted-foreground", workflowGraphError && "text-destructive")}>
+            {workflowGraphError || "Edit nodes, edges, annotations, and validation errors. Invalid JSON cannot be saved."}
+          </span>
+        </label>
+      ) : null}
 
       {unit.metadata.source_ref_quality === "page_only" ? (
         <div className="mt-3 rounded-xl border border-amber-300/70 bg-amber-50 px-3 py-2 text-sm text-amber-950">
@@ -300,5 +325,44 @@ function unitToDraft(unit: ExtractionUnit): Draft {
     riskLevel: String(unit.metadata.risk_level ?? ""),
     effectiveFrom: String(unit.metadata.effective_from ?? ""),
     sourceRefAcknowledged: unit.metadata.source_ref_acknowledged === true,
+    workflowGraphJson: unit.metadata.workflow_graph ? JSON.stringify(unit.metadata.workflow_graph, null, 2) : "",
+  };
+}
+
+function parseWorkflowGraphJson(value: string) {
+  if (!value.trim()) {
+    return null;
+  }
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function workflowGraphJsonError(value: string) {
+  if (!value.trim()) {
+    return "";
+  }
+  try {
+    JSON.parse(value);
+    return "";
+  } catch (error) {
+    return error instanceof Error ? error.message : "Invalid JSON";
+  }
+}
+
+function workflowGraphMetadataPatch(workflowGraph: Record<string, unknown>) {
+  const validationErrors = Array.isArray(workflowGraph.validation_errors) ? workflowGraph.validation_errors : [];
+  const uncertainEdges = Array.isArray(workflowGraph.uncertain_edges) ? workflowGraph.uncertain_edges : [];
+  return {
+    workflow_graph: workflowGraph,
+    graph_confidence: Number(workflowGraph.graph_confidence ?? 0),
+    requires_human_review: Boolean(workflowGraph.requires_human_review ?? true),
+    review_reason: String(workflowGraph.review_reason ?? ""),
+    graph_validation_errors: validationErrors,
+    graph_validation_error_count: validationErrors.length,
+    uncertain_edges: uncertainEdges,
+    uncertain_edges_count: uncertainEdges.length,
   };
 }

@@ -30,15 +30,16 @@ export const defaultUpload: UploadState = {
   tags: "",
   caseReasons: "",
   ownerTeam: "CS Ops",
+  asyncExtraction: true,
 };
 
 export const defaultSynonymDraft: SynonymDraft = {
-  canonicalKey: "missing_item",
+  canonicalKey: "",
   synonymType: "one_way",
   status: "draft",
-  domain: "food",
-  audience: "customer",
-  terms: "khach khong nhan du mon, thieu topping",
+  domain: "",
+  audience: "",
+  terms: "",
 };
 
 export const filterOptions = {

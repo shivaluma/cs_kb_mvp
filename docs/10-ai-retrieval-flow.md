@@ -13,7 +13,7 @@ Tables are created by `infra/postgres/init/002_ai_retrieval.sql` and also ensure
 - `ai_chunks`: chunk content, metadata, and `vector(384)` embeddings.
 - `ai_retrieval_events`: query logs.
 - `ai_audit_events`: upload, publish, and archive logs.
-- `taxonomy_intents`: controlled business intents such as `missing_item` and `refund`.
+- `taxonomy_intents`: controlled business intents such as `account_verification` and `email_verification`.
 - `search_synonym_groups`: governed synonym groups with `draft`, `in_review`, `active`, and `archived` lifecycle.
 - `search_synonym_terms`: phrase-level or intent-level synonym terms with normalized accent-insensitive form.
 - `search_synonym_suggestions`: AI/analytics-generated candidates that require human acceptance.
@@ -44,8 +44,8 @@ Query normalization is DB-managed. The AI service loads active synonym groups fr
 
 Synonym types:
 
-- `regular`: two-way equivalence, for example `refund`, `hoan tien`, `boi hoan`.
-- `one_way`: user phrase maps to canonical intent only, for example `khong nhan du mon` -> `missing_item`.
+- `regular`: two-way equivalence, for example `email`, `mail`, `thư điện tử`.
+- `one_way`: user phrase maps to canonical intent only, for example `xác minh tài khoản` -> `account_verification`.
 - `typo_correction`: misspelling maps to canonical phrase.
 - `placeholder`: reserved for future templated query expansion.
 
@@ -55,11 +55,11 @@ The current embedding is deterministic and local, so no external API key is requ
 
 ```sh
 curl -s \
-  -F "file=@samples/missing-item-sop.txt" \
-  -F "external_id=sop-food-missing-item-upload" \
-  -F "title=Uploaded Food Missing Item SOP" \
+  -F "file=@samples/account-verification-sop.txt" \
+  -F "external_id=sop-account-verification-upload" \
+  -F "title=Uploaded Account Verification SOP" \
   -F "status=published" \
-  -F 'metadata={"audience":["customer"],"vertical":"food","category":"case_handling","tags":["missing_item","refund"],"case_reasons":["CR_FOOD_MISSING_ITEM"],"owner_team":"CS Ops"}' \
+  -F 'metadata={"audience":["customer","driver"],"vertical":"account","category":"verification","tags":["account_verification","identity_check"],"case_reasons":["CR_ACCOUNT_VERIFICATION"],"owner_team":"CS Ops"}' \
   http://localhost:8080/api/v1/ai/documents/upload
 ```
 
@@ -68,7 +68,7 @@ curl -s \
 ```sh
 curl -s \
   -H "Content-Type: application/json" \
-  -d '{"query":"khach khong nhan du mon co duoc refund khong","mode":"hybrid","limit":5,"filters":{"vertical":["food"],"status":["published"]}}' \
+  -d '{"query":"quy trình xác minh thông tin cần xử lý thế nào","mode":"hybrid","limit":5,"filters":{"vertical":["account"],"status":["published"]}}' \
   http://localhost:8080/api/v1/ai/retrieve
 ```
 

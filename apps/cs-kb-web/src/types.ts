@@ -322,6 +322,7 @@ export type UploadState = {
   tags: string;
   caseReasons: string;
   ownerTeam: string;
+  asyncExtraction: boolean;
 };
 
 export type SynonymDraft = {

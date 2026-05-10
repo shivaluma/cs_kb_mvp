@@ -16,9 +16,9 @@
 - Production-grade AI retrieval flow using Postgres + pgvector:
   - Multipart document upload for TXT/MD/PDF/DOCX/XLSX/XLSM/XLS and image assets.
   - Document classification for text SOP, policy table, workflow/diagram, asset, macro/script, and unknown sources.
-  - Text and spreadsheet extraction, section/sheet/row-aware chunking, deterministic 384-dim embeddings.
+  - Text and spreadsheet extraction, section/sheet/row-aware chunking, and configurable embeddings (`local_hash` fallback or OpenAI-compatible `/embeddings` provider).
   - Workflow PDF draft extraction into granular units such as `decision_point`, `workflow_step`, `macro_script`, `operational_note`, and `security_note`.
-  - Optional OpenRouter chat-completions extractor for workflow drafts, with deterministic heuristic fallback when `OPENROUTER_API_KEY` is not configured.
+  - OpenRouter chat-completions extractor for workflow drafts; if unavailable, ingestion is recoverable as a failed draft instead of silently inventing business rules.
   - Editable extraction review units with confidence, source page metadata, review status, audit log, and regenerated embeddings before publish.
   - Document/version lifecycle with draft, published, archived.
   - Latest published version retrieval only by default.

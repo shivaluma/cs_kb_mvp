@@ -460,6 +460,70 @@ def create_document_version(
     }
 
 
+def replace_document_version_extraction(
+    *,
+    document_id: str,
+    version_id: str,
+    raw_text: str,
+    chunks: list[dict[str, Any]],
+    metadata: DocumentMetadata,
+    document_type: str,
+    review_status: str,
+    extraction_confidence: float,
+    actor: str,
+    change_summary: str = "",
+) -> None:
+    metadata_json = pg_text(json.dumps(metadata.model_dump()))
+    with connection() as conn:
+        with conn.transaction():
+            conn.execute("DELETE FROM ai_chunks WHERE version_id = %s", (version_id,))
+            insert_chunks(conn, document_id, version_id, chunks)
+            conn.execute(
+                """
+                UPDATE ai_document_versions
+                SET raw_text = %s,
+                    chunk_count = %s,
+                    document_type = %s,
+                    review_status = %s,
+                    extraction_confidence = %s,
+                    change_summary = COALESCE(NULLIF(%s, ''), change_summary)
+                WHERE id = %s
+                """,
+                (
+                    pg_text(raw_text),
+                    len(chunks),
+                    pg_text(document_type),
+                    pg_text(review_status),
+                    extraction_confidence,
+                    pg_text(change_summary),
+                    version_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE ai_documents
+                SET metadata = %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (metadata_json, document_id),
+            )
+            audit_tx(
+                conn,
+                actor=pg_text(actor),
+                action="document_version_extraction_replace",
+                entity_type="ai_document_version",
+                entity_id=version_id,
+                metadata={
+                    "document_id": document_id,
+                    "chunk_count": len(chunks),
+                    "document_type": document_type,
+                    "review_status": review_status,
+                    "extraction_confidence": extraction_confidence,
+                },
+            )
+
+
 def insert_chunks(conn: Connection[Any], document_id: str, version_id: str, chunks: list[dict[str, Any]]) -> None:
     rows = [
         (
@@ -598,6 +662,57 @@ def workflow_graph_quality_failures(metadata: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(failures))
 
 
+def required_unit_types_from_metadata(metadata: dict[str, Any]) -> set[str]:
+    candidates: list[Any] = []
+    for key in ("required_unit_types", "publish_required_unit_types"):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+    document_metadata = metadata.get("document_metadata")
+    if isinstance(document_metadata, dict):
+        for key in ("required_unit_types", "publish_required_unit_types"):
+            value = document_metadata.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+    readiness = metadata.get("publish_readiness")
+    if isinstance(readiness, dict):
+        value = readiness.get("required_unit_types") or readiness.get("required_units")
+        if isinstance(value, list):
+            candidates.extend(value)
+    return {
+        normalize_required_unit_type(str(item))
+        for item in candidates
+        if normalize_required_unit_type(str(item))
+    }
+
+
+def normalize_required_unit_type(value: str) -> str:
+    normalized = normalize_phrase(value).replace(" ", "_").replace("-", "_")
+    allowed = {
+        "routing_rule",
+        "operational_instruction",
+        "policy_rule",
+        "validation_rule",
+        "handling_rule",
+        "workflow_step",
+        "decision_point",
+        "decision_rule",
+        "sla_rule",
+        "escalation_rule",
+        "case_creation_rule",
+        "handoff_rule",
+        "macro_script",
+        "operational_note",
+        "security_note",
+        "compliance_note",
+        "warning",
+        "related_document",
+        "follow_up_rule",
+        "text_section",
+    }
+    return normalized if normalized in allowed else ""
+
+
 def missing_or_unreviewed_workflow_unit(
     unit_status_by_type: dict[str, bool],
     accepted_types: set[str],
@@ -661,8 +776,8 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
     workflow_graph_quality_errors: list[str] = []
     workflow_source_ack_missing = 0
     workflow_unit_status_by_type: dict[str, bool] = {}
+    required_unit_types: set[str] = set()
     missing_source_refs = 0
-    aggregate_text_parts: list[str] = []
     for row in rows:
         metadata = row.get("metadata") or {}
         if not isinstance(metadata, dict):
@@ -670,9 +785,9 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         unit_type = str(metadata.get("unit_type") or row.get("section") or "")
         retrieval_scope = str(metadata.get("retrieval_scope") or "")
         text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or ""), json.dumps(metadata, ensure_ascii=False)]))
-        aggregate_text_parts.append(text)
         if unit_type:
             workflow_unit_status_by_type[unit_type] = workflow_unit_status_by_type.get(unit_type, False) or is_reviewed_status(metadata.get("review_status"))
+        required_unit_types.update(required_unit_types_from_metadata(metadata))
         has_full_sop = has_full_sop or unit_type == "full_sop" or retrieval_scope == "document"
         pending_units += 1 if str(metadata.get("review_status") or "needs_review") == "needs_review" else 0
         has_owner = has_owner or bool(metadata.get("owner_team"))
@@ -713,22 +828,13 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         failures.extend(workflow_graph_quality_errors)
         if workflow_source_ack_missing:
             failures.append(f"{workflow_source_ack_missing}_page_only_source_refs_need_ack")
-        aggregate_text = " ".join(aggregate_text_parts)
-        is_chat_social_workflow = any(term in aggregate_text for term in ["chat social", "fanpage", "pancake", "source internal", "84912345678"])
-        if is_chat_social_workflow:
-            required_units = {
-                "sla_rule": {"sla_rule"},
-                "decision_rule": {"decision_rule", "decision_point"},
-                "escalation_rule": {"escalation_rule"},
-                "case_creation_rule": {"case_creation_rule"},
-                "handoff_rule": {"handoff_rule"},
-                "macro_script": {"macro_script"},
-                "operational_note": {"operational_note"},
-            }
-            for failure_key, accepted_types in required_units.items():
-                failure = missing_or_unreviewed_workflow_unit(workflow_unit_status_by_type, accepted_types, failure_key)
-                if failure:
-                    failures.append(failure)
+        for required_unit_type in sorted(required_unit_types):
+            accepted_types = {required_unit_type}
+            if required_unit_type == "decision_rule":
+                accepted_types.add("decision_point")
+            failure = missing_or_unreviewed_workflow_unit(workflow_unit_status_by_type, accepted_types, required_unit_type)
+            if failure:
+                failures.append(failure)
     if version["document_type"] in {"policy_table", "policy_rule", "workflow_diagram"} and (has_high_risk_signal or has_historical_sheets) and not has_effective_from:
         failures.append("missing_effective_from")
     if has_historical_sheets and not has_effective_from:
@@ -1792,19 +1898,24 @@ def filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
         clauses.append("c.document_id = ANY(%s)")
         params.append(filters.document_ids)
     if filters.audience:
-        clauses.append("(d.metadata->'audience') ?| %s")
+        clauses.append("((d.metadata->'audience') ?| %s OR (c.metadata->'audience') ?| %s)")
+        params.append(filters.audience)
         params.append(filters.audience)
     if filters.tags:
-        clauses.append("(d.metadata->'tags') ?| %s")
+        clauses.append("((d.metadata->'tags') ?| %s OR (c.metadata->'tags') ?| %s)")
+        params.append(filters.tags)
         params.append(filters.tags)
     if filters.case_reasons:
-        clauses.append("(d.metadata->'case_reasons') ?| %s")
+        clauses.append("((d.metadata->'case_reasons') ?| %s OR (c.metadata->'case_reasons') ?| %s)")
+        params.append(filters.case_reasons)
         params.append(filters.case_reasons)
     if filters.vertical:
-        clauses.append("d.metadata->>'vertical' = ANY(%s)")
+        clauses.append("(d.metadata->>'vertical' = ANY(%s) OR c.metadata->>'vertical' = ANY(%s))")
+        params.append(filters.vertical)
         params.append(filters.vertical)
     if filters.category:
-        clauses.append("d.metadata->>'category' = ANY(%s)")
+        clauses.append("(d.metadata->>'category' = ANY(%s) OR c.metadata->>'category' = ANY(%s))")
+        params.append(filters.category)
         params.append(filters.category)
 
     return " AND ".join(clauses), params

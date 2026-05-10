@@ -17,6 +17,10 @@ export function useDocuments() {
   return useQuery({
     queryKey: queryKeys.documents,
     queryFn: () => apiGet<DocumentSummary[]>("/api/v1/ai/documents"),
+    refetchInterval: (query) => {
+      const documents = query.state.data as DocumentSummary[] | undefined;
+      return documents?.some((document) => String(document.metadata?.extraction_status ?? "") === "extracting") ? 4000 : false;
+    },
   });
 }
 
@@ -68,6 +72,21 @@ export function useUploadDocument() {
         version_number: number;
         chunk_count: number;
       }>("/api/v1/ai/documents/upload", form),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.documents });
+    },
+  });
+}
+
+export function useUploadDocumentAsync() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (form: FormData) =>
+      apiUpload<{
+        title: string;
+        version_number: number;
+        chunk_count: number;
+      }>("/api/v1/ai/documents/upload-async", form),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.documents });
     },

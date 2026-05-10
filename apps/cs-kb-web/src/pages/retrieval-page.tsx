@@ -17,7 +17,7 @@ export function RetrievalPage() {
   const { getParam, setParams } = useUrlSearch();
   const { reportError } = useFeedback();
   const retrievalMutation = useRetrieval();
-  const query = getParam("q", "khach khong nhan du mon co duoc refund khong");
+  const query = getParam("q", "quy trình xác minh thông tin cần xử lý thế nào");
   const mode = (getParam("mode", "hybrid") as RetrievalResponse["mode"]) || "hybrid";
   const [filters, setFilters] = useState<FilterState>(defaultFilters);
 

@@ -13,6 +13,7 @@ import {
   usePublishVersion,
   useUpdateExtractionUnit,
   useUploadDocument,
+  useUploadDocumentAsync,
   useVersionRawText,
 } from "@/hooks/api/documents";
 import { useUrlSearch } from "@/hooks/use-url-search";
@@ -52,6 +53,7 @@ export function DocumentsPage() {
   const extractionUnitsQuery = useExtractionUnits(selectedDocument?.document_id, effectiveVersionId);
   const versionRawQuery = useVersionRawText(effectiveVersionId);
   const uploadMutation = useUploadDocument();
+  const uploadAsyncMutation = useUploadDocumentAsync();
   const metadataPreviewMutation = useDocumentMetadataPreview();
   const publishMutation = usePublishVersion();
   const bulkReviewMutation = useBulkReviewVersion();
@@ -173,9 +175,14 @@ export function DocumentsPage() {
       }),
     );
 
-    uploadMutation.mutate(form, {
+    const mutation = upload.asyncExtraction ? uploadAsyncMutation : uploadMutation;
+    mutation.mutate(form, {
       onSuccess: (data) => {
-        reportNotice(`Uploaded ${data.title} v${data.version_number}, ${data.chunk_count} chunks extracted for review.`);
+        reportNotice(
+          upload.asyncExtraction
+            ? `Queued ${data.title} v${data.version_number} for background extraction. Refresh the source queue to see extracted units.`
+            : `Uploaded ${data.title} v${data.version_number}, ${data.chunk_count} chunks extracted for review.`,
+        );
         setUpload((current) => ({ ...current, file: null, title: "", externalId: "" }));
       },
       onError: () => reportError("Upload failed. Confirm file type, size, and AI service health."),
@@ -245,6 +252,7 @@ export function DocumentsPage() {
   const busyKey =
     metadataPreviewMutation.isPending ? "metadata-preview" :
     uploadMutation.isPending ? "upload" :
+    uploadAsyncMutation.isPending ? "upload" :
     archiveDocumentMutation.isPending ? "archive-document" :
     publishMutation.isPending ? "publishing" :
     bulkReviewMutation.isPending ? "bulk-review" :

@@ -735,7 +735,9 @@ function isHighRiskDocument(document: DocumentSummary) {
   const serialized = JSON.stringify(metadata).toLowerCase();
   return (
     serialized.includes("high") ||
-    serialized.includes("zt") ||
+    serialized.includes("risk") ||
+    serialized.includes("compliance") ||
+    serialized.includes("security") ||
     document.latest_document_type === "policy_rule" ||
     document.latest_document_type === "workflow_diagram"
   );

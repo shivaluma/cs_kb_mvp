@@ -27,6 +27,8 @@ Quy tắc:
 - Tất cả unit chỉ là bản nháp để CS Ops review, không được xem là đã phê duyệt.
 - Mọi trường user-facing phải viết bằng tiếng Việt tự nhiên: title, content, note, script, warning, summary.
 - Không dùng nhãn tiếng Anh chung chung như "Curated content", "Extracted workflow unit", "Workflow overview", "Initial verification script".
+- Title của mỗi atomic unit phải là nhãn ngắn 4-10 từ để scan/search, không copy cả câu content. Ví dụ dạng tốt: "Thời hạn khiếu nại món ăn", "Không cung cấp mã đơn", "Kiểm tra thông tin trên hệ thống".
+- Content mới là rule/action đầy đủ. Nếu title và content gần giống nhau, title bị xem là kém chất lượng.
 - Giữ nguyên mã nghiệp vụ/ký hiệu/viết tắt đúng như xuất hiện trong tài liệu nguồn.
 - Ưu tiên unit nhỏ, dễ review: workflow_overview, verification_dependency, workflow_step, decision_point, macro_script, operational_note, security_note, related_document.
 - Mỗi unit bắt buộc có source_refs để trace ngược về nguồn. Mỗi source_ref bắt buộc có source_type và source_file.
@@ -336,7 +338,8 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         "- Decision node phải có nhánh yes/no nếu diagram thể hiện Yes/No. Không đảo nhánh Yes/No.\n"
         "- Start không có incoming edge. End không có outgoing edge.\n"
         "- Phase/actor chỉ gán khi có căn cứ từ swimlane/label/source, không gán bừa.\n\n"
-        "Yêu cầu document_metadata: title, effective_from nếu thấy trong nguồn, document_type=\"workflow_diagram\", sub_type nếu là swimlane_process, channel, audience, actors, phases, systems, risk_level, requires_layout_extraction=true, requires_human_review=true, extraction_confidence.\n"
+        "Yêu cầu document_metadata: title, effective_from nếu thấy trong nguồn, document_type=\"workflow_diagram\", sub_type nếu là swimlane_process, channel, audience, actors, phases, systems, risk_level, requires_layout_extraction=true, requires_human_review=true, extraction_confidence, required_unit_types.\n"
+        "required_unit_types là danh sách generic các unit_type bắt buộc phải review trước publish dựa trên nội dung thật của source. Ví dụ nếu source có SLA thì thêm sla_rule; có handoff thì thêm handoff_rule; có cảnh báo bảo mật/compliance thì thêm security_note/compliance_note. Không thêm nếu source không có căn cứ.\n"
         "Yêu cầu full_sop: là ExtractedUnit unit_type=\"full_sop\", metadata.retrieval_scope=\"document\", title/content tiếng Việt, source_refs có page.\n"
         "Yêu cầu workflow_graph: workflow_id, title, start_node_id, nodes, edges, graph_confidence 0..1, requires_human_review=true, review_reason. "
         "Edge dùng field from_node/to_node/condition, không dùng field tên 'from'. "
@@ -360,7 +363,7 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         user_content = extraction_prompt
 
     payload = {
-        "model": settings.openrouter_model,
+        "model": settings.openrouter_vision_model if page_images else settings.openrouter_extraction_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
@@ -421,7 +424,7 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         return [], ["openrouter_disabled"]
 
     payload = {
-        "model": settings.openrouter_model,
+        "model": settings.openrouter_extraction_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -431,6 +434,7 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
                     "Không hardcode và không tự bịa policy. Chỉ dùng thông tin có trong source.\n\n"
                     "Yêu cầu bắt buộc:\n"
                     "- Trả JSON shape {\"units\":[{\"unit_type\":\"...\",\"title\":\"...\",\"content\":\"...\",\"confidence\":0.0,\"metadata\":{...}}]}.\n"
+                    "- title là nhãn ngắn 4-10 từ để agent scan/search; không copy nguyên câu content vào title.\n"
                     "- Phải có đúng 1 unit_type=\"full_sop\" với metadata.retrieval_scope=\"document\".\n"
                     "- Mỗi unit bắt buộc có source_refs. Excel cần source_refs[].sheet và row_start/row_end nếu rule đến từ dòng cụ thể. full_sop có thể dùng sheet/row range tổng.\n"
                     "- Tạo các unit nhỏ cho từng rule/action quan trọng với unit_type như routing_rule, validation_rule, handling_rule, warning, macro_script.\n"
@@ -510,7 +514,7 @@ def generate_grounded_answer(question: str, retrieval: RetrievalResponse, conver
         if message.get("content")
     )
     payload = {
-        "model": settings.openrouter_model,
+        "model": settings.openrouter_chat_model,
         "messages": [
             {
                 "role": "system",
@@ -577,7 +581,7 @@ def suggest_document_metadata(
         raise ValueError("openrouter_disabled")
 
     payload = {
-        "model": settings.openrouter_model,
+        "model": settings.openrouter_metadata_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -663,6 +667,10 @@ def normalize_metadata(metadata: dict[str, Any], filename: str, document_type: s
 
 def normalize_unit(unit: dict[str, Any]) -> dict[str, Any]:
     metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+    content = str(unit.get("content") or "").strip()
+    unit_type = str(unit.get("unit_type") or "workflow_step")
+    raw_title = vietnamese_title(str(unit.get("title") or "").strip())
+    title = compact_unit_title(raw_title, content, unit_type)
     confidence = unit.get("confidence", 0.72)
     try:
         confidence_value = float(confidence)
@@ -679,13 +687,57 @@ def normalize_unit(unit: dict[str, Any]) -> dict[str, Any]:
     if source_ref_quality == "page_only":
         merged_metadata.setdefault("source_ref_acknowledged", False)
     return {
-        "unit_type": str(unit.get("unit_type") or "workflow_step"),
-        "title": vietnamese_title(str(unit.get("title") or "").strip())[:180],
-        "content": str(unit.get("content") or "").strip(),
+        "unit_type": unit_type,
+        "title": title[:180],
+        "content": content,
         "confidence": max(0.0, min(confidence_value, 1.0)),
         "metadata": merged_metadata,
         "source_refs": source_refs,
     }
+
+
+def compact_unit_title(title: str, content: str, unit_type: str) -> str:
+    clean_title = normalize_display_text(title)
+    clean_content = normalize_display_text(content)
+    if not clean_title:
+        return fallback_title_from_content(clean_content, unit_type)
+    title_key = normalized_workflow_label(clean_title)
+    content_key = normalized_workflow_label(clean_content)
+    title_words = title_key.split()
+    is_too_long = len(clean_title) > 90 or len(title_words) > 14
+    repeats_content = bool(title_key and content_key and (content_key.startswith(title_key) or title_key in content_key[:160]))
+    if is_too_long or repeats_content:
+        return fallback_title_from_content(clean_content, unit_type)
+    return clean_title
+
+
+def fallback_title_from_content(content: str, unit_type: str) -> str:
+    if not content:
+        return vietnamese_title(unit_type.replace("_", " "))
+    patterns = [
+        (r"^(?:Đối với|Doi voi)\s+.+?\s+có quy định\s+(.+?)(?:\s+KH\b|\s+CS\b|\s+cần\b|\s+phải\b|\s+nên\b|[.;]|$)", "Quy định {value}"),
+        (r"^(?:Khi|Nếu|Neu|Trong trường hợp|Trong truong hop)\s+(.+?)(?:\s+thì\b|\s+thi\b|[.;]|$)", "{value}"),
+        (r"^(?:CS|Agent)\s+(?:cần|phải|nen|can|phai)\s+(.+?)(?:[.;]|$)", "{value}"),
+        (r"^(?:Không được|Khong duoc|Không cung cấp|Khong cung cap)\s+(.+?)(?:[.;]|$)", "Không {value}"),
+    ]
+    for pattern, template in patterns:
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            value = normalize_display_text(match.group(1))
+            value = trim_title_words(value, 10)
+            if value:
+                return normalize_display_text(template.format(value=value))[:90]
+    first_sentence = re.split(r"[.;\n]", content, maxsplit=1)[0]
+    return trim_title_words(first_sentence, 10) or vietnamese_title(unit_type.replace("_", " "))
+
+
+def trim_title_words(value: str, max_words: int) -> str:
+    words = normalize_display_text(value).split()
+    return " ".join(words[:max_words]).strip(" ,;:.")
+
+
+def normalize_display_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def infer_source_ref_quality(source_refs: Any) -> str:
@@ -736,6 +788,7 @@ def workflow_payload_to_units(payload: WorkflowExtractionPayload, filename: str)
         "source_refs": [ref.model_dump() for ref in graph_refs],
         "metadata": {
             "retrieval_scope": "graph",
+            "document_metadata": payload.document_metadata,
             "workflow_graph": graph,
             "graph_confidence": payload.workflow_graph.graph_confidence,
             "requires_human_review": payload.workflow_graph.requires_human_review,

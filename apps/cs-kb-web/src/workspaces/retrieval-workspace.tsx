@@ -47,7 +47,7 @@ export function RetrievalWorkspace({
                 className="min-h-28 rounded-xl border bg-background px-3 py-2 text-sm leading-6 shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-3 focus-visible:ring-ring/40"
                 id="retrieval-query"
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="khach khong nhan du mon co duoc refund khong"
+                placeholder="quy trình xác minh thông tin cần xử lý thế nào"
                 value={query}
               />
             </div>

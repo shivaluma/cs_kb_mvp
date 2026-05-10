@@ -126,27 +126,11 @@ export function DocumentsWorkspace({
   const pageOnlySourceRefUnacknowledged = extractionUnits.filter(
     (unit) => unit.metadata.source_ref_quality === "page_only" && unit.metadata.source_ref_acknowledged !== true,
   ).length;
-  const aggregateExtractionText = extractionUnits
-    .map((unit) => `${unit.title} ${unit.content} ${JSON.stringify(unit.metadata)}`)
-    .join(" ")
-    .toLowerCase();
-  const isChatSocialWorkflow = workflowRequiresGraph && ["chat social", "fanpage", "pancake", "source internal", "84912345678"].some((term) => aggregateExtractionText.includes(term));
-  const requiredChatSocialUnits = [
-    { key: "sla_rule", label: "SLA rule", types: ["sla_rule"] },
-    { key: "decision_rule", label: "Decision rule", types: ["decision_rule", "decision_point"] },
-    { key: "escalation_rule", label: "Escalation rule", types: ["escalation_rule"] },
-    { key: "case_creation_rule", label: "Case creation rule", types: ["case_creation_rule"] },
-    { key: "handoff_rule", label: "SI/OB handoff rule", types: ["handoff_rule"] },
-    { key: "macro_script", label: "Closing macro", types: ["macro_script"] },
-    { key: "operational_note", label: "Operational note", types: ["operational_note"] },
-  ];
-  const missingChatSocialUnits = requiredChatSocialUnits.filter(
+  const requiredWorkflowUnits = requiredUnitTypesFromExtraction(workflowGraphUnit, fullSopUnit);
+  const missingWorkflowUnits = requiredWorkflowUnits.filter(
     (required) => !extractionUnits.some((unit) => required.types.includes(unit.unit_type) && unit.review_status !== "needs_review"),
   );
-  const correctionRuleCount = extractionUnits.reduce((count, unit) => {
-    const rules = unit.metadata.email_correction_rules;
-    return count + (Array.isArray(rules) ? rules.length : 0);
-  }, 0);
+  const validationRuleCount = extractionUnits.filter((unit) => unit.unit_type === "validation_rule").length;
   const reviewStats = extractionUnits.reduce(
     (acc, unit) => {
       acc.total += 1;
@@ -186,13 +170,13 @@ export function DocumentsWorkspace({
       passed: !workflowRequiresGraph || pageOnlySourceRefUnacknowledged === 0,
     },
     {
-      detail: !isChatSocialWorkflow
-        ? "Not a Chat Social workflow"
-        : missingChatSocialUnits.length
-          ? `Missing/review needed: ${missingChatSocialUnits.map((unit) => unit.label).join(", ")}`
-          : "Required Chat Social units reviewed",
-      label: "Chat Social workflow units",
-      passed: !isChatSocialWorkflow || missingChatSocialUnits.length === 0,
+      detail: !requiredWorkflowUnits.length
+        ? "No AI-required unit types declared"
+        : missingWorkflowUnits.length
+          ? `Missing/review needed: ${missingWorkflowUnits.map((unit) => unit.label).join(", ")}`
+          : "AI-required workflow units reviewed",
+      label: "Required workflow units",
+      passed: !requiredWorkflowUnits.length || missingWorkflowUnits.length === 0,
     },
     {
       detail: pendingReviewCount === 0 ? "No unit needs review" : `${pendingReviewCount} unit(s) still need review`,
@@ -200,9 +184,9 @@ export function DocumentsWorkspace({
       passed: pendingReviewCount === 0,
     },
     {
-      detail: highRiskUnitCount || correctionRuleCount ? `${highRiskUnitCount} risk units, ${correctionRuleCount} correction rules` : "No risk/correction metadata detected",
+      detail: highRiskUnitCount || validationRuleCount ? `${highRiskUnitCount} risk units, ${validationRuleCount} validation rules` : "No risk/validation metadata detected",
       label: "High-risk warning acknowledged",
-      passed: !policyRequiresGovernance || highRiskUnitCount > 0 || correctionRuleCount > 0,
+      passed: !policyRequiresGovernance || highRiskUnitCount > 0 || validationRuleCount > 0,
     },
     {
       detail: effectiveDateReviewed ? "Effective date signal exists or is marked for review" : "No effective date signal found",
@@ -416,6 +400,19 @@ export function DocumentsWorkspace({
             </div>
             <Field label="Tags" value={upload.tags} onChange={(tags) => setUpload((current) => ({ ...current, tags }))} />
             <Field label="Case reasons" value={upload.caseReasons} onChange={(caseReasons) => setUpload((current) => ({ ...current, caseReasons }))} />
+
+            <label className="flex items-start gap-3 rounded-lg border bg-muted/20 p-3 text-xs leading-5">
+              <input
+                checked={upload.asyncExtraction}
+                className="mt-0.5 size-4 rounded border-input"
+                onChange={(event) => setUpload((current) => ({ ...current, asyncExtraction: event.target.checked }))}
+                type="checkbox"
+              />
+              <span>
+                <span className="block font-medium text-foreground">Extract in background</span>
+                <span className="text-muted-foreground">Recommended for PDFs, diagrams, and large Excel files. Upload returns fast, then the extraction worker fills units for review.</span>
+              </span>
+            </label>
 
             {busyKey === "upload" ? (
               <div className="rounded-xl border bg-muted/25 p-3">
@@ -646,7 +643,7 @@ export function DocumentsWorkspace({
               <div className="flex flex-wrap gap-2">
                 <Badge variant="secondary">document layer</Badge>
                 <Badge variant="outline">{atomicUnits.length} atomic units</Badge>
-                {correctionRuleCount ? <Badge variant="outline">{correctionRuleCount} correction rules</Badge> : null}
+                {validationRuleCount ? <Badge variant="outline">{validationRuleCount} validation rules</Badge> : null}
               </div>
             </div>
           </CardHeader>
@@ -1519,7 +1516,7 @@ function isDocumentLayer(unit: ExtractionUnit) {
 
 function hasRiskSignal(unit: ExtractionUnit) {
   const haystack = `${unit.unit_type} ${unit.title} ${JSON.stringify(unit.metadata)}`.toLowerCase();
-  return haystack.includes("zt") || haystack.includes("risk") || haystack.includes("security") || haystack.includes("compliance");
+  return haystack.includes("risk") || haystack.includes("security") || haystack.includes("compliance") || haystack.includes("high");
 }
 
 function hasEffectiveDateSignal(unit: ExtractionUnit) {
@@ -1535,6 +1532,49 @@ function sourceReference(unit: ExtractionUnit) {
     return `page ${unit.source_page}`;
   }
   return "";
+}
+
+function requiredUnitTypesFromExtraction(...units: Array<ExtractionUnit | undefined>) {
+  const values = new Set<string>();
+  units.forEach((unit) => {
+    if (!unit) {
+      return;
+    }
+    collectRequiredUnitTypes(unit.metadata.required_unit_types, values);
+    collectRequiredUnitTypes(unit.metadata.publish_required_unit_types, values);
+    const documentMetadata = unit.metadata.document_metadata;
+    if (documentMetadata && typeof documentMetadata === "object" && !Array.isArray(documentMetadata)) {
+      const metadata = documentMetadata as Record<string, unknown>;
+      collectRequiredUnitTypes(metadata.required_unit_types, values);
+      collectRequiredUnitTypes(metadata.publish_required_unit_types, values);
+    }
+    const readiness = unit.metadata.publish_readiness;
+    if (readiness && typeof readiness === "object" && !Array.isArray(readiness)) {
+      const readinessRecord = readiness as Record<string, unknown>;
+      collectRequiredUnitTypes(readinessRecord.required_unit_types ?? readinessRecord.required_units, values);
+    }
+  });
+  return [...values].map((unitType) => ({
+    key: unitType,
+    label: readableUnitType(unitType),
+    types: unitType === "decision_rule" ? ["decision_rule", "decision_point"] : [unitType],
+  }));
+}
+
+function collectRequiredUnitTypes(value: unknown, output: Set<string>) {
+  if (!Array.isArray(value)) {
+    return;
+  }
+  value.forEach((item) => {
+    const unitType = String(item || "").trim();
+    if (unitType) {
+      output.add(unitType);
+    }
+  });
+}
+
+function readableUnitType(value: string) {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
 function normalizedRawTextName(value: string) {

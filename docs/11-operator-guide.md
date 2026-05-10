@@ -37,6 +37,10 @@ Set these values in `.env`:
 ```env
 OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_EXTRACTION_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_VISION_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_METADATA_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_CHAT_MODEL=deepseek/deepseek-v3.2
 ```
 
 Restart AI/API/web:
@@ -44,6 +48,14 @@ Restart AI/API/web:
 ```bash
 fish -lc 'docker compose -p kb-mvp up -d --build ai api web'
 ```
+
+For large PDFs, workflow diagrams, and heavy Excel files, use the background upload path:
+
+```txt
+POST /api/v1/ai/documents/upload-async
+```
+
+It creates a draft immediately with `metadata.extraction_status=extracting`, then the AI worker replaces the draft chunks when extraction finishes. Normal lookup and chat still only use published versions.
 
 Verify the AI container sees the key:
 
@@ -124,19 +136,19 @@ Expected:
 
 ## 7. SOP Lookup Verification
 
-Search for a structured SOP term from the seeded SOP repository.
+Search for a structured SOP term from a published curated document.
 
 Example:
 
 ```text
-khách không nhận đủ món refund missing item
+quy trình xác minh thông tin cần xử lý thế nào
 ```
 
 Expected:
 
-- `Structured SOPs` appears.
-- `Xu ly case khach khong nhan du mon` appears.
-- SOP detail opens with version, owner, checklist, macros, and governance metadata.
+- Published SOP or retrieval units appear.
+- Result cards expose `Open quick answer`, `Open full SOP`, and citation details.
+- SOP detail opens with version, owner, structured sections, units, and governance metadata.
 
 ## 8. Retrieval Lab Verification
 
@@ -157,12 +169,12 @@ Expected:
 Example query for SOP/document hybrid:
 
 ```text
-khách không nhận đủ món refund missing item
+quy trình xác minh thông tin cần xử lý thế nào
 ```
 
 Expected:
 
-- Evidence includes relevant SOP/document chunks.
+- Evidence includes relevant published SOP/document units.
 - Results show lexical/vector rank sources.
 
 ## 9. Governance Rules

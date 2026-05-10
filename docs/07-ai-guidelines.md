@@ -25,11 +25,11 @@ AI is an assistant for retrieval and summarization over approved SOP content. It
 
 ```json
 {
-  "answer": "Case nay nen kiem tra SOP Sai/Thieu mon...",
+  "answer": "Yêu cầu này cần đối chiếu SOP xác minh thông tin tài khoản trước khi hỗ trợ.",
   "suggested_sops": [
     {
       "sop_id": "uuid",
-      "title": "Xu ly khach khong nhan du mon",
+      "title": "Quy định xác minh thông tin tài khoản",
       "version": 3,
       "confidence": 0.91
     }
@@ -38,7 +38,7 @@ AI is an assistant for retrieval and summarization over approved SOP content. It
     {
       "sop_id": "uuid",
       "version_id": "uuid",
-      "section": "handling_checklist"
+      "section": "input_requirements"
     }
   ],
   "warnings": []

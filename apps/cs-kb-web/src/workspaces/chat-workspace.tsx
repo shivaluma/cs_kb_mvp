@@ -26,10 +26,10 @@ export function ChatWorkspace({
   const [draft, setDraft] = useState("");
   const examples = useMemo(
     () => [
-      "mail gmai.com thì làm gì?",
-      "chat social không có SĐT tạo case thế nào?",
-      "đơn beFood hủy có được cung cấp Order ID không?",
-      "khi nào cần chuyển Tech?",
+      "case này cần kiểm tra thông tin nào trước?",
+      "khi nào cần chuyển xử lý cho team liên quan?",
+      "có cảnh báo bảo mật hoặc compliance nào không?",
+      "macro phản hồi phù hợp là gì?",
     ],
     [],
   );

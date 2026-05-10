@@ -52,7 +52,7 @@ Publishing is blocked when:
 - Page-only PDF source refs are not acknowledged.
 - High-risk policy/workflow content has no effective date.
 
-For Chat Social workflows detected by terms like `Chat Social`, `Fanpage`, `Pancake`, `source internal`, or `84912345678`, publishing also requires reviewed units for:
+For workflow documents, the AI extraction may return `document_metadata.required_unit_types` or `publish_readiness.required_unit_types`. Publishing also requires reviewed units for every required type declared by the extraction. Typical workflow unit types include:
 
 - `sla_rule`
 - `decision_rule` or `decision_point`
@@ -64,11 +64,8 @@ For Chat Social workflows detected by terms like `Chat Social`, `Fanpage`, `Panc
 
 ## Lookup Evaluation
 
-After publishing the Chat Social SOP, run:
+After publishing a workflow SOP, create a small golden query set that matches the document's extracted unit types and run retrieval evaluation against the published version only. Example evaluator scripts should assert:
 
-```bash
-cd apps/cs-kb-ai
-AI_BASE_URL=http://localhost:8090 .venv/bin/python scripts/evaluate_chat_social.py
-```
-
-The script verifies golden queries such as `SLA chat social`, `không có SĐT tạo case social`, `SI OB source internal`, and `QA audit Pancake` return the expected unit types in top-5 retrieval.
+- Each golden query returns the expected `unit_type` in top-5.
+- Result citations point to the published SOP version and source page/sheet/row.
+- Draft, archived, and failed extraction units are not returned.

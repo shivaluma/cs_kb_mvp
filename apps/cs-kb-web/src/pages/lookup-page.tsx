@@ -16,7 +16,7 @@ const LookupWorkspace = lazy(() =>
 export function LookupPage() {
   const { getParam, setParams } = useUrlSearch();
   const { reportError, reportNotice } = useFeedback();
-  const query = getParam("q", "khach khong nhan du mon co duoc refund khong");
+  const query = getParam("q", "quy trình xác minh thông tin cần xử lý thế nào");
   const chunkId = getParam("chunk", "");
   const [filters, setFilters] = useState<FilterState>({
     audience: getParam("audience", defaultFilters.audience),
