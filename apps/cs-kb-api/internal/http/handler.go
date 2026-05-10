@@ -67,7 +67,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/raw", h.proxyAIVersionRaw)
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/source/pages/{page}", h.proxyAIVersionSourcePage)
 	mux.HandleFunc("POST /api/v1/ai/retrieve", h.proxyAI("/ai/v1/retrieve"))
-	mux.HandleFunc("POST /api/v1/ai/chat", h.proxyAI("/ai/v1/chat"))
+	mux.HandleFunc("POST /api/v1/ai/chat", h.proxyAIChat)
 
 	return logging.Middleware(h.logger, cors(mux))
 }
@@ -424,6 +424,10 @@ func (h *Handler) proxyAIVersionPublish(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) proxyAIVersionBulkReview(w http.ResponseWriter, r *http.Request) {
 	h.proxyAIWithBody("/ai/v1/versions/"+r.PathValue("id")+"/bulk-review", 45*time.Second, nil)(w, r)
+}
+
+func (h *Handler) proxyAIChat(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithBody("/ai/v1/chat", 120*time.Second, nil)(w, r)
 }
 
 func (h *Handler) proxyAISynonymAction(action string) http.HandlerFunc {

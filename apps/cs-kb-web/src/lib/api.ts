@@ -21,6 +21,7 @@ export async function apiGet<T>(path: string): Promise<T> {
 export async function apiPost<T = unknown>(
   path: string,
   payload: unknown,
+  timeoutMs = 15000,
 ): Promise<T> {
   const response = await withTimeout((signal) =>
     fetch(`${API_BASE_URL}${path}`, {
@@ -29,6 +30,7 @@ export async function apiPost<T = unknown>(
       body: JSON.stringify(payload),
       signal,
     }),
+    timeoutMs,
   );
   if (!response.ok) {
     const detail = await response.text();

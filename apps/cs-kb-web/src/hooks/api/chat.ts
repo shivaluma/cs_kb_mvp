@@ -10,6 +10,6 @@ export function useGroundedChat() {
       filters: Record<string, string[]>;
       limit: number;
       conversation: ChatMessage[];
-    }) => apiPost<GroundedChatResponse>("/api/v1/ai/chat", payload),
+    }) => apiPost<GroundedChatResponse>("/api/v1/ai/chat", payload, 120000),
   });
 }

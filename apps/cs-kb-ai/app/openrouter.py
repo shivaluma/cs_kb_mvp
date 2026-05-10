@@ -54,6 +54,17 @@ def completion_content(payload: dict[str, Any], headers: dict[str, str]) -> str:
                 response.raise_for_status()
                 body = response.json()
             return str(body["choices"][0]["message"]["content"])
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            status = exc.response.status_code if exc.response is not None else 0
+            if status not in {408, 429, 500, 502, 503, 504} or attempt == 2:
+                break
+            retry_after = exc.response.headers.get("retry-after") if exc.response is not None else ""
+            try:
+                delay = min(float(retry_after), 6.0) if retry_after else 0.8 * (attempt + 1)
+            except ValueError:
+                delay = 0.8 * (attempt + 1)
+            time.sleep(delay)
         except httpx.TransportError as exc:
             last_error = exc
             if attempt == 2:
