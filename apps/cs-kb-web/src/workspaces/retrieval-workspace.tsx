@@ -162,19 +162,25 @@ function QueryExpansionPanel({ retrieval }: { retrieval: RetrievalResponse | nul
 }
 
 function RetrievalResultCard({ result }: { result: RetrievalResult }) {
+  const scope = String(result.metadata.retrieval_scope ?? "unit");
+  const unitType = String(result.metadata.unit_type ?? result.section);
+  const isDocumentLayer = scope === "document" || unitType === "full_sop";
   return (
     <article className="rounded-xl border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={isDocumentLayer ? "secondary" : "outline"}>
+              {isDocumentLayer ? "Full SOP" : "Quick answer"}
+            </Badge>
             <Badge variant="secondary">v{result.version_number}</Badge>
-            <Badge variant="outline">{result.section}</Badge>
+            <Badge variant="outline">{unitType}</Badge>
             {result.rank_source.map((source) => (
               <Badge key={source} variant="outline">{source}</Badge>
             ))}
           </div>
-          <h3 className="mt-2 text-sm font-semibold">{result.title}</h3>
-          <p className="mt-1 text-xs text-muted-foreground">{result.source_filename}</p>
+          <h3 className="mt-2 text-sm font-semibold">{result.heading || result.title}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">From: {result.title}, {result.source_filename}</p>
         </div>
         <div className="text-right text-xs text-muted-foreground">
           <div>score {result.score.toFixed(4)}</div>
@@ -182,9 +188,9 @@ function RetrievalResultCard({ result }: { result: RetrievalResult }) {
           <div>vec {result.vector_score.toFixed(3)}</div>
         </div>
       </div>
-      <p className="mt-3 text-sm leading-6 text-muted-foreground">{result.content}</p>
+      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{result.content}</p>
       <div className="mt-3 rounded-lg bg-muted/35 px-2 py-1 text-[11px] text-muted-foreground">
-        Citation: chunk {result.chunk_index}, {result.version_id}
+        Citation: {isDocumentLayer ? "full SOP page" : "atomic unit"} chunk {result.chunk_index}, {result.version_id}
       </div>
     </article>
   );

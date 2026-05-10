@@ -14,7 +14,7 @@ from psycopg_pool import ConnectionPool
 from app.config import settings
 from app.embedding import vector_literal
 from app.schemas import DocumentMetadata, RetrievalFilters, SynonymGroupCreateRequest, SynonymSuggestionAcceptRequest
-from app.text_processing import normalize_phrase, tokenize
+from app.text_processing import normalize_phrase, render_pdf_page_jpeg, tokenize
 
 
 pool = ConnectionPool(settings.database_url, min_size=1, max_size=10, open=False)
@@ -127,6 +127,19 @@ def ensure_schema() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS ai_document_sources (
+              version_id uuid PRIMARY KEY REFERENCES ai_document_versions(id) ON DELETE CASCADE,
+              document_id uuid NOT NULL REFERENCES ai_documents(id) ON DELETE CASCADE,
+              source_filename text NOT NULL,
+              content_type text NOT NULL,
+              raw_data bytea NOT NULL,
+              byte_size integer NOT NULL,
+              created_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS ai_retrieval_events (
               id uuid PRIMARY KEY,
               query text NOT NULL,
@@ -154,6 +167,7 @@ def ensure_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_documents_status ON ai_documents(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_versions_status ON ai_document_versions(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_document_version ON ai_chunks(document_id, version_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_sources_document ON ai_document_sources(document_id)")
         conn.execute("DROP INDEX IF EXISTS idx_ai_chunks_content_fts")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_content_unaccent_fts ON ai_chunks USING gin (to_tsvector('simple', immutable_unaccent(content)))")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_metadata ON ai_chunks USING gin (metadata)")
@@ -324,6 +338,7 @@ def create_document_version(
     document_type: str = "unknown",
     review_status: str = "needs_review",
     extraction_confidence: float = 0.0,
+    raw_data: bytes = b"",
 ) -> dict[str, Any]:
     document_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
@@ -393,6 +408,22 @@ def create_document_version(
                     status,
                 ),
             )
+
+            if raw_data:
+                conn.execute(
+                    """
+                    INSERT INTO ai_document_sources (
+                      version_id, document_id, source_filename, content_type, raw_data, byte_size
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (version_id) DO UPDATE
+                    SET source_filename = EXCLUDED.source_filename,
+                        content_type = EXCLUDED.content_type,
+                        raw_data = EXCLUDED.raw_data,
+                        byte_size = EXCLUDED.byte_size
+                    """,
+                    (version_id, document_id, source_filename, content_type, raw_data, len(raw_data)),
+                )
 
             insert_chunks(conn, document_id, version_id, chunks)
 
@@ -466,6 +497,7 @@ def insert_chunks(conn: Connection[Any], document_id: str, version_id: str, chun
 def publish_version(version_id: str, actor: str) -> dict[str, Any]:
     with connection() as conn:
         with conn.transaction():
+            validate_publish_readiness_tx(conn, version_id)
             row = publish_version_tx(conn, version_id, actor)
             audit_tx(
                 conn,
@@ -476,6 +508,313 @@ def publish_version(version_id: str, actor: str) -> dict[str, Any]:
                 metadata={"document_id": str(row["document_id"]), "version_number": row["version_number"]},
             )
             return dict(row)
+
+
+def has_required_source_ref(document_type: str, metadata: dict[str, Any]) -> bool:
+    refs = metadata.get("source_refs")
+    if not isinstance(refs, list):
+        refs = []
+    if document_type == "policy_table":
+        return bool(metadata.get("source_sheet")) or any(isinstance(ref, dict) and ref.get("sheet") for ref in refs)
+    if document_type == "workflow_diagram":
+        return bool(metadata.get("source_page") or metadata.get("page_number")) or any(
+            isinstance(ref, dict) and ref.get("page") for ref in refs
+        )
+    if document_type == "policy_rule":
+        return any(
+            isinstance(ref, dict)
+            and (ref.get("paragraph_index") is not None or ref.get("heading_path") or ref.get("line_start") or ref.get("page"))
+            for ref in refs
+        )
+    return True
+
+
+def is_high_risk_metadata(metadata: dict[str, Any], normalized_text: str) -> bool:
+    risk_level = normalize_phrase(str(metadata.get("risk_level") or ""))
+    if risk_level in {"high", "critical"}:
+        return True
+    risk_terms = [
+        "refund",
+        "hoan tien",
+        "payment",
+        "thanh toan",
+        "account",
+        "tai khoan",
+        "privacy",
+        "bao mat",
+        "security",
+        "zt",
+        "compliance",
+        "escalation",
+        "boi hoan",
+        "compensation",
+    ]
+    return any(term in normalized_text for term in risk_terms)
+
+
+def has_bulk_review_blocker(document_type: str, rows: list[dict[str, Any]]) -> bool:
+    if document_type == "workflow_diagram":
+        return True
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        confidence = metadata.get("confidence")
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            confidence_value = 1.0
+        text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or ""), json.dumps(metadata, ensure_ascii=False)]))
+        if confidence_value < 0.85 or is_high_risk_metadata(metadata, text):
+            return True
+    return False
+
+
+def is_reviewed_status(value: Any) -> bool:
+    return str(value or "needs_review") in {"reviewed", "approved"}
+
+
+def workflow_source_ref_ack_missing(metadata: dict[str, Any]) -> bool:
+    return str(metadata.get("source_ref_quality") or "") == "page_only" and metadata.get("source_ref_acknowledged") is not True
+
+
+def workflow_graph_edge_count(metadata: dict[str, Any]) -> int:
+    graph = metadata.get("workflow_graph")
+    if not isinstance(graph, dict):
+        return 0
+    edges = graph.get("edges")
+    return len(edges) if isinstance(edges, list) else 0
+
+
+def missing_or_unreviewed_workflow_unit(
+    unit_status_by_type: dict[str, bool],
+    accepted_types: set[str],
+    failure_key: str,
+) -> str | None:
+    present = [unit_type for unit_type in accepted_types if unit_type in unit_status_by_type]
+    if not present:
+        return f"missing_workflow_unit_{failure_key}"
+    if not any(unit_status_by_type[unit_type] for unit_type in present):
+        return f"workflow_unit_{failure_key}_needs_review"
+    return None
+
+
+def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> None:
+    conn.row_factory = dict_row
+    version = conn.execute(
+        """
+        SELECT v.id::text AS version_id,
+               v.document_id::text AS document_id,
+               v.status,
+               v.document_type,
+               d.metadata
+        FROM ai_document_versions v
+        JOIN ai_documents d ON d.id = v.document_id
+        WHERE v.id = %s
+        """,
+        (version_id,),
+    ).fetchone()
+    if not version:
+        raise LookupError("version_not_found")
+    if version["status"] == "archived":
+        raise ValueError("publish_readiness_failed:archived_version")
+
+    rows = conn.execute(
+        """
+        SELECT section, heading, content, metadata
+        FROM ai_chunks
+        WHERE version_id = %s
+        ORDER BY chunk_index
+        """,
+        (version_id,),
+    ).fetchall()
+    failures: list[str] = []
+    if not rows:
+        failures.append("no_extraction_units")
+
+    document_metadata = version.get("metadata") or {}
+    if not isinstance(document_metadata, dict):
+        document_metadata = {}
+
+    has_full_sop = False
+    pending_units = 0
+    has_owner = bool(document_metadata.get("owner_team"))
+    has_effective_from = False
+    has_historical_sheets = False
+    has_high_risk_signal = False
+    has_workflow_graph = version["document_type"] != "workflow_diagram"
+    workflow_graph_reviewed = version["document_type"] != "workflow_diagram"
+    workflow_graph_confidence = 1.0
+    workflow_graph_edges = 0
+    workflow_source_ack_missing = 0
+    workflow_unit_status_by_type: dict[str, bool] = {}
+    missing_source_refs = 0
+    aggregate_text_parts: list[str] = []
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        unit_type = str(metadata.get("unit_type") or row.get("section") or "")
+        retrieval_scope = str(metadata.get("retrieval_scope") or "")
+        text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or ""), json.dumps(metadata, ensure_ascii=False)]))
+        aggregate_text_parts.append(text)
+        if unit_type:
+            workflow_unit_status_by_type[unit_type] = workflow_unit_status_by_type.get(unit_type, False) or is_reviewed_status(metadata.get("review_status"))
+        has_full_sop = has_full_sop or unit_type == "full_sop" or retrieval_scope == "document"
+        pending_units += 1 if str(metadata.get("review_status") or "needs_review") == "needs_review" else 0
+        has_owner = has_owner or bool(metadata.get("owner_team"))
+        has_effective_from = has_effective_from or bool(metadata.get("effective_from"))
+        has_historical_sheets = has_historical_sheets or bool(metadata.get("historical_sheets"))
+        has_high_risk_signal = has_high_risk_signal or is_high_risk_metadata(metadata, text)
+        if unit_type == "workflow_graph" or metadata.get("workflow_graph"):
+            has_workflow_graph = True
+            workflow_graph_reviewed = str(metadata.get("review_status") or "needs_review") in {"reviewed", "approved"}
+            try:
+                workflow_graph_confidence = float(metadata.get("graph_confidence") or metadata.get("confidence") or 0)
+            except (TypeError, ValueError):
+                workflow_graph_confidence = 0
+            workflow_graph_edges = workflow_graph_edge_count(metadata)
+        if version["document_type"] == "workflow_diagram" and workflow_source_ref_ack_missing(metadata):
+            workflow_source_ack_missing += 1
+        if not has_required_source_ref(version["document_type"], metadata):
+            missing_source_refs += 1
+
+    if not has_full_sop:
+        failures.append("missing_full_sop_layer")
+    if pending_units:
+        failures.append(f"{pending_units}_units_need_review")
+    if not has_owner:
+        failures.append("missing_owner_team")
+    if missing_source_refs:
+        failures.append(f"{missing_source_refs}_units_missing_source_refs")
+    if version["document_type"] == "workflow_diagram":
+        if not has_workflow_graph:
+            failures.append("missing_workflow_graph")
+        if not workflow_graph_reviewed:
+            failures.append("workflow_graph_needs_review")
+        if workflow_graph_confidence < 0.7:
+            failures.append("workflow_graph_low_confidence")
+        if has_workflow_graph and workflow_graph_edges == 0:
+            failures.append("workflow_graph_missing_edges")
+        if workflow_source_ack_missing:
+            failures.append(f"{workflow_source_ack_missing}_page_only_source_refs_need_ack")
+        aggregate_text = " ".join(aggregate_text_parts)
+        is_chat_social_workflow = any(term in aggregate_text for term in ["chat social", "fanpage", "pancake", "source internal", "84912345678"])
+        if is_chat_social_workflow:
+            required_units = {
+                "sla_rule": {"sla_rule"},
+                "decision_rule": {"decision_rule", "decision_point"},
+                "escalation_rule": {"escalation_rule"},
+                "case_creation_rule": {"case_creation_rule"},
+                "handoff_rule": {"handoff_rule"},
+                "macro_script": {"macro_script"},
+                "operational_note": {"operational_note"},
+            }
+            for failure_key, accepted_types in required_units.items():
+                failure = missing_or_unreviewed_workflow_unit(workflow_unit_status_by_type, accepted_types, failure_key)
+                if failure:
+                    failures.append(failure)
+    if version["document_type"] in {"policy_table", "policy_rule", "workflow_diagram"} and (has_high_risk_signal or has_historical_sheets) and not has_effective_from:
+        failures.append("missing_effective_from")
+    if has_historical_sheets and not has_effective_from:
+        failures.append("historical_sheets_without_current_effective_date")
+
+    if failures:
+        raise ValueError("publish_readiness_failed:" + ",".join(failures))
+
+
+def bulk_review_version(version_id: str, actor: str, review_status: str = "reviewed", scope: str = "all") -> dict[str, Any]:
+    if review_status not in {"reviewed", "approved"}:
+        raise ValueError("invalid_review_status")
+    if scope not in {"all", "atomic"}:
+        raise ValueError("invalid_review_scope")
+    with connection() as conn:
+        with conn.transaction():
+            conn.row_factory = dict_row
+            row = conn.execute(
+                """
+                SELECT v.id::text AS version_id,
+                       document_id::text AS document_id,
+                       v.status,
+                       v.document_type
+                FROM ai_document_versions v
+                WHERE v.id = %s
+                FOR UPDATE
+                """,
+                (version_id,),
+            ).fetchone()
+            if not row:
+                raise LookupError("version_not_found")
+            if row["status"] != "draft":
+                raise ValueError("published_or_archived_versions_are_immutable")
+            risk_rows = conn.execute(
+                """
+                SELECT heading, content, metadata
+                FROM ai_chunks
+                WHERE version_id = %s
+                """,
+                (version_id,),
+            ).fetchall()
+            if has_bulk_review_blocker(row["document_type"], risk_rows):
+                raise ValueError("bulk_review_blocked_high_risk_or_low_confidence")
+
+            updated_count = conn.execute(
+                """
+                UPDATE ai_chunks
+                SET metadata = jsonb_set(
+                  jsonb_set(
+                    jsonb_set(metadata, '{review_status}', to_jsonb(%s::text), true),
+                    '{reviewed_by}', to_jsonb(%s::text), true
+                  ),
+                  '{reviewed_at}', to_jsonb(%s::text), true
+                )
+                WHERE version_id = %s
+                  AND (
+                    %s = 'all'
+                    OR COALESCE(metadata->>'retrieval_scope', '') <> 'document'
+                    AND COALESCE(metadata->>'unit_type', '') <> 'full_sop'
+                  )
+                """,
+                (review_status, actor, datetime.now(timezone.utc).isoformat(), version_id, scope),
+            ).rowcount
+            remaining_needs_review = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM ai_chunks
+                WHERE version_id = %s
+                  AND COALESCE(metadata->>'review_status', 'needs_review') = 'needs_review'
+                """,
+                (version_id,),
+            ).fetchone()["count"]
+            if int(remaining_needs_review or 0) == 0:
+                conn.execute(
+                    """
+                    UPDATE ai_document_versions
+                    SET review_status = %s
+                    WHERE id = %s
+                    """,
+                    (review_status, version_id),
+                )
+            conn.execute(
+                "UPDATE ai_documents SET updated_at = now() WHERE id = %s",
+                (row["document_id"],),
+            )
+            audit_tx(
+                conn,
+                actor=actor,
+                action="document_version_bulk_review",
+                entity_type="ai_document_version",
+                entity_id=version_id,
+                metadata={"review_status": review_status, "scope": scope, "updated_count": updated_count},
+            )
+            return {
+                "version_id": version_id,
+                "document_id": str(row["document_id"]),
+                "review_status": review_status,
+                "scope": scope,
+                "remaining_needs_review": int(remaining_needs_review or 0),
+                "updated_count": int(updated_count or 0),
+            }
 
 
 def publish_version_tx(conn: Connection[Any], version_id: str, actor: str) -> dict[str, Any]:
@@ -759,7 +1098,7 @@ def extraction_unit_from_row(
         "version_id": item["version_id"],
         "unit_index": item["unit_index"],
         "unit_type": extraction_unit_type(document_type, source_type, metadata),
-        "title": item.get("title") or item.get("section") or "Extraction unit",
+        "title": item.get("title") or item.get("section") or "Đơn vị trích xuất cần review",
         "content": item["content"],
         "source_sheet": str(metadata.get("sheet_name") or ""),
         "source_row": metadata.get("row_number"),
@@ -944,6 +1283,28 @@ def version_raw_text(version_id: str) -> dict[str, Any]:
         if not row:
             raise LookupError("version_not_found")
         return dict(row)
+
+
+def version_source_page_image(version_id: str, page_number: int) -> bytes:
+    if page_number < 1:
+        raise ValueError("page_number_must_be_positive")
+    with connection() as conn:
+        conn.row_factory = dict_row
+        row = conn.execute(
+            """
+            SELECT source_filename, content_type, raw_data
+            FROM ai_document_sources
+            WHERE version_id = %s
+            """,
+            (version_id,),
+        ).fetchone()
+        if not row:
+            raise LookupError("source_file_not_found")
+        filename = str(row["source_filename"] or "").lower()
+        content_type = str(row["content_type"] or "").lower()
+        if not filename.endswith(".pdf") and content_type != "application/pdf":
+            raise ValueError("source_preview_only_supports_pdf")
+        return render_pdf_page_jpeg(bytes(row["raw_data"]), page_number)
 
 
 def list_taxonomy_intents(status: str = "active") -> list[dict[str, Any]]:

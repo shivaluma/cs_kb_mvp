@@ -1,0 +1,63 @@
+import { createRootRoute, createRoute, createRouter, Navigate } from "@tanstack/react-router";
+
+import { App } from "@/App";
+import { workspacePaths } from "@/constants";
+import { DashboardPage } from "@/pages/dashboard-page";
+import { DocumentsPage } from "@/pages/documents-page";
+import { LookupPage } from "@/pages/lookup-page";
+import { RetrievalPage } from "@/pages/retrieval-page";
+import { SynonymsPage } from "@/pages/synonyms-page";
+
+const rootRoute = createRootRoute({
+  component: App,
+  notFoundComponent: () => <Navigate replace to={workspacePaths.dashboard} />,
+});
+
+const dashboardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.dashboard,
+  component: DashboardPage,
+});
+
+const lookupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.lookup,
+  component: LookupPage,
+});
+
+const documentsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.documents,
+  component: DocumentsPage,
+});
+
+const synonymsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.synonyms,
+  component: SynonymsPage,
+});
+
+const retrievalRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.retrieval,
+  component: RetrievalPage,
+});
+
+const routeTree = rootRoute.addChildren([
+  dashboardRoute,
+  lookupRoute,
+  documentsRoute,
+  synonymsRoute,
+  retrievalRoute,
+]);
+
+export const router = createRouter({
+  defaultPreload: "intent",
+  routeTree,
+});
+
+declare module "@tanstack/react-router" {
+  interface Register {
+    router: typeof router;
+  }
+}

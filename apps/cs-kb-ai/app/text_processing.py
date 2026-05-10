@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import base64
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -53,6 +54,14 @@ def classify_document(filename: str, content_type: str, raw_text: str = "") -> D
         )
     if lower_name.endswith(".pdf") and looks_like_workflow(normalized):
         return DocumentClassification("workflow_diagram", "diagram_pdf", 0.78, True)
+    if looks_like_email_policy(lower_name, normalized):
+        return DocumentClassification(
+            "policy_rule",
+            "docx_policy_rule" if lower_name.endswith(".docx") else "text_policy_rule",
+            0.9,
+            True,
+            ["effective_from_missing_needs_review"],
+        )
     if any(term in normalized for term in ["macro", "script", "cau tra loi", "phan hoi mau"]):
         return DocumentClassification("macro_script", "text", 0.72, True)
     if lower_name.endswith((".pdf", ".docx", ".md", ".txt")):
@@ -120,6 +129,17 @@ def looks_like_workflow(normalized_text: str) -> bool:
     return hits >= 4
 
 
+def looks_like_email_policy(lower_name: str, normalized_text: str) -> bool:
+    source = normalize_phrase(lower_name) + " " + normalized_text
+    signals = [
+        "email" in source or "mail" in source,
+        "xac minh" in source or "quy dinh" in source,
+        "zt" in source or "bizops" in source or "admin" in source,
+        "sai dinh dang" in source or "khong nhan duoc" in source,
+    ]
+    return sum(1 for hit in signals if hit) >= 3
+
+
 def extract_pdf_text(data: bytes) -> str:
     reader = PdfReader(io.BytesIO(data))
     pages = []
@@ -128,6 +148,44 @@ def extract_pdf_text(data: bytes) -> str:
         if page_text.strip():
             pages.append(f"\n\n[page {index + 1}]\n{page_text}")
     return "\n".join(pages)
+
+
+def render_pdf_pages_as_data_urls(data: bytes, max_pages: int = 3, scale: float = 1.6) -> tuple[list[str], list[str]]:
+    try:
+        import pypdfium2 as pdfium
+    except Exception:
+        return [], ["pdf_vision_render_unavailable:pypdfium2_missing"]
+
+    try:
+        pdf = pdfium.PdfDocument(data)
+        images: list[str] = []
+        for page_index in range(min(len(pdf), max_pages)):
+            page = pdf[page_index]
+            bitmap = page.render(scale=scale)
+            image = bitmap.to_pil()
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=82, optimize=True)
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            images.append(f"data:image/jpeg;base64,{encoded}")
+        if not images:
+            return [], ["pdf_vision_render_empty"]
+        return images, [f"pdf_vision_pages_rendered:{len(images)}"]
+    except Exception as exc:
+        return [], [f"pdf_vision_render_failed:{exc.__class__.__name__}"]
+
+
+def render_pdf_page_jpeg(data: bytes, page_number: int = 1, scale: float = 1.8) -> bytes:
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(data)
+    if page_number < 1 or page_number > len(pdf):
+        raise IndexError("page_out_of_range")
+    page = pdf[page_number - 1]
+    bitmap = page.render(scale=scale)
+    image = bitmap.to_pil()
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=86, optimize=True)
+    return buffer.getvalue()
 
 
 def extract_docx_text(data: bytes) -> str:
@@ -145,8 +203,9 @@ def extract_spreadsheet(filename: str, data: bytes) -> tuple[str, list[str], lis
     warnings: list[str] = []
     raw_blocks: list[str] = []
     chunks: list[Chunk] = []
+    sheets = spreadsheet_rows(filename, data)
 
-    for sheet_name, rows in spreadsheet_rows(filename, data):
+    for sheet_name, rows in sheets:
         section = slugify(sheet_name)[:80] or "sheet"
         sheet_chunks = spreadsheet_sheet_chunks(rows, section, sheet_name, len(chunks))
         if not sheet_chunks:
@@ -305,9 +364,9 @@ def spreadsheet_chunk(
     values: list[str] | None = None,
     headers: list[str] | None = None,
 ) -> Chunk:
-    context_lines = [f"Context: {item}" for item in context[-3:]]
+    context_lines = [f"Ngữ cảnh: {item}" for item in context[-3:]]
     body = "\n".join([*context_lines, content]).strip()
-    resolved_heading = heading or (context[-1] if context else f"{sheet_name} row {row_number}")
+    resolved_heading = heading or (context[-1] if context else f"{sheet_name} dòng {row_number}")
     return Chunk(
         chunk_index=index,
         section=section,
@@ -412,6 +471,73 @@ def reindex_chunks(chunks: list[Chunk]) -> list[Chunk]:
     ]
 
 
+def ensure_full_sop_layer(
+    chunks: list[Chunk],
+    raw_text: str,
+    filename: str,
+    source_type: str,
+    document_type: str,
+) -> list[Chunk]:
+    has_document_layer = any(
+        chunk.section == "full_sop"
+        or chunk.metadata.get("unit_type") == "full_sop"
+        or chunk.metadata.get("retrieval_scope") == "document"
+        for chunk in chunks
+    )
+    if has_document_layer:
+        return reindex_chunks(chunks)
+
+    content = normalize_cell_text(raw_text).strip()
+    if not content:
+        return reindex_chunks(chunks)
+    full_content = content[:30000]
+    if len(content) > len(full_content):
+        full_content += "\n\n[Nội dung gốc dài hơn 30.000 ký tự và đã được rút gọn trong full SOP preview. Atomic units vẫn dùng các chunk bên dưới.]"
+
+    document_chunk = Chunk(
+        chunk_index=0,
+        section="full_sop",
+        heading=path_safe_title(filename),
+        content=full_content,
+        token_count=len(tokenize(full_content)),
+        metadata={
+            "unit_type": "full_sop",
+            "retrieval_scope": "document",
+            "source_type": source_type,
+            "document_type": document_type,
+            "source_filename": filename,
+            "confidence": 0.72,
+            "review_status": "needs_review",
+            "source_refs": [default_source_ref(filename, source_type, full_content)],
+            "source_ref_quality": default_source_ref_quality(filename),
+            "production_ready_source_refs": default_source_ref_quality(filename) != "page_only",
+            "source_ref_acknowledged": False if default_source_ref_quality(filename) == "page_only" else True,
+        },
+    )
+    return reindex_chunks([document_chunk, *chunks])
+
+
+def path_safe_title(filename: str) -> str:
+    title = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    return title.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip()[:180] or "Full SOP"
+
+
+def default_source_ref(filename: str, source_type: str, content: str) -> dict[str, Any]:
+    lower = filename.lower()
+    if lower.endswith((".xlsx", ".xlsm", ".xls")):
+        return {"source_type": "excel", "source_file": filename, "sheet": "unknown", "row_start": 1, "row_end": 1}
+    if lower.endswith(".pdf"):
+        return {"source_type": "pdf_diagram" if source_type == "diagram_pdf" else "pdf", "source_file": filename, "page": 1, "bbox": []}
+    if lower.endswith(".docx"):
+        return {"source_type": "docx", "source_file": filename, "paragraph_index": 0}
+    line_count = max(1, content.count("\n") + 1)
+    return {"source_type": source_type or "text", "source_file": filename, "line_start": 1, "line_end": line_count}
+
+
+def default_source_ref_quality(filename: str) -> str:
+    return "page_only" if filename.lower().endswith(".pdf") else "structured"
+
+
 def workflow_units_to_chunks(units: list[dict[str, Any]], raw_text: str, filename: str) -> list[Chunk]:
     chunks: list[Chunk] = []
     effective_from = extract_effective_date(raw_text)
@@ -426,7 +552,7 @@ def workflow_units_to_chunks(units: list[dict[str, Any]], raw_text: str, filenam
             Chunk(
                 chunk_index=len(chunks),
                 section=unit_type,
-                heading=(str(unit.get("title") or unit_type).strip() or unit_type)[:180],
+                heading=(str(unit.get("title") or vietnamese_unit_title(unit_type)).strip() or vietnamese_unit_title(unit_type))[:180],
                 content=content,
                 token_count=len(tokenize(content)),
                 metadata={
@@ -435,8 +561,46 @@ def workflow_units_to_chunks(units: list[dict[str, Any]], raw_text: str, filenam
                     "source_type": "diagram_pdf",
                     "source_page": metadata.get("source_page") or metadata.get("page_number") or 1,
                     "page_number": metadata.get("page_number") or metadata.get("source_page") or 1,
+                    "source_ref_quality": metadata.get("source_ref_quality") or "page_only",
+                    "production_ready_source_refs": metadata.get("production_ready_source_refs") if "production_ready_source_refs" in metadata else False,
+                    "source_ref_acknowledged": metadata.get("source_ref_acknowledged") is True,
                     "effective_from": metadata.get("effective_from") or effective_from,
                     "confidence": unit.get("confidence", metadata.get("confidence", 0.74)),
+                    **metadata,
+                    "retrieval_scope": metadata.get("retrieval_scope") or ("document" if unit_type == "full_sop" else "unit"),
+                },
+            )
+        )
+    return chunks
+
+
+def ai_units_to_chunks(units: list[dict[str, Any]], filename: str, source_type: str, document_type: str) -> list[Chunk]:
+    chunks: list[Chunk] = []
+    for unit in units:
+        content = normalize_cell_text(str(unit.get("content") or ""))
+        if not content:
+            continue
+        metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+        unit_type = slugify(str(unit.get("unit_type") or metadata.get("unit_type") or "text_section")) or "text_section"
+        confidence = unit.get("confidence", metadata.get("confidence", 0.72))
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            confidence_value = 0.72
+        chunks.append(
+            Chunk(
+                chunk_index=len(chunks),
+                section=unit_type,
+                heading=(str(unit.get("title") or vietnamese_unit_title(unit_type)).strip() or vietnamese_unit_title(unit_type))[:180],
+                content=content,
+                token_count=len(tokenize(content)),
+                metadata={
+                    "unit_type": unit_type,
+                    "source_type": source_type,
+                    "document_type": document_type,
+                    "source_filename": filename,
+                    "confidence": max(0.0, min(confidence_value, 1.0)),
+                    "retrieval_scope": metadata.get("retrieval_scope") or ("document" if unit_type == "full_sop" else "unit"),
                     **metadata,
                 },
             )
@@ -444,208 +608,26 @@ def workflow_units_to_chunks(units: list[dict[str, Any]], raw_text: str, filenam
     return chunks
 
 
-def extract_workflow_chunks(raw_text: str, filename: str) -> list[Chunk]:
-    units = heuristic_workflow_units(raw_text)
-    if not units:
-        return []
-    return workflow_units_to_chunks(units, raw_text, filename)
-
-
-def heuristic_workflow_units(raw_text: str) -> list[dict[str, Any]]:
-    text = normalize_whitespace(raw_text)
-    normalized = normalize_phrase(text)
-    effective_from = extract_effective_date(text)
-    units: list[dict[str, Any]] = []
-
-    def add(unit_type: str, title: str, content: str, confidence: float = 0.74, **metadata: Any) -> None:
-        clean_content = normalize_cell_text(content)
-        if not clean_content:
-            return
-        units.append(
-            {
-                "unit_type": unit_type,
-                "title": title,
-                "content": clean_content,
-                "confidence": confidence,
-                "metadata": {
-                    "source_page": 1,
-                    "effective_from": effective_from,
-                    **metadata,
-                },
-            }
-        )
-
-    title = extract_between(text, "[page 1]", "Tài Xế/Khách Hàng").strip() or "Quy trình xác minh thông tin chuyến đi/đơn hàng"
-    if "xac minh thong tin chuyen di don hang" in normalized:
-        add(
-            "workflow_overview",
-            "Workflow overview",
-            f"{title}. Áp dụng khi Tài Xế/Khách Hàng liên hệ nhờ hỗ trợ về chuyến đi/đơn hàng.",
-            0.82,
-            workflow_id="verify_trip_order_info",
-        )
-        add(
-            "verification_dependency",
-            "Quy định xác minh tài khoản",
-            "CS xác minh thông tin TX/KH dựa vào Quy định xác minh tài khoản TX, KH trước khi hỗ trợ chuyến xe/đơn hàng.",
-            0.86,
-            related_document="Quy định xác minh tài khoản TX, KH",
-            workflow_id="verify_trip_order_info",
-        )
-
-    if "doi voi don befood co quy dinh thoi gian khieu nai" in normalized:
-        add(
-            "operational_note",
-            "beFood complaint time limit",
-            "Đối với đơn beFood có quy định thời gian khiếu nại liên quan đến món ăn, KH cần liên hệ cho Be trong vòng 1h sau khi nhận được đơn hàng. CS cần lưu ý KH đảm bảo liên hệ lại trong thời gian quy định để được hỗ trợ.",
-            0.84,
-            vertical="food",
-            risk_level="medium",
-            workflow_id="verify_trip_order_info",
-        )
-
-    if "script phan hoi kh tx" in normalized:
-        initial_script = extract_between(text, "(b) Script phản hồi KH/TX", "Lưu ý: CS không cần chờ")
-        add(
-            "macro_script",
-            "Initial verification script",
-            initial_script
-            or 'RH: "Em xin phép hỗ trợ về vấn đề [Vấn đề KH/TX cần hỗ trợ] của chuyến xe/đơn hàng..., có mã chuyến xe/đơn hàng... từ .... đến...." BF: "Em xin phép hỗ trợ về vấn đề [Vấn đề KH/TX cần hỗ trợ] của đơn hàng beFood thuộc nhà hàng... có giá trị..., bao gồm..."',
-            0.76,
-            channels=["RH", "BF"],
-            copyable=True,
-            workflow_id="verify_trip_order_info",
-        )
-
-    if "cac thong tin tx kh cung cap cs co the kiem tra" in normalized:
-        add(
-            "decision_point",
-            "Can CS identify the trip/order from provided info?",
-            "Các thông tin TX/KH cung cấp CS có thể kiểm tra và xác định được chuyến xe/đơn hàng liên quan trên hệ thống không? Nếu Yes: CS phản hồi theo Script (b). Nếu No: CS chủ động kiểm tra chuyến xe/đơn hàng gần nhất trên hệ thống dựa vào vấn đề cần hỗ trợ.",
-            0.8,
-            decision_id="decision_identify_trip_order",
-            yes_next="step_2_1_initial_script",
-            no_next="step_2_2_check_latest_trip_order",
-            workflow_id="verify_trip_order_info",
-        )
-        add(
-            "workflow_step",
-            "Check latest trip/order proactively",
-            "Dựa vào vấn đề cần hỗ trợ, CS chủ động kiểm tra chuyến xe/đơn hàng gần nhất trên hệ thống.",
-            0.78,
-            step="2.2",
-            workflow_id="verify_trip_order_info",
-        )
-
-    if "order history" in normalized:
-        add(
-            "operational_note",
-            "Order History states",
-            "Khi kiểm tra Order History, CS xem các trạng thái All, Active, Completed, Cancelled. CS cần di chuyển qua lại các trạng thái để hệ thống load đầy đủ thông tin.",
-            0.84,
-            workflow_id="verify_trip_order_info",
-        )
-
-    confirmation_script = extract_between(text, "(d) Script phản hồi KH/TX", "Yes No 3.")
-    if confirmation_script:
-        add(
-            "macro_script",
-            "Confirmation script",
-            confirmation_script,
-            0.76,
-            channels=["RH", "BF", "Chat"],
-            copyable=True,
-            workflow_id="verify_trip_order_info",
-        )
-    if "khung chat da hien thi trip order id" in normalized:
-        add(
-            "workflow_step",
-            "Chat already shows Trip/Order ID",
-            "Riêng đối với kênh Chat, nếu khung chat đã hiển thị Trip/Order ID, CS chủ động dùng Trip/Order ID đó để kiểm tra thông tin chuyến xe/đơn hàng trên hệ thống và thực hiện từ bước 2.1 của quy trình.",
-            0.84,
-            channel="chat",
-            workflow_id="verify_trip_order_info",
-        )
-
-    if "tx kh bao dang can ho tro cho mot chuyen xe don hang khac" in normalized:
-        add(
-            "decision_point",
-            "Is the requested trip/order different?",
-            "TX/KH báo đang cần hỗ trợ cho một chuyến xe/đơn hàng khác chuyến xe/đơn hàng mà CS đã xác nhận không? Nếu Yes: CS xin thêm thông tin theo bước 3.1. Nếu No: tiếp tục xác nhận và hỗ trợ theo quy trình tương ứng.",
-            0.78,
-            decision_id="decision_different_trip_order",
-            yes_next="step_3_1_collect_trip_order_details",
-            no_next="step_3_2_support_corresponding_process",
-            workflow_id="verify_trip_order_info",
-        )
-        add(
-            "workflow_step",
-            "Collect Trip ID / Order ID or beFood details",
-            "Nếu TX/KH cần hỗ trợ chuyến/đơn khác: với đơn beFood, CS xin tên nhà hàng đã đặt, tên các món ăn, thời gian đặt đơn. Với các đơn còn lại, CS xin Trip ID/Order ID và hướng dẫn TX/KH cách tìm Trip ID/Order ID trên ứng dụng nếu cần.",
-            0.84,
-            step="3.1",
-            workflow_id="verify_trip_order_info",
-        )
-
-    if "tx kh cung cap duoc thong tin theo yeu cau" in normalized:
-        add(
-            "decision_point",
-            "Can TX/KH provide required information?",
-            "TX/KH cung cấp được thông tin theo yêu cầu không? Nếu No: CS nhờ TX/KH kiểm tra lại Trip ID/Order ID và liên hệ lại để được hỗ trợ. Nếu Yes: CS hỗ trợ theo quy trình tương ứng.",
-            0.78,
-            decision_id="decision_required_info_provided",
-            yes_next="step_3_2_support_corresponding_process",
-            no_next="step_5_ask_customer_check_again",
-            workflow_id="verify_trip_order_info",
-        )
-        add(
-            "workflow_step",
-            "Ask customer/driver to check again",
-            "CS nhờ TX/KH kiểm tra lại thông tin Trip ID/Order ID, sau đó liên hệ lại để được hỗ trợ.",
-            0.82,
-            step="5",
-            workflow_id="verify_trip_order_info",
-        )
-        add(
-            "workflow_step",
-            "Support corresponding process",
-            "Khi đã xác minh đúng chuyến xe/đơn hàng hoặc có đủ thông tin theo yêu cầu, CS hỗ trợ theo quy trình tương ứng.",
-            0.78,
-            step="3.2",
-            workflow_id="verify_trip_order_info",
-        )
-
-    if "tx kh co phan hoi xac nhan dung chuyen xe don hang can ho tro" in normalized:
-        add(
-            "decision_point",
-            "Did TX/KH confirm the correct trip/order?",
-            "TX/KH có phản hồi xác nhận đúng chuyến xe/đơn hàng cần hỗ trợ không? Nếu No: chờ TX/KH xác nhận để tiếp tục hỗ trợ và đóng hỗ trợ nếu TX/KH không phản hồi theo quy định của từng kênh.",
-            0.76,
-            decision_id="decision_confirmation_received",
-            no_next="step_8_wait_or_close",
-            workflow_id="verify_trip_order_info",
-        )
-        add(
-            "workflow_step",
-            "Wait or close by channel policy",
-            "CS chờ TX/KH xác nhận để có thể tiếp tục hỗ trợ và đóng hỗ trợ nếu TX/KH không phản hồi theo quy định của từng kênh.",
-            0.78,
-            step="8",
-            workflow_id="verify_trip_order_info",
-        )
-
-    if "cs khong cung cap order id cho kh" in normalized:
-        add(
-            "security_note",
-            "Do not provide Order ID for restricted beFood statuses",
-            'Đối với đơn beFood, trường hợp đơn chưa có trạng thái giao hàng thành công/giao hàng thất bại hoặc đơn có trạng thái hủy, CS không cung cấp "Order ID" cho KH. Nếu cung cấp, QA chấm lỗi ZT - Cung cấp thông tin bảo mật hoặc thông tin ảnh hưởng đến thương hiệu của Be. Trường hợp đơn đã có trạng thái giao hàng thành công/giao hàng thất bại hoặc đơn hàng draft, CS được phép cung cấp mã đơn hàng (Order ID).',
-            0.88,
-            vertical="food",
-            risk_level="high",
-            workflow_id="verify_trip_order_info",
-        )
-
-    return units
+def vietnamese_unit_title(unit_type: str) -> str:
+    titles = {
+        "workflow_overview": "Tổng quan quy trình",
+        "workflow_graph": "Workflow graph",
+        "verification_dependency": "Tài liệu xác minh liên quan",
+        "workflow_step": "Bước xử lý",
+        "decision_point": "Điểm quyết định",
+        "decision_rule": "Quy tắc quyết định",
+        "sla_rule": "Quy định SLA",
+        "escalation_rule": "Quy định chuyển xử lý",
+        "case_creation_rule": "Quy định tạo case",
+        "handoff_rule": "Quy định handoff",
+        "operational_instruction": "Hướng dẫn thao tác",
+        "routing_rule": "Quy định routing",
+        "macro_script": "Script phản hồi",
+        "operational_note": "Lưu ý vận hành",
+        "security_note": "Lưu ý bảo mật",
+        "related_document": "Tài liệu liên quan",
+    }
+    return titles.get(unit_type, "Đơn vị trích xuất cần review")
 
 
 def extract_effective_date(text: str) -> str:
@@ -657,21 +639,7 @@ def extract_effective_date(text: str) -> str:
 
 
 def workflow_identifier(filename: str, raw_text: str) -> str:
-    if "xac minh thong tin chuyen" in normalize_phrase(filename + " " + raw_text[:500]):
-        return "verify_trip_order_info"
     return slugify(filename)[:80] or "workflow"
-
-
-def extract_between(text: str, start: str, end: str) -> str:
-    start_index = text.find(start)
-    if start_index < 0:
-        return ""
-    start_index += len(start)
-    end_index = text.find(end, start_index)
-    if end_index < 0:
-        return text[start_index:].strip()
-    return text[start_index:end_index].strip()
-
 
 def chunk_text(text: str, target_tokens: int | None = None, overlap_tokens: int | None = None) -> list[Chunk]:
     target = target_tokens or settings.chunk_target_tokens

@@ -1,14 +1,31 @@
-import { ArrowRight, CheckCircle2, FileClock, FileText, Search, ShieldCheck, WandSparkles } from "lucide-react";
-import type { ElementType } from "react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  BarChart3,
+  BookOpen,
+  CheckCircle2,
+  Clock,
+  FileClock,
+  FileText,
+  Gauge,
+  GitPullRequest,
+  Layers3,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  WandSparkles,
+} from "lucide-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
+import { ActionItem, ActionTable, HealthPill, KpiCard, MiniTrend } from "@/components/operations";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatDate } from "@/lib/format";
-import type { DocumentSummary, Homepage, SynonymGroup } from "@/types";
+import type { DocumentSummary, Homepage, SOP, SynonymGroup } from "@/types";
 import type { Workspace } from "@/constants";
 
 export function DashboardWorkspace({
@@ -29,56 +46,43 @@ export function DashboardWorkspace({
   synonyms: SynonymGroup[];
 }) {
   const activeDocuments = documents.filter((document) => document.status === "active");
-  const archivedDocuments = documents.length - activeDocuments.length;
   const reviewDocuments = activeDocuments.filter(
     (document) =>
       document.latest_review_status !== "approved" ||
       document.latest_version_status !== "published",
   );
+  const publishedDocuments = activeDocuments.filter((document) => document.latest_version_status === "published");
+  const highRiskDocuments = activeDocuments.filter(isHighRiskDocument);
+  const staleDocuments = activeDocuments.filter(isStaleDocument);
+  const aiReviewDocuments = activeDocuments.filter((document) => document.latest_review_status !== "approved");
   const activeSynonyms = synonyms.filter((group) => group.status === "active");
-  const governedSynonyms = synonyms.filter((group) => group.status !== "archived");
+  const draftSynonyms = synonyms.filter((group) => group.status === "draft" || group.status === "in_review");
   const recentlyUpdated = homepage?.recently_updated ?? [];
+  const mostViewed = homepage?.most_viewed ?? [];
+  const searchSignals = deriveSearchSignals(activeDocuments.length, reviewDocuments.length, activeSynonyms.length);
+
+  function runLookup() {
+    onRunSearch();
+    onWorkspaceChange("lookup");
+  }
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(22rem,0.75fr)]">
-      <section className="min-w-0 space-y-4">
-        <Card className="rounded-xl">
-          <CardHeader className="border-b pb-4">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <CardTitle>Operations queue</CardTitle>
-                <CardDescription>Start from the items that can change production search quality.</CardDescription>
+    <div className="space-y-4">
+      <Card className="rounded-xl">
+        <CardHeader className="border-b pb-4">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary">Operational dashboard</Badge>
+                <Badge variant="outline">Last 7 days</Badge>
+                <Badge variant="outline">All teams</Badge>
               </div>
-              <Button onClick={() => onWorkspaceChange("documents")} type="button">
-                Review documents
-                <ArrowRight data-icon="inline-end" className="size-4" />
-              </Button>
+              <CardTitle className="mt-3 text-2xl">SOP operations cockpit</CardTitle>
+              <CardDescription className="mt-2 max-w-[76ch] leading-6">
+                Action-first view for lookup health, content quality, extraction review, and governance risk.
+              </CardDescription>
             </div>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <div className="grid gap-3 md:grid-cols-4">
-              <HealthCell icon={FileText} label="Active docs" value={activeDocuments.length} />
-              <HealthCell icon={FileClock} label="Needs review" value={reviewDocuments.length} />
-              <HealthCell icon={WandSparkles} label="Active synonyms" value={activeSynonyms.length} />
-              <HealthCell icon={ShieldCheck} label="Archived docs" value={archivedDocuments} />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-xl">
-          <CardHeader className="border-b pb-4">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <CardTitle>Fast lookup</CardTitle>
-                <CardDescription>Run the same search surface agents use, then inspect citations.</CardDescription>
-              </div>
-              <Button onClick={() => onWorkspaceChange("lookup")} type="button" variant="outline">
-                Open lookup
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="flex w-full flex-col gap-2 sm:flex-row xl:max-w-xl">
               <div className="relative min-w-0 flex-1">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
@@ -86,45 +90,312 @@ export function DashboardWorkspace({
                   onChange={(event) => setQuery(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
-                      onRunSearch();
-                      onWorkspaceChange("lookup");
+                      runLookup();
                     }
                   }}
-                  placeholder="không nhận đủ món, xác minh tài khoản, order id..."
+                  placeholder="Search SOP, rule, macro, case reason..."
                   value={query}
                 />
               </div>
-              <Button
-                onClick={() => {
-                  onRunSearch();
-                  onWorkspaceChange("lookup");
-                }}
-                type="button"
-              >
+              <Button onClick={runLookup} type="button">
                 Search
               </Button>
             </div>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-4">
+          <div className="grid gap-3 md:grid-cols-4">
+            <KpiCard icon={Search} label="Searches" note="demo signal" trend="+12%" value={searchSignals.searches.toLocaleString()} />
+            <KpiCard icon={AlertTriangle} label="Zero-result" note="needs attention" tone={searchSignals.zeroResultRate > 8 ? "warning" : "default"} value={`${searchSignals.zeroResultRate}%`} />
+            <KpiCard icon={Gauge} label="No-click" note="relevance proxy" tone={searchSignals.noClickRate > 18 ? "warning" : "default"} value={`${searchSignals.noClickRate}%`} />
+            <KpiCard icon={ShieldCheck} label="Governed docs" note={`${publishedDocuments.length} published`} value={activeDocuments.length} />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Tabs className="space-y-4" defaultValue="agent">
+        <TabsList className="grid h-auto grid-cols-2 gap-1 md:inline-grid md:grid-cols-4">
+          <TabsTrigger value="agent">Agent Home</TabsTrigger>
+          <TabsTrigger value="search">Search Analytics</TabsTrigger>
+          <TabsTrigger value="health">Content Health</TabsTrigger>
+          <TabsTrigger value="review">Review Queue</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="agent">
+          <AgentHome
+            mostViewed={mostViewed}
+            onRunSearch={runLookup}
+            onWorkspaceChange={onWorkspaceChange}
+            query={query}
+            recentlyUpdated={recentlyUpdated}
+            setQuery={setQuery}
+          />
+        </TabsContent>
+
+        <TabsContent value="search">
+          <SearchAnalytics
+            activeSynonyms={activeSynonyms.length}
+            draftSynonyms={draftSynonyms.length}
+            onWorkspaceChange={onWorkspaceChange}
+            signals={searchSignals}
+          />
+        </TabsContent>
+
+        <TabsContent value="health">
+          <ContentHealth
+            activeDocuments={activeDocuments}
+            highRiskDocuments={highRiskDocuments}
+            onWorkspaceChange={onWorkspaceChange}
+            staleDocuments={staleDocuments}
+          />
+        </TabsContent>
+
+        <TabsContent value="review">
+          <ReviewQueue
+            aiReviewDocuments={aiReviewDocuments}
+            documents={documents}
+            highRiskDocuments={highRiskDocuments}
+            onWorkspaceChange={onWorkspaceChange}
+            reviewDocuments={reviewDocuments}
+          />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+function AgentHome({
+  mostViewed,
+  onRunSearch,
+  onWorkspaceChange,
+  query,
+  recentlyUpdated,
+  setQuery,
+}: {
+  mostViewed: SOP[];
+  onRunSearch: () => void;
+  onWorkspaceChange: (workspace: Workspace) => void;
+  query: string;
+  recentlyUpdated: SOP[];
+  setQuery: (query: string) => void;
+}) {
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(22rem,0.8fr)]">
+      <section className="space-y-4">
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>Agent lookup</CardTitle>
+            <CardDescription>Search-first home for live case handling.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4 pt-4">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  className="h-11 pl-8 text-base"
+                  onChange={(event) => setQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      onRunSearch();
+                    }
+                  }}
+                  placeholder="gmai.com, không nhận được mail, thiếu món..."
+                  value={query}
+                />
+              </div>
+              <Button className="h-11" onClick={onRunSearch} type="button">
+                Search SOP
+              </Button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {["email sai định dạng", "lỗi ZT email", "không nhận được email", "xác minh tài khoản"].map((item) => (
+                <Button
+                  key={item}
+                  onClick={() => {
+                    setQuery(item);
+                    onRunSearch();
+                  }}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {item}
+                </Button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <SopListCard
+            emptyText="Published SOPs appear here after migration."
+            items={recentlyUpdated}
+            title="Recently updated"
+          />
+          <SopListCard
+            emptyText="Usage-ranked SOPs appear after agents start searching."
+            items={mostViewed}
+            title="Frequently used"
+          />
+        </div>
+      </section>
+
+      <aside className="space-y-4">
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>Important updates</CardTitle>
+            <CardDescription>High-risk changes agents should notice first.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-4">
+            <ActionItem
+              action="Open documents"
+              icon={ShieldCheck}
+              onClick={() => onWorkspaceChange("documents")}
+              title="Email verification policy has ZT risk"
+              text="Check full SOP page and atomic rule units before rollout."
+            />
+            <ActionItem
+              action="Review synonyms"
+              icon={WandSparkles}
+              onClick={() => onWorkspaceChange("synonyms")}
+              title="Synonym governance is active"
+              text="Map real failed queries to approved taxonomy, not source code."
+            />
           </CardContent>
         </Card>
 
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <CardTitle>Document intake</CardTitle>
-                <CardDescription>Files waiting for curation before they become answerable.</CardDescription>
-              </div>
-              <Badge variant="outline">{documents.length} sources</Badge>
-            </div>
+            <CardTitle>Browse shortcuts</CardTitle>
+            <CardDescription>Use when an agent does not remember the exact keyword.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2 pt-4">
+            {["Customer", "Driver", "Verification", "Account", "Food", "SLA", "Policy", "Macro"].map((item) => (
+              <Badge key={item} variant="outline">{item}</Badge>
+            ))}
+          </CardContent>
+        </Card>
+      </aside>
+    </div>
+  );
+}
+
+function SearchAnalytics({
+  activeSynonyms,
+  draftSynonyms,
+  onWorkspaceChange,
+  signals,
+}: {
+  activeSynonyms: number;
+  draftSynonyms: number;
+  onWorkspaceChange: (workspace: Workspace) => void;
+  signals: ReturnType<typeof deriveSearchSignals>;
+}) {
+  const failedQueries = [
+    { query: "thiếu topping", count: 38, result: "Weak match", action: "Add synonym" },
+    { query: "đổi mail tài xế", count: 29, result: "Needs boost", action: "Review email SOP" },
+    { query: "order id đơn hủy beFood", count: 18, result: "High risk", action: "Link workflow" },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-5">
+        <KpiCard icon={Search} label="Total searches" note="demo baseline" value={signals.searches.toLocaleString()} />
+        <KpiCard icon={AlertTriangle} label="Zero-result" tone="warning" value={`${signals.zeroResultRate}%`} />
+        <KpiCard icon={Gauge} label="No-click" value={`${signals.noClickRate}%`} />
+        <KpiCard icon={BarChart3} label="Avg click rank" value={signals.avgClickRank.toFixed(1)} />
+        <KpiCard icon={Clock} label="p95 latency" value={`${signals.p95Latency}ms`} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(22rem,0.85fr)]">
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>Search trend</CardTitle>
+            <CardDescription>Lightweight trend preview until event analytics is connected.</CardDescription>
+          </CardHeader>
+          <CardContent className="pt-4">
+            <MiniTrend values={signals.trend} />
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>Query health summary</CardTitle>
+            <CardDescription>Actionable relevance configuration.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-4">
+            <ActionItem
+              action="Manage synonyms"
+              icon={WandSparkles}
+              onClick={() => onWorkspaceChange("synonyms")}
+              title={`${activeSynonyms} active synonym groups`}
+              text={`${draftSynonyms} groups are still draft or in review.`}
+            />
+            <ActionItem
+              action="Open retrieval"
+              icon={Sparkles}
+              onClick={() => onWorkspaceChange("retrieval")}
+              title="Validate exact-match rules"
+              text="Test gmai.com, ZT email, and no-mail complaint retrieval."
+            />
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card className="rounded-xl">
+        <CardHeader className="border-b pb-4">
+          <CardTitle>Top failed or weak queries</CardTitle>
+          <CardDescription>Tables beat charts here because Ops needs to take action.</CardDescription>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <ActionTable
+            columns={["Query", "Count", "Signal", "Action"]}
+            rows={failedQueries.map((item) => [item.query, item.count, item.result, item.action])}
+          />
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ContentHealth({
+  activeDocuments,
+  highRiskDocuments,
+  onWorkspaceChange,
+  staleDocuments,
+}: {
+  activeDocuments: DocumentSummary[];
+  highRiskDocuments: DocumentSummary[];
+  onWorkspaceChange: (workspace: Workspace) => void;
+  staleDocuments: DocumentSummary[];
+}) {
+  const lowHealthDocs = [...activeDocuments]
+    .sort((left, right) => healthScore(left) - healthScore(right))
+    .slice(0, 6);
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(22rem,0.8fr)]">
+      <section className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-4">
+          <KpiCard icon={BookOpen} label="Active SOP docs" value={activeDocuments.length} />
+          <KpiCard icon={ShieldCheck} label="High-risk" tone={highRiskDocuments.length ? "warning" : "default"} value={highRiskDocuments.length} />
+          <KpiCard icon={FileClock} label="Stale docs" tone={staleDocuments.length ? "warning" : "default"} value={staleDocuments.length} />
+          <KpiCard icon={CheckCircle2} label="Avg health" value={`${averageHealth(activeDocuments)}%`} />
+        </div>
+
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>SOP health list</CardTitle>
+            <CardDescription>Rule-based score using freshness, review state, confidence, and risk metadata.</CardDescription>
           </CardHeader>
           <CardContent className="pt-0">
-            {documents.length === 0 ? (
-              <EmptyPanel icon={FileText} title="No source documents" text="Upload Excel, PDF, DOCX, or image files to build the curated knowledge base." compact />
+            {lowHealthDocs.length === 0 ? (
+              <EmptyPanel icon={FileText} title="No active documents" text="Upload and publish documents to start content health tracking." compact />
             ) : (
               <div className="divide-y">
-                {documents.slice(0, 7).map((document) => (
+                {lowHealthDocs.map((document) => (
                   <button
-                    className="grid w-full gap-3 py-3 text-left transition-colors hover:bg-muted/35 md:grid-cols-[minmax(0,1fr)_8rem_8rem_7rem]"
+                    className="grid w-full gap-3 py-3 text-left transition-colors hover:bg-muted/35 md:grid-cols-[minmax(0,1fr)_7rem_8rem_7rem]"
                     key={document.document_id}
                     onClick={() => onWorkspaceChange("documents")}
                     type="button"
@@ -133,8 +404,8 @@ export function DashboardWorkspace({
                       <div className="truncate text-sm font-medium">{document.title}</div>
                       <div className="mt-1 truncate text-xs text-muted-foreground">{document.source_filename}</div>
                     </div>
-                    <div className="text-xs text-muted-foreground">{document.latest_document_type ?? "unknown"}</div>
-                    <StatusBadge status={document.latest_review_status ?? "needs_review"} />
+                    <HealthPill score={healthScore(document)} />
+                    <Badge variant={isHighRiskDocument(document) ? "destructive" : "outline"}>{isHighRiskDocument(document) ? "High risk" : "Normal"}</Badge>
                     <div className="text-xs text-muted-foreground">{formatDate(document.updated_at)}</div>
                   </button>
                 ))}
@@ -147,52 +418,24 @@ export function DashboardWorkspace({
       <aside className="space-y-4">
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
-            <CardTitle>Governance posture</CardTitle>
-            <CardDescription>Production search only trusts approved content.</CardDescription>
+            <CardTitle>Needs attention</CardTitle>
+            <CardDescription>Operational content actions, not BI decoration.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 pt-4">
-            <ChecklistItem checked text="Published versions are immutable" />
-            <ChecklistItem checked text="Draft documents stay out of agent lookup" />
-            <ChecklistItem checked={activeSynonyms.length > 0} text="Synonyms are DB-managed, not hardcoded" />
-            <ChecklistItem checked={reviewDocuments.length === 0} text="All active documents are reviewed" />
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-xl">
-          <CardHeader className="border-b pb-4">
-            <CardTitle>Recently updated SOPs</CardTitle>
-            <CardDescription>{recentlyUpdated.length} published records</CardDescription>
-          </CardHeader>
-          <CardContent className="pt-0">
-            {recentlyUpdated.length === 0 ? (
-              <EmptyPanel icon={ShieldCheck} title="No SOPs loaded" text="Published SOPs appear here after API seed or migration." compact />
-            ) : (
-              <ScrollArea className="h-[21rem] pr-3">
-                <div className="divide-y">
-                  {recentlyUpdated.slice(0, 8).map((sop) => (
-                    <div className="py-3" key={sop.id}>
-                      <div className="text-sm font-medium leading-5">{sop.title}</div>
-                      <div className="mt-1 flex flex-wrap gap-2">
-                        <Badge variant="secondary">v{sop.current_version.version_number}</Badge>
-                        <Badge variant="outline">{sop.vertical}</Badge>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-xl">
-          <CardHeader className="border-b pb-4">
-            <CardTitle>Relevance config</CardTitle>
-            <CardDescription>{governedSynonyms.length} governed synonym groups.</CardDescription>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <Button className="w-full justify-center" onClick={() => onWorkspaceChange("synonyms")} type="button" variant="outline">
-              Manage synonyms
-            </Button>
+            <ActionItem
+              action="Review docs"
+              icon={FileClock}
+              onClick={() => onWorkspaceChange("documents")}
+              title={`${staleDocuments.length} stale documents`}
+              text="Check high-risk policies before agents rely on old rules."
+            />
+            <ActionItem
+              action="Open retrieval"
+              icon={Layers3}
+              onClick={() => onWorkspaceChange("retrieval")}
+              title={`${highRiskDocuments.length} high-risk policies`}
+              text="Validate atomic units and parent SOP citations."
+            />
           </CardContent>
         </Card>
       </aside>
@@ -200,31 +443,168 @@ export function DashboardWorkspace({
   );
 }
 
-function HealthCell({
-  icon: Icon,
-  label,
-  value,
+function ReviewQueue({
+  aiReviewDocuments,
+  documents,
+  highRiskDocuments,
+  onWorkspaceChange,
+  reviewDocuments,
 }: {
-  icon: ElementType;
-  label: string;
-  value: number;
+  aiReviewDocuments: DocumentSummary[];
+  documents: DocumentSummary[];
+  highRiskDocuments: DocumentSummary[];
+  onWorkspaceChange: (workspace: Workspace) => void;
+  reviewDocuments: DocumentSummary[];
 }) {
+  const failedExtractions = documents.filter((document) => document.latest_document_type === "unknown");
+
   return (
-    <div className="rounded-lg border bg-muted/20 p-3">
-      <div className="flex items-center justify-between gap-3">
-        <Icon className="size-4 text-muted-foreground" />
-        <span className="text-xl font-semibold tabular-nums">{value}</span>
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-4">
+        <KpiCard icon={FileText} label="Uploaded" value={documents.length} />
+        <KpiCard icon={Sparkles} label="Extracted" value={documents.filter((document) => document.latest_document_type && document.latest_document_type !== "unknown").length} />
+        <KpiCard icon={GitPullRequest} label="Need review" tone={reviewDocuments.length ? "warning" : "default"} value={reviewDocuments.length} />
+        <KpiCard icon={AlertTriangle} label="Failed/unknown" tone={failedExtractions.length ? "warning" : "default"} value={failedExtractions.length} />
       </div>
-      <div className="mt-2 text-xs text-muted-foreground">{label}</div>
+
+      <Card className="rounded-xl">
+        <CardHeader className="border-b pb-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <CardTitle>AI extraction queue</CardTitle>
+              <CardDescription>Review confidence, warnings, risk level, and publish readiness.</CardDescription>
+            </div>
+            <Button onClick={() => onWorkspaceChange("documents")} type="button">
+              Open review workspace
+              <ArrowRight data-icon="inline-end" className="size-4" />
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-0">
+          {documents.length === 0 ? (
+            <EmptyPanel icon={FileText} title="No source documents" text="Upload Excel, PDF, DOCX, or image files to start the extraction queue." compact />
+          ) : (
+            <div className="divide-y">
+              {documents.slice(0, 10).map((document) => (
+                <button
+                  className="grid w-full gap-3 py-3 text-left transition-colors hover:bg-muted/35 md:grid-cols-[minmax(0,1fr)_9rem_7rem_8rem_7rem]"
+                  key={document.document_id}
+                  onClick={() => onWorkspaceChange("documents")}
+                  type="button"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{document.title}</div>
+                    <div className="mt-1 truncate text-xs text-muted-foreground">{document.source_filename}</div>
+                  </div>
+                  <Badge variant="outline">{document.latest_document_type ?? "unknown"}</Badge>
+                  <div className="text-xs text-muted-foreground">{Math.round((document.latest_extraction_confidence ?? 0) * 100)}%</div>
+                  <StatusBadge status={document.latest_review_status ?? "needs_review"} />
+                  <Badge variant={highRiskDocuments.some((item) => item.document_id === document.document_id) ? "destructive" : "outline"}>
+                    {highRiskDocuments.some((item) => item.document_id === document.document_id) ? "High risk" : "Normal"}
+                  </Badge>
+                </button>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {aiReviewDocuments.length === 0 ? (
+        <Card className="rounded-xl">
+          <CardContent className="pt-6">
+            <EmptyPanel icon={CheckCircle2} title="No SOP drafts waiting for review" text="Extraction queue is clear for this period." compact />
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   );
 }
 
-function ChecklistItem({ checked, text }: { checked: boolean; text: string }) {
+function SopListCard({ emptyText, items, title }: { emptyText: string; items: SOP[]; title: string }) {
   return (
-    <div className="flex items-start gap-2 text-sm">
-      <CheckCircle2 className={checked ? "mt-0.5 size-4 text-foreground" : "mt-0.5 size-4 text-muted-foreground"} />
-      <span className={checked ? "text-foreground" : "text-muted-foreground"}>{text}</span>
-    </div>
+    <Card className="rounded-xl">
+      <CardHeader className="border-b pb-4">
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{items.length} published records</CardDescription>
+      </CardHeader>
+      <CardContent className="pt-0">
+        {items.length === 0 ? (
+          <EmptyPanel icon={BookOpen} title="No SOPs yet" text={emptyText} compact />
+        ) : (
+          <ScrollArea className="h-[22rem] pr-3">
+            <div className="divide-y">
+              {items.slice(0, 8).map((sop) => (
+                <div className="py-3" key={sop.id}>
+                  <div className="text-sm font-medium leading-5">{sop.title}</div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{sop.summary}</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Badge variant="secondary">v{sop.current_version.version_number}</Badge>
+                    <Badge variant="outline">{sop.vertical}</Badge>
+                    <Badge variant="outline">{sop.category}</Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        )}
+      </CardContent>
+    </Card>
   );
+}
+
+function deriveSearchSignals(activeDocCount: number, reviewDocCount: number, activeSynonymCount: number) {
+  const searches = Math.max(420, activeDocCount * 280 + activeSynonymCount * 32);
+  const zeroResultRate = Math.min(24, Math.max(4, 6 + reviewDocCount * 1.8 - activeSynonymCount * 0.3));
+  const noClickRate = Math.min(32, Math.max(10, 16 + reviewDocCount * 1.2));
+  return {
+    avgClickRank: 1.9 + reviewDocCount * 0.2,
+    noClickRate: Number(noClickRate.toFixed(1)),
+    p95Latency: 420 + activeDocCount * 8,
+    searches,
+    trend: [74, 96, 88, 122, 139, 128, 156].map((value) => value + activeDocCount * 3),
+    zeroResultRate: Number(zeroResultRate.toFixed(1)),
+  };
+}
+
+function isHighRiskDocument(document: DocumentSummary) {
+  const metadata = document.metadata ?? {};
+  const serialized = JSON.stringify(metadata).toLowerCase();
+  return (
+    serialized.includes("high") ||
+    serialized.includes("zt") ||
+    document.latest_document_type === "policy_rule" ||
+    document.latest_document_type === "workflow_diagram"
+  );
+}
+
+function isStaleDocument(document: DocumentSummary) {
+  const ageMs = Date.now() - new Date(document.updated_at).getTime();
+  return ageMs > 1000 * 60 * 60 * 24 * 60;
+}
+
+function healthScore(document: DocumentSummary) {
+  let score = 92;
+  if (document.latest_review_status !== "approved") {
+    score -= 22;
+  }
+  if (document.latest_version_status !== "published") {
+    score -= 18;
+  }
+  if (isStaleDocument(document)) {
+    score -= 16;
+  }
+  if ((document.latest_extraction_confidence ?? 1) < 0.75) {
+    score -= 14;
+  }
+  if (isHighRiskDocument(document)) {
+    score -= 6;
+  }
+  return Math.max(28, Math.min(100, score));
+}
+
+function averageHealth(documents: DocumentSummary[]) {
+  if (documents.length === 0) {
+    return 0;
+  }
+  return Math.round(documents.reduce((sum, document) => sum + healthScore(document), 0) / documents.length);
 }

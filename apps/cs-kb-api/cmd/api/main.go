@@ -13,7 +13,10 @@ import (
 
 func main() {
 	cfg := config.Load()
-	store, err := service.NewStore(context.Background(), cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout+2*time.Second)
+	defer cancel()
+
+	store, err := service.NewStore(ctx, cfg)
 	if err != nil {
 		log.Fatalf("store init failed: %v", err)
 	}

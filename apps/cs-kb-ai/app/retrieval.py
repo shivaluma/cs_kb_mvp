@@ -6,7 +6,7 @@ from typing import Any
 from app.embedding import embed_text
 from app import repository
 from app.schemas import Citation, RetrievalRequest, RetrievalResponse, RetrievalResult
-from app.text_processing import expand_query, normalize_phrase, phrase_in_query
+from app.text_processing import expand_query, normalize_phrase
 
 
 RRF_K = 60
@@ -166,43 +166,65 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
     text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or "")]))
     boost = 0.0
 
-    if any_phrase(normalized_query, ["order id", "ma don hang"]) and any_phrase(normalized_query, ["huy", "khong cung cap", "co duoc cung cap", "bao mat"]):
-        if unit_type == "security_note":
-            boost += 0.08
-        if phrase_in_query("huy", text) and phrase_in_query("khong cung cap", text):
-            boost += 0.03
+    query_tokens = set(token for token in normalized_query.split() if len(token) >= 3)
+    metadata_text = normalize_phrase(" ".join(flatten_metadata_terms(metadata)))
+    metadata_tokens = set(token for token in metadata_text.split() if len(token) >= 3)
+    text_tokens = set(token for token in text.split() if len(token) >= 3)
 
-    if any_phrase(normalized_query, ["khong xac dinh", "khong kiem tra", "khong tim duoc"]):
-        if unit_type == "decision_point" and any_phrase(text, ["xac dinh duoc chuyen xe don hang", "kiem tra va xac dinh"]):
-            boost += 0.08
-        if unit_type == "workflow_step" and any_phrase(text, ["chu dong kiem tra", "gan nhat tren he thong"]):
-            boost += 0.07
+    metadata_overlap = len(query_tokens & metadata_tokens)
+    text_overlap = len(query_tokens & text_tokens)
+    if metadata_overlap:
+        boost += min(0.12, metadata_overlap * 0.018)
+    if text_overlap:
+        boost += min(0.05, text_overlap * 0.006)
 
-    if any_phrase(normalized_query, ["khieu nai", "trong vong bao lau", "1h"]) and phrase_in_query("befood", normalized_query):
-        if unit_type == "operational_note" and any_phrase(text, ["trong vong 1h", "thoi gian khieu nai"]):
-            boost += 0.08
+    action_unit_types = {
+        "validation_rule",
+        "handling_rule",
+        "routing_rule",
+        "operational_instruction",
+        "policy_rule",
+        "sla_rule",
+        "decision_rule",
+        "escalation_rule",
+        "case_creation_rule",
+        "handoff_rule",
+        "decision_point",
+        "workflow_step",
+        "macro_script",
+        "security_note",
+        "compliance_note",
+        "warning",
+    }
+    if unit_type in action_unit_types and metadata_overlap:
+        boost += 0.025
 
-    if phrase_in_query("chat", normalized_query) and any_phrase(normalized_query, ["trip id", "order id"]):
-        if unit_type == "workflow_step" and phrase_in_query("khung chat", text):
-            boost += 0.08
-
-    if any_phrase(normalized_query, ["chuyen khac", "don hang khac", "xin thong tin"]):
-        if unit_type == "workflow_step" and any_phrase(text, ["xin ten nha hang", "xin trip id order id"]):
-            boost += 0.08
-        if unit_type == "decision_point" and any_phrase(text, ["chuyen xe don hang khac", "buoc 3 1"]):
-            boost += 0.05
-
-    if any_phrase(normalized_query, ["script", "macro", "phan hoi mau"]):
-        if unit_type == "macro_script":
-            boost += 0.06
-    elif unit_type == "macro_script":
-        boost -= 0.015
+    risk_level = normalize_phrase(str(metadata.get("risk_level") or ""))
+    if risk_level in {"high", "critical"} and any(token in query_tokens for token in {"risk", "zt", "bao", "mat", "compliance"}):
+        boost += 0.025
 
     return boost
 
 
-def any_phrase(haystack: str, phrases: list[str]) -> bool:
-    return any(phrase_in_query(normalize_phrase(phrase), haystack) for phrase in phrases)
+def flatten_metadata_terms(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, list):
+        terms: list[str] = []
+        for item in value:
+            terms.extend(flatten_metadata_terms(item))
+        return terms
+    if isinstance(value, dict):
+        terms = []
+        for key, item in value.items():
+            terms.append(str(key))
+            terms.extend(flatten_metadata_terms(item))
+        return terms
+    return [str(value)]
 
 
 def to_result(row: dict[str, Any]) -> RetrievalResult:

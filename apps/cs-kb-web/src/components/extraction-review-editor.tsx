@@ -9,13 +9,29 @@ import { cn } from "@/lib/utils";
 import type { ExtractionUnit, ExtractionUnitUpdate } from "@/types";
 
 const UNIT_TYPES = [
+  "full_sop",
   "workflow_overview",
+  "workflow_graph",
   "verification_dependency",
   "decision_point",
+  "decision_rule",
   "workflow_step",
+  "operational_instruction",
+  "routing_rule",
+  "policy_rule",
+  "sla_rule",
+  "escalation_rule",
+  "case_creation_rule",
+  "handoff_rule",
   "macro_script",
   "operational_note",
   "security_note",
+  "compliance_note",
+  "warning",
+  "related_document",
+  "validation_rule",
+  "handling_rule",
+  "follow_up_rule",
   "rule_table_row",
   "text_section",
 ];
@@ -28,6 +44,7 @@ type Draft = {
   reviewStatus: ExtractionUnit["review_status"];
   riskLevel: string;
   effectiveFrom: string;
+  sourceRefAcknowledged: boolean;
 };
 
 export function ExtractionReviewEditor({
@@ -52,24 +69,39 @@ export function ExtractionReviewEditor({
   const valid = draft.title.trim().length > 0 && draft.content.trim().length > 0 && Number.isFinite(Number(draft.confidence));
   const confidence = Math.max(0, Math.min(Number(draft.confidence) || 0, 1));
 
-  function save() {
-    onSave(unit, {
+  function buildUpdate(reviewStatus = draft.reviewStatus): ExtractionUnitUpdate {
+    return {
       title: draft.title.trim(),
       content: draft.content.trim(),
       unit_type: draft.unitType,
       confidence,
-      review_status: draft.reviewStatus,
+      review_status: reviewStatus,
       actor: "cs-ops-ui",
       metadata: {
         ...unit.metadata,
         risk_level: draft.riskLevel,
         effective_from: draft.effectiveFrom,
+        source_ref_acknowledged: draft.sourceRefAcknowledged,
       },
+    };
+  }
+
+  function save() {
+    onSave(unit, buildUpdate());
+  }
+
+  function transitionReviewStatus(reviewStatus: ExtractionUnit["review_status"]) {
+    onSave(unit, {
+      ...buildUpdate(reviewStatus),
+      review_status: reviewStatus,
     });
   }
 
   return (
-    <article className={cn("rounded-2xl border bg-card p-4", changed && "border-primary/60 bg-primary/5")}>
+    <article
+      className={cn("rounded-xl border bg-card p-4", changed && "border-primary/60 bg-primary/5", disabled && "bg-muted/20")}
+      data-testid={`extraction-unit-${unit.unit_id}`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary">{unit.unit_type}</Badge>
@@ -80,6 +112,7 @@ export function ExtractionReviewEditor({
           {unit.source_sheet ? <Badge variant="outline">{unit.source_sheet}</Badge> : null}
           {unit.source_row ? <Badge variant="outline">row {unit.source_row}</Badge> : null}
           {unit.source_page ? <Badge variant="outline">page {unit.source_page}</Badge> : null}
+          {disabled ? <Badge variant="outline">read-only published version</Badge> : null}
         </div>
         <span className="font-mono text-[10px] text-muted-foreground">unit {unit.unit_index}</span>
       </div>
@@ -134,6 +167,25 @@ export function ExtractionReviewEditor({
         />
       </label>
 
+      {unit.metadata.source_ref_quality === "page_only" ? (
+        <div className="mt-3 rounded-xl border border-amber-300/70 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+          <p className="font-medium">Page-only source reference</p>
+          <p className="mt-1 text-xs leading-5">
+            This PDF/diagram unit has page-level trace only, no bbox. Publish requires CS Ops to verify this unit against the source page.
+          </p>
+          <label className="mt-2 flex items-center gap-2 text-xs font-medium">
+            <input
+              checked={draft.sourceRefAcknowledged}
+              className="size-4 rounded border-input"
+              disabled={disabled}
+              onChange={(event) => setDraft((current) => ({ ...current, sourceRefAcknowledged: event.target.checked }))}
+              type="checkbox"
+            />
+            I verified this unit against the source page
+          </label>
+        </div>
+      ) : null}
+
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
         <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
           Review status
@@ -174,7 +226,11 @@ export function ExtractionReviewEditor({
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs leading-5 text-muted-foreground">
-          {disabled ? "Published versions are immutable. Create a new draft version to edit." : "Saving recalculates embedding and updates the curated draft."}
+          {disabled
+            ? "Published versions are immutable. Create a new draft version to edit."
+            : changed
+              ? "Unsaved changes will refresh the embedding after save."
+              : "No unsaved changes. Use review actions to move this unit through curation."}
         </p>
         <div className="flex items-center gap-2">
           {draft.reviewStatus === "reviewed" || draft.reviewStatus === "approved" ? (
@@ -183,13 +239,50 @@ export function ExtractionReviewEditor({
               reviewed
             </span>
           ) : null}
-          <Button disabled={!changed || saving} onClick={() => setDraft(initialDraft)} size="sm" type="button" variant="outline">
+          {!disabled && unit.review_status === "needs_review" ? (
+            <Button
+              data-testid={`extraction-unit-${unit.unit_id}-mark-reviewed`}
+              disabled={saving || !valid}
+              onClick={() => transitionReviewStatus("reviewed")}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              Mark reviewed
+            </Button>
+          ) : null}
+          {!disabled && unit.review_status !== "approved" ? (
+            <Button
+              data-testid={`extraction-unit-${unit.unit_id}-approve`}
+              disabled={saving || !valid}
+              onClick={() => transitionReviewStatus("approved")}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              Approve
+            </Button>
+          ) : null}
+          <Button
+            data-testid={`extraction-unit-${unit.unit_id}-reset`}
+            disabled={!changed || saving}
+            onClick={() => setDraft(initialDraft)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
             <RotateCcw data-icon="inline-start" className="size-4" />
             Reset
           </Button>
-          <Button disabled={disabled || !changed || !valid || saving} onClick={save} size="sm" type="button">
+          <Button
+            data-testid={`extraction-unit-${unit.unit_id}-save`}
+            disabled={disabled || !changed || !valid || saving}
+            onClick={save}
+            size="sm"
+            type="button"
+          >
             <Save data-icon="inline-start" className="size-4" />
-            {saving ? "Saving" : "Save unit"}
+            {saving ? "Saving" : "Save changes"}
           </Button>
         </div>
       </div>
@@ -206,5 +299,6 @@ function unitToDraft(unit: ExtractionUnit): Draft {
     reviewStatus: unit.review_status,
     riskLevel: String(unit.metadata.risk_level ?? ""),
     effectiveFrom: String(unit.metadata.effective_from ?? ""),
+    sourceRefAcknowledged: unit.metadata.source_ref_acknowledged === true,
   };
 }

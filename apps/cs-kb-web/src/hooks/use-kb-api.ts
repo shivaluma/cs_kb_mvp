@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiGet, apiPatch, apiPost, apiUpload } from "@/lib/api";
+import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import type {
   AISuggestion,
   DocumentChunk,
+  DocumentMetadataPreview,
   DocumentSummary,
   ExtractionUnit,
   ExtractionUnitUpdate,
@@ -15,6 +16,7 @@ import type {
   SOP,
   SynonymGroup,
   SynonymSuggestion,
+  VersionRawText,
   VersionSummary,
 } from "@/types";
 
@@ -26,6 +28,7 @@ export const queryKeys = {
     ["ai-document-chunks", documentId, versionId] as const,
   extractionUnits: (documentId: string, versionId: string) =>
     ["ai-extraction-units", documentId, versionId] as const,
+  versionRaw: (versionId: string) => ["ai-version-raw", versionId] as const,
   synonyms: (status: string) => ["search-synonyms", status] as const,
   suggestions: ["search-synonym-suggestions"] as const,
   search: (query: string, filters: FilterState) => ["search", query, filters] as const,
@@ -64,6 +67,14 @@ export function useDocumentChunks(documentId?: string, versionId?: string) {
       const query = versionId ? `?version_id=${versionId}` : "";
       return apiGet<DocumentChunk[]>(`/api/v1/ai/documents/${documentId}/chunks${query}`);
     },
+  });
+}
+
+export function useVersionRawText(versionId?: string) {
+  return useQuery({
+    enabled: Boolean(versionId),
+    queryKey: queryKeys.versionRaw(versionId ?? ""),
+    queryFn: () => apiGet<VersionRawText>(`/api/v1/ai/versions/${versionId}/raw`),
   });
 }
 
@@ -142,6 +153,13 @@ export function useUploadDocument() {
   });
 }
 
+export function useDocumentMetadataPreview() {
+  return useMutation({
+    mutationFn: (form: FormData) =>
+      apiUpload<DocumentMetadataPreview>("/api/v1/ai/documents/metadata-preview", form),
+  });
+}
+
 export function usePublishVersion() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -156,16 +174,109 @@ export function usePublishVersion() {
   });
 }
 
+export function useBulkReviewVersion() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { versionId: string; actor: string; reviewStatus: "reviewed" | "approved"; scope?: "all" | "atomic" }) =>
+      apiPost(`/api/v1/ai/versions/${payload.versionId}/bulk-review`, {
+        actor: payload.actor,
+        review_status: payload.reviewStatus,
+        scope: payload.scope ?? "all",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.documents });
+      queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-document-chunks"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-extraction-units"] });
+    },
+  });
+}
+
 export function useUpdateExtractionUnit() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: { unitId: string; update: ExtractionUnitUpdate }) =>
-      apiPatch<ExtractionUnit>(`/api/v1/ai/extraction-units/${payload.unitId}`, payload.update),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["ai-extraction-units"] });
-      queryClient.invalidateQueries({ queryKey: ["ai-document-chunks"] });
-      queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
-      queryClient.invalidateQueries({ queryKey: queryKeys.documents });
+      apiPost<ExtractionUnit>(`/api/v1/ai/extraction-units/${payload.unitId}`, payload.update),
+    onMutate: async (payload) => {
+      await queryClient.cancelQueries({ queryKey: ["ai-extraction-units"] });
+      await queryClient.cancelQueries({ queryKey: ["ai-document-chunks"] });
+
+      const previousExtractionUnits = queryClient.getQueriesData<ExtractionUnit[]>({
+        queryKey: ["ai-extraction-units"],
+      });
+      const previousChunks = queryClient.getQueriesData<DocumentChunk[]>({
+        queryKey: ["ai-document-chunks"],
+      });
+
+      queryClient.setQueriesData<ExtractionUnit[]>(
+        { queryKey: ["ai-extraction-units"] },
+        (current) =>
+          current?.map((unit) =>
+            unit.unit_id === payload.unitId
+              ? {
+                  ...unit,
+                  title: payload.update.title,
+                  content: payload.update.content,
+                  unit_type: payload.update.unit_type,
+                  confidence: payload.update.confidence,
+                  review_status: payload.update.review_status,
+                  metadata: payload.update.metadata,
+                }
+              : unit,
+          ) ?? current,
+      );
+      queryClient.setQueriesData<DocumentChunk[]>(
+        { queryKey: ["ai-document-chunks"] },
+        (current) =>
+          current?.map((chunk) =>
+            chunk.chunk_id === payload.unitId
+              ? {
+                  ...chunk,
+                  heading: payload.update.title,
+                  content: payload.update.content,
+                  section: payload.update.unit_type,
+                  metadata: {
+                    ...chunk.metadata,
+                    ...payload.update.metadata,
+                    unit_type: payload.update.unit_type,
+                    confidence: payload.update.confidence,
+                    review_status: payload.update.review_status,
+                  },
+                }
+              : chunk,
+          ) ?? current,
+      );
+
+      return { previousExtractionUnits, previousChunks };
+    },
+    onError: (_error, _payload, context) => {
+      context?.previousExtractionUnits.forEach(([queryKey, data]) => {
+        queryClient.setQueryData(queryKey, data);
+      });
+      context?.previousChunks.forEach(([queryKey, data]) => {
+        queryClient.setQueryData(queryKey, data);
+      });
+    },
+    onSuccess: (unit) => {
+      queryClient.setQueriesData<ExtractionUnit[]>(
+        { queryKey: ["ai-extraction-units"] },
+        (current) => current?.map((item) => (item.unit_id === unit.unit_id ? unit : item)) ?? current,
+      );
+      queryClient.setQueriesData<DocumentChunk[]>(
+        { queryKey: ["ai-document-chunks"] },
+        (current) =>
+          current?.map((chunk) =>
+            chunk.chunk_id === unit.unit_id
+              ? {
+                  ...chunk,
+                  heading: unit.title,
+                  content: unit.content,
+                  section: unit.unit_type,
+                  metadata: unit.metadata,
+                }
+              : chunk,
+          ) ?? current,
+      );
     },
   });
 }

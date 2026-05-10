@@ -67,18 +67,34 @@ type aiChunkDocument struct {
 }
 
 func NewStore(ctx context.Context, cfg config.Config) (*Store, error) {
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		return nil, fmt.Errorf("DATABASE_URL is required; set it in .env or .env.local before running the API")
+	}
+	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
+	}
+	if poolConfig.ConnConfig.ConnectTimeout == 0 {
+		poolConfig.ConnConfig.ConnectTimeout = cfg.DatabaseConnectTimeout
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create postgres pool: %w", err)
 	}
 	store := &Store{db: pool, cfg: cfg, client: &http.Client{Timeout: 10 * time.Second}}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("connect to postgres: %w", err)
+	}
 	if err := store.EnsureSchema(ctx); err != nil {
 		pool.Close()
-		return nil, err
+		return nil, fmt.Errorf("ensure postgres schema: %w", err)
 	}
-	if err := store.Seed(ctx); err != nil {
-		pool.Close()
-		return nil, err
+	if cfg.SeedDemoSOPs {
+		if err := store.Seed(ctx); err != nil {
+			pool.Close()
+			return nil, err
+		}
 	}
 	_ = store.IndexPublishedSOPs(ctx)
 	return store, nil

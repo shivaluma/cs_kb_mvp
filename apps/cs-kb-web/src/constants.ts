@@ -2,6 +2,16 @@ import { Bot, FileText, LayoutDashboard, Search, WandSparkles } from "lucide-rea
 
 import type { FilterState, SynonymDraft, UploadState } from "@/types";
 
+export const workspacePaths = {
+  dashboard: "/",
+  lookup: "/lookup",
+  documents: "/documents",
+  synonyms: "/synonyms",
+  retrieval: "/retrieval",
+} as const;
+
+export type Workspace = keyof typeof workspacePaths;
+
 export const defaultFilters: FilterState = {
   audience: "all",
   vertical: "all",
@@ -13,11 +23,11 @@ export const defaultUpload: UploadState = {
   title: "",
   externalId: "",
   status: "draft",
-  vertical: "food",
-  category: "case_handling",
-  audience: "customer",
-  tags: "missing_item, refund",
-  caseReasons: "CR_FOOD_MISSING_ITEM",
+  vertical: "",
+  category: "",
+  audience: "",
+  tags: "",
+  caseReasons: "",
   ownerTeam: "CS Ops",
 };
 
@@ -39,34 +49,46 @@ export const filterOptions = {
 export const navItems = [
   {
     id: "dashboard",
+    path: workspacePaths.dashboard,
     label: "Dashboard",
     icon: LayoutDashboard,
     description: "Triage workload, readiness, and governance signals.",
   },
   {
     id: "lookup",
+    path: workspacePaths.lookup,
     label: "SOP Lookup",
     icon: Search,
     description: "Agent-facing SOP and approved document lookup.",
   },
   {
     id: "documents",
+    path: workspacePaths.documents,
     label: "Documents",
     icon: FileText,
     description: "Upload, extract, review, publish, and archive source files.",
   },
   {
     id: "synonyms",
+    path: workspacePaths.synonyms,
     label: "Synonyms",
     icon: WandSparkles,
     description: "Govern query expansion and Meilisearch relevance config.",
   },
   {
     id: "retrieval",
+    path: workspacePaths.retrieval,
     label: "Retrieval Lab",
     icon: Bot,
     description: "Debug hybrid retrieval, citations, and ranking signals.",
   },
 ] as const;
 
-export type Workspace = (typeof navItems)[number]["id"];
+export function pathForWorkspace(workspace: Workspace) {
+  return workspacePaths[workspace];
+}
+
+export function workspaceFromPath(pathname: string): Workspace {
+  const current = navItems.find((item) => item.path === pathname);
+  return current?.id ?? "dashboard";
+}

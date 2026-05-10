@@ -1,4 +1,4 @@
-import { Check, FileClock, FileText, Loader2, Search, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, Copy, FileClock, FileText, Loader2, Search, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,6 @@ import {
   FilterGrid,
   GovernanceItem,
   MacroCopyButton,
-  ResultButton,
   ResultSkeleton,
   SectionTitle,
   TextBlock,
@@ -67,7 +66,19 @@ export function LookupWorkspace({
   semanticResults: RetrievalResult[];
   setQuery: (query: string) => void;
 }) {
-  const visibleCount = listSource.length + semanticResults.length;
+  const groupedResults = groupRetrievalResults(semanticResults);
+  const aiSuggestedSops = aiSuggestion?.suggested_sops ?? [];
+  const visibleCount = listSource.length + semanticResults.length + aiSuggestedSops.length;
+
+  function openFullSop(match: RetrievalResult) {
+    const parentMatch = semanticResults.find((item) => item.document_id === match.document_id && isDocumentLayer(item));
+    onSelectDocumentMatch(parentMatch ?? match);
+  }
+
+  function copyAnswer(text: string) {
+    void navigator.clipboard.writeText(text);
+  }
+
   return (
     <div className="space-y-4">
       <Card className="rounded-xl">
@@ -119,29 +130,83 @@ export function LookupWorkspace({
                 ) : visibleCount === 0 ? (
                   <EmptyResults query={query} />
                 ) : (
-                  <>
-                    {listSource.length > 0 ? (
+                  <div className="space-y-4">
+                    {groupedResults.exact.length > 0 ? (
                       <div className="space-y-2">
-                        <div className="px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Structured SOPs</div>
-                        {listSource.map((item) => (
-                          <ResultButton item={item} key={item.sop_id} onClick={() => onOpenSOP(item.sop_id)} selected={selected?.id === item.sop_id} />
-                        ))}
-                      </div>
-                    ) : null}
-                    {semanticResults.length > 0 ? (
-                      <div className="space-y-2 pt-2">
-                        <div className="px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Approved document matches</div>
-                        {semanticResults.map((match) => (
+                        <ResultGroupHeader count={groupedResults.exact.length} title="Exact rule match" />
+                        {groupedResults.exact.map((match) => (
                           <DocumentMatchButton
                             key={match.chunk_id}
                             match={match}
                             onClick={() => onSelectDocumentMatch(match)}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => openFullSop(match)}
                             selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
                           />
                         ))}
                       </div>
                     ) : null}
-                  </>
+                    {(groupedResults.parent.length > 0 || listSource.length > 0) ? (
+                      <div className="space-y-2">
+                        <ResultGroupHeader count={groupedResults.parent.length + listSource.length} title="Parent SOP" />
+                        {groupedResults.parent.map((match) => (
+                          <DocumentMatchButton
+                            key={match.chunk_id}
+                            match={match}
+                            onClick={() => onSelectDocumentMatch(match)}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => onSelectDocumentMatch(match)}
+                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                          />
+                        ))}
+                        {listSource.map((item) => (
+                          <SopResultCard
+                            item={item}
+                            key={item.sop_id}
+                            onCopyAnswer={() => copyAnswer(item.snippet)}
+                            onOpen={() => onOpenSOP(item.sop_id)}
+                            selected={selected?.id === item.sop_id}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                    {groupedResults.related.length > 0 ? (
+                      <div className="space-y-2">
+                        <ResultGroupHeader count={groupedResults.related.length} title="Related SOP" />
+                        {groupedResults.related.map((match) => (
+                          <DocumentMatchButton
+                            key={match.chunk_id}
+                            match={match}
+                            onClick={() => onSelectDocumentMatch(match)}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => openFullSop(match)}
+                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                    {aiSuggestedSops.length > 0 ? (
+                      <div className="space-y-2">
+                        <ResultGroupHeader count={aiSuggestedSops.length} title="AI suggestion" />
+                        {aiSuggestedSops.map((item) => (
+                          <article
+                            className="w-full rounded-xl border bg-muted/20 p-3 text-left"
+                            key={`${item.sop_id}-${item.version}`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <h3 className="min-w-0 text-sm font-semibold leading-5">{item.title}</h3>
+                              <Badge variant="outline">{Math.round(item.confidence * 100)}%</Badge>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <Badge variant="secondary">grounded</Badge>
+                              <Badge variant="outline">v{item.version}</Badge>
+                              <Button className="h-7 px-2" onClick={() => onOpenSOP(item.sop_id)} size="sm" type="button" variant="outline">Open full SOP</Button>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                 )}
               </div>
             </ScrollArea>
@@ -150,7 +215,9 @@ export function LookupWorkspace({
       </section>
 
       <article className="min-w-0">
-        {selected && selectedVersion ? (
+        {selectedDocumentMatch ? (
+          <DocumentMatchDetail match={selectedDocumentMatch} />
+        ) : selected && selectedVersion ? (
           <SOPDetail
             aiSuggestion={aiSuggestion}
             copied={copied}
@@ -161,8 +228,6 @@ export function LookupWorkspace({
             selected={selected}
             selectedVersion={selectedVersion}
           />
-        ) : selectedDocumentMatch ? (
-          <DocumentMatchDetail match={selectedDocumentMatch} />
         ) : (
           <EmptyPanel icon={Search} title="Select a result" text="Search or choose a SOP/document match to inspect latest published content." />
         )}
@@ -175,49 +240,185 @@ export function LookupWorkspace({
 function DocumentMatchButton({
   match,
   onClick,
+  onCopyAnswer,
+  onOpenFullSop,
   selected,
 }: {
   match: RetrievalResult;
   onClick: () => void;
+  onCopyAnswer: () => void;
+  onOpenFullSop: () => void;
   selected: boolean;
 }) {
+  const scope = String(match.metadata.retrieval_scope ?? "unit");
+  const unitType = String(match.metadata.unit_type ?? match.section);
+  const isDocumentLayer = scope === "document" || unitType === "full_sop";
+  const facts = operationalFacts(match.metadata).slice(0, 4);
   return (
-    <button
+    <article
       className={cn(
-        "w-full rounded-xl border bg-card p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
+        "w-full rounded-xl border bg-card p-3 text-left",
         selected && "border-primary bg-primary/5",
       )}
-      onClick={onClick}
-      type="button"
     >
       <div className="flex items-start justify-between gap-3">
         <h3 className="min-w-0 text-sm font-semibold leading-5">{match.heading || match.title}</h3>
         <Badge variant="outline">doc v{match.version_number}</Badge>
       </div>
+      <p className="mt-1 truncate text-xs text-muted-foreground">From: {match.title}</p>
       <p className="mt-2 line-clamp-3 text-sm leading-5 text-muted-foreground">{match.content}</p>
+      {facts.length > 0 ? (
+        <div className="mt-3 grid gap-1.5 rounded-lg border bg-muted/20 p-2">
+          {facts.map((fact) => (
+            <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2 text-[11px]" key={fact.label}>
+              <span className="text-muted-foreground">{fact.label}</span>
+              <span className="truncate font-medium">{fact.value}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Badge variant="secondary">{String(match.metadata.unit_type ?? match.section)}</Badge>
+        <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{isDocumentLayer ? "Full SOP" : "Quick answer"}</Badge>
+        <Badge variant="secondary">{unitType}</Badge>
         <Badge variant="outline">{String(match.metadata.review_status ?? "approved")}</Badge>
         <Badge variant="outline">{match.rank_source.join(" + ")}</Badge>
       </div>
-    </button>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button className="h-7 px-2" onClick={onClick} size="sm" type="button" variant="outline">
+          Open quick answer
+        </Button>
+        <Button className="h-7 px-2" onClick={onOpenFullSop} size="sm" type="button" variant="outline">
+          Open full SOP
+        </Button>
+        <Button className="h-7 px-2" onClick={onCopyAnswer} size="sm" type="button" variant="ghost">
+          <Copy data-icon="inline-start" className="size-3.5" />
+          Copy answer
+        </Button>
+      </div>
+    </article>
   );
 }
 
+function SopResultCard({
+  item,
+  onCopyAnswer,
+  onOpen,
+  selected,
+}: {
+  item: SearchResult;
+  onCopyAnswer: () => void;
+  onOpen: () => void;
+  selected: boolean;
+}) {
+  return (
+    <article
+      className={cn(
+        "w-full rounded-xl border bg-card p-3 text-left",
+        selected && "border-primary bg-primary/5",
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="min-w-0 text-sm font-semibold leading-5">{item.title}</h3>
+        <Badge variant="secondary">v{item.version}</Badge>
+      </div>
+      <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">{item.snippet}</p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Badge variant="outline">{item.category}</Badge>
+        <Badge variant="outline">{item.vertical}</Badge>
+        <span className="text-xs text-muted-foreground">{formatDate(item.updated_at)}</span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button className="h-7 px-2" onClick={onOpen} size="sm" type="button" variant="outline">
+          Open full SOP
+        </Button>
+        <Button className="h-7 px-2" onClick={onCopyAnswer} size="sm" type="button" variant="ghost">
+          <Copy data-icon="inline-start" className="size-3.5" />
+          Copy answer
+        </Button>
+      </div>
+    </article>
+  );
+}
+
+function ResultGroupHeader({ count, title }: { count: number; title: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-1">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
+      <Badge variant="outline">{count}</Badge>
+    </div>
+  );
+}
+
+function groupRetrievalResults(results: RetrievalResult[]) {
+  return results.reduce(
+    (groups, result) => {
+      if (isDocumentLayer(result)) {
+        groups.parent.push(result);
+      } else if (isExactRuleMatch(result)) {
+        groups.exact.push(result);
+      } else {
+        groups.related.push(result);
+      }
+      return groups;
+    },
+    {
+      exact: [] as RetrievalResult[],
+      parent: [] as RetrievalResult[],
+      related: [] as RetrievalResult[],
+    },
+  );
+}
+
+function isDocumentLayer(match: RetrievalResult) {
+  const scope = String(match.metadata.retrieval_scope ?? "unit");
+  const unitType = String(match.metadata.unit_type ?? match.section);
+  return scope === "document" || unitType === "full_sop";
+}
+
+function isExactRuleMatch(match: RetrievalResult) {
+  const unitType = String(match.metadata.unit_type ?? match.section);
+  return [
+    "validation_rule",
+    "handling_rule",
+    "routing_rule",
+    "operational_instruction",
+    "policy_rule",
+    "sla_rule",
+    "decision_rule",
+    "escalation_rule",
+    "case_creation_rule",
+    "handoff_rule",
+    "tasklist_creation_rule",
+    "subject_format_rule",
+    "related_process_note",
+    "compliance_note",
+    "security_note",
+    "decision_tree",
+    "decision_point",
+    "workflow_step",
+    "warning",
+  ].includes(unitType) || match.rank_source.includes("lexical");
+}
+
 function DocumentMatchDetail({ match }: { match: RetrievalResult }) {
+  const scope = String(match.metadata.retrieval_scope ?? "unit");
+  const unitType = String(match.metadata.unit_type ?? match.section);
+  const isDocumentLayer = scope === "document" || unitType === "full_sop";
+  const facts = operationalFacts(match.metadata);
   return (
     <Card className="rounded-xl">
       <CardHeader className="space-y-4 border-b pb-4">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{isDocumentLayer ? "Full SOP" : "Quick answer"}</Badge>
               <Badge variant="secondary">approved document</Badge>
               <Badge variant="outline">v{match.version_number}</Badge>
-              <Badge variant="outline">{String(match.metadata.unit_type ?? match.section)}</Badge>
+              <Badge variant="outline">{unitType}</Badge>
             </div>
             <CardTitle className="text-xl md:text-2xl">{match.heading || match.title}</CardTitle>
             <CardDescription className="mt-2 max-w-[72ch] text-sm leading-6">
-              {match.title}, {match.source_filename}
+              From: {match.title}, {match.source_filename}
             </CardDescription>
           </div>
           <div className="rounded-xl border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
@@ -232,10 +433,21 @@ function DocumentMatchDetail({ match }: { match: RetrievalResult }) {
       </CardHeader>
       <CardContent className="space-y-5 pt-4">
         <section>
-          <SectionTitle title="Curated content" />
+          <SectionTitle title={isDocumentLayer ? "Full SOP page" : "Atomic knowledge unit"} />
           <p className="mt-3 whitespace-pre-wrap rounded-xl border bg-muted/25 p-4 text-sm leading-7">{match.content}</p>
         </section>
+        {facts.length > 0 ? (
+          <section>
+            <SectionTitle title="Operational fields" />
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              {facts.map((fact) => (
+                <GovernanceItem key={fact.label} label={fact.label} value={fact.value} />
+              ))}
+            </div>
+          </section>
+        ) : null}
         <section className="grid gap-3 md:grid-cols-2">
+          <GovernanceItem label="Parent SOP" value={match.title} />
           <GovernanceItem label="Document ID" value={match.document_id} />
           <GovernanceItem label="Version ID" value={match.version_id} />
           <GovernanceItem label="Chunk ID" value={match.chunk_id} />
@@ -244,6 +456,40 @@ function DocumentMatchDetail({ match }: { match: RetrievalResult }) {
       </CardContent>
     </Card>
   );
+}
+
+function operationalFacts(metadata: Record<string, unknown>) {
+  const fields = [
+    ["Priority", metadata.priority],
+    ["Condition", metadata.condition],
+    ["Action", metadata.action ?? metadata.default_action],
+    ["Queue", metadata.queue],
+    ["Reporter", metadata.reporter],
+    ["Service", metadata.service ?? metadata.vertical],
+    ["Audience", metadata.audience],
+    ["Ping Tech", metadata.requires_ping ?? metadata.requires_ping_tech],
+    ["Owner", metadata.owner ?? metadata.owner_team],
+    ["Risk", metadata.risk_level],
+  ] as const;
+  return fields
+    .map(([label, value]) => ({ label, value: formatMetadataValue(value) }))
+    .filter((fact) => fact.value.length > 0);
+}
+
+function formatMetadataValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+  if (Array.isArray(value)) {
+    return value.map(formatMetadataValue).filter(Boolean).join(", ");
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value);
 }
 
 function SOPDetail({

@@ -49,14 +49,18 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/search/synonym-suggestions/{id}/accept", h.proxyAISynonymSuggestionAccept)
 	mux.HandleFunc("POST /api/v1/ai/suggest", h.aiSuggest)
 	mux.HandleFunc("GET /api/v1/ai/documents", h.proxyAI("/ai/v1/documents"))
+	mux.HandleFunc("POST /api/v1/ai/documents/metadata-preview", h.proxyAIDocumentMetadataPreview)
 	mux.HandleFunc("POST /api/v1/ai/documents/upload", h.proxyAIDocumentUpload)
 	mux.HandleFunc("GET /api/v1/ai/documents/{id}/versions", h.proxyAIDocumentVersions)
 	mux.HandleFunc("GET /api/v1/ai/documents/{id}/chunks", h.proxyAIDocumentChunks)
 	mux.HandleFunc("GET /api/v1/ai/documents/{id}/extraction-units", h.proxyAIDocumentExtractionUnits)
 	mux.HandleFunc("PATCH /api/v1/ai/extraction-units/{id}", h.proxyAIExtractionUnitUpdate)
+	mux.HandleFunc("POST /api/v1/ai/extraction-units/{id}", h.proxyAIExtractionUnitUpdate)
 	mux.HandleFunc("POST /api/v1/ai/documents/{id}/archive", h.proxyAIDocumentArchive)
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/publish", h.proxyAIVersionPublish)
+	mux.HandleFunc("POST /api/v1/ai/versions/{id}/bulk-review", h.proxyAIVersionBulkReview)
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/raw", h.proxyAIVersionRaw)
+	mux.HandleFunc("GET /api/v1/ai/versions/{id}/source/pages/{page}", h.proxyAIVersionSourcePage)
 	mux.HandleFunc("POST /api/v1/ai/retrieve", h.proxyAI("/ai/v1/retrieve"))
 
 	return cors(mux)
@@ -151,10 +155,16 @@ func (h *Handler) homepage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "homepage_recent_failed"})
 		return
 	}
+	if recent == nil {
+		recent = []model.SOP{}
+	}
 	popular, err := h.store.Popular(r.Context(), 5)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "homepage_popular_failed"})
 		return
+	}
+	if popular == nil {
+		popular = []model.SOP{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"recently_updated": recent,
@@ -262,11 +272,15 @@ func (h *Handler) proxyAIDocumentExtractionUnits(w http.ResponseWriter, r *http.
 }
 
 func (h *Handler) proxyAIExtractionUnitUpdate(w http.ResponseWriter, r *http.Request) {
-	h.proxyAI("/ai/v1/extraction-units/"+r.PathValue("id"))(w, r)
+	h.proxyAIWithMethod("/ai/v1/extraction-units/"+r.PathValue("id"), http.MethodPatch, 30*time.Second)(w, r)
 }
 
 func (h *Handler) proxyAIVersionRaw(w http.ResponseWriter, r *http.Request) {
 	h.proxyAI("/ai/v1/versions/"+r.PathValue("id")+"/raw")(w, r)
+}
+
+func (h *Handler) proxyAIVersionSourcePage(w http.ResponseWriter, r *http.Request) {
+	h.proxyAI("/ai/v1/versions/" + r.PathValue("id") + "/source/pages/" + r.PathValue("page"))(w, r)
 }
 
 func (h *Handler) proxyAIDocumentUpload(w http.ResponseWriter, r *http.Request) {
@@ -281,6 +295,10 @@ func (h *Handler) proxyAIDocumentUpload(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	})(w, r)
+}
+
+func (h *Handler) proxyAIDocumentMetadataPreview(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithBody("/ai/v1/documents/metadata-preview", 90*time.Second, nil)(w, r)
 }
 
 func (h *Handler) proxyAIDocumentArchive(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +321,10 @@ func (h *Handler) proxyAIVersionPublish(w http.ResponseWriter, r *http.Request) 
 			_ = h.store.IndexAIDocument(ctx, payload)
 		}
 	})(w, r)
+}
+
+func (h *Handler) proxyAIVersionBulkReview(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithBody("/ai/v1/versions/"+r.PathValue("id")+"/bulk-review", 45*time.Second, nil)(w, r)
 }
 
 func (h *Handler) proxyAISynonymAction(action string) http.HandlerFunc {
@@ -480,6 +502,41 @@ func (h *Handler) proxyAI(path string) http.HandlerFunc {
 
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_service_unavailable"})
+			return
+		}
+		defer resp.Body.Close()
+
+		for key, values := range resp.Header {
+			if strings.EqualFold(key, "Content-Length") {
+				continue
+			}
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}
+}
+
+func (h *Handler) proxyAIWithMethod(path string, method string, timeout time.Duration) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		target := strings.TrimRight(h.cfg.AIBaseURL, "/") + path
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+
+		req, err := http.NewRequestWithContext(r.Context(), method, target, r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ai_proxy_request_failed"})
+			return
+		}
+		req.Header = r.Header.Clone()
+		req.Header.Del("Host")
+
+		resp, err := (&http.Client{Timeout: timeout}).Do(req)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_service_unavailable"})
 			return

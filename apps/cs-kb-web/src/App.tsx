@@ -1,18 +1,24 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 
+import { KbAppProvider } from "@/app-context";
 import { AppShell } from "@/components/app-shell";
 import {
   defaultFilters,
   defaultSynonymDraft,
   defaultUpload,
+  pathForWorkspace,
   type Workspace,
+  workspaceFromPath,
 } from "@/constants";
 import {
   useAcceptSuggestion,
   useArchiveDocument,
   useAISuggest,
+  useBulkReviewVersion,
   useCreateSynonym,
   useDocumentChunks,
+  useDocumentMetadataPreview,
   useDocuments,
   useDocumentVersions,
   useExtractionUnits,
@@ -28,6 +34,7 @@ import {
   useTransitionSynonym,
   useUploadDocument,
   useUpdateExtractionUnit,
+  useVersionRawText,
 } from "@/hooks/use-kb-api";
 import { compactFilters, fileExternalId, splitList, toSearchResult } from "@/lib/format";
 import type {
@@ -45,14 +52,11 @@ import type {
   SynonymSuggestion,
   UploadState,
 } from "@/types";
-import { DashboardWorkspace } from "@/workspaces/dashboard-workspace";
-import { DocumentsWorkspace } from "@/workspaces/documents-workspace";
-import { LookupWorkspace } from "@/workspaces/lookup-workspace";
-import { RetrievalWorkspace } from "@/workspaces/retrieval-workspace";
-import { SynonymsWorkspace } from "@/workspaces/synonyms-workspace";
 
 export function App() {
-  const [workspace, setWorkspace] = useState<Workspace>("dashboard");
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const workspace = workspaceFromPath(pathname);
   const [query, setQuery] = useState("khach khong nhan du mon co duoc refund khong");
   const [filters, setFilters] = useState<FilterState>(defaultFilters);
   const [retrievalMode, setRetrievalMode] = useState<RetrievalResponse["mode"]>("hybrid");
@@ -67,12 +71,14 @@ export function App() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState("");
   const [copyError, setCopyError] = useState("");
+  const autoSelectedInitialSop = useRef(false);
 
   const homepageQuery = useHomepage();
   const documentsQuery = useDocuments();
   const versionsQuery = useDocumentVersions(selectedDocument?.document_id);
   const chunksQuery = useDocumentChunks(selectedDocument?.document_id, selectedChunkVersionId);
   const extractionUnitsQuery = useExtractionUnits(selectedDocument?.document_id, selectedChunkVersionId);
+  const versionRawQuery = useVersionRawText(selectedChunkVersionId);
   const synonymsQuery = useSynonyms(synonymStatus);
   const suggestionsQuery = useSynonymSuggestions();
   const searchMutation = useSearch();
@@ -80,7 +86,9 @@ export function App() {
   const aiSuggestMutation = useAISuggest();
   const retrievalMutation = useRetrieval();
   const uploadMutation = useUploadDocument();
+  const metadataPreviewMutation = useDocumentMetadataPreview();
   const publishMutation = usePublishVersion();
+  const bulkReviewMutation = useBulkReviewVersion();
   const updateExtractionUnitMutation = useUpdateExtractionUnit();
   const archiveDocumentMutation = useArchiveDocument();
   const createSynonymMutation = useCreateSynonym();
@@ -111,7 +119,8 @@ export function App() {
   const aiSuggestion = (aiSuggestMutation.data as AISuggestion | undefined) ?? null;
 
   useEffect(() => {
-    if (!selected && homepage?.recently_updated[0]) {
+    if (!autoSelectedInitialSop.current && !selected && homepage?.recently_updated?.[0]) {
+      autoSelectedInitialSop.current = true;
       setSelected(homepage.recently_updated[0]);
     }
   }, [homepage, selected]);
@@ -139,7 +148,7 @@ export function App() {
     if (searchResults.length > 0) {
       return searchResults;
     }
-    return homepage?.most_viewed.map(toSearchResult) ?? [];
+    return (homepage?.most_viewed ?? []).map(toSearchResult);
   }, [homepage, searchResults]);
 
   const feedbackTotal = selected
@@ -158,6 +167,21 @@ export function App() {
   function reportNotice(message: string) {
     setNotice(message);
     setError("");
+  }
+
+  function navigateWorkspace(nextWorkspace: Workspace) {
+    void navigate({ to: pathForWorkspace(nextWorkspace) });
+  }
+
+  function commandSearch(nextQuery: string) {
+    const trimmedQuery = nextQuery.trim();
+    if (!trimmedQuery) {
+      return;
+    }
+    setQuery(trimmedQuery);
+    runSearch(trimmedQuery);
+    runRetrieval(trimmedQuery);
+    navigateWorkspace("lookup");
   }
 
   function runSearch(nextQuery = query, nextFilters = filters) {
@@ -196,7 +220,7 @@ export function App() {
       onSuccess: (sop) => {
         setSelected(sop);
         setSelectedDocumentMatch(null);
-        setWorkspace("lookup");
+        navigateWorkspace("lookup");
       },
       onError: () => reportError("Cannot open this SOP. It may be archived or unavailable."),
     });
@@ -231,6 +255,55 @@ export function App() {
     runSearch(query, nextFilters);
   }
 
+  function previewFileMetadata(file: File | null) {
+    metadataPreviewMutation.reset();
+    setUpload((current) => ({
+      ...current,
+      file,
+      status: "draft",
+      title: "",
+      externalId: "",
+      vertical: "",
+      category: "",
+      audience: "",
+      tags: "",
+      caseReasons: "",
+      ownerTeam: current.ownerTeam || "CS Ops",
+    }));
+    if (!file) {
+      return;
+    }
+
+    const form = new FormData();
+    form.append("file", file);
+    metadataPreviewMutation.mutate(form, {
+      onSuccess: (preview) => {
+        const metadata = preview.suggested_metadata;
+        setUpload((current) => {
+          if (current.file !== file) {
+            return current;
+          }
+          return {
+            ...current,
+            title: preview.title || current.title || file.name,
+            externalId: current.externalId || fileExternalId(file.name),
+            vertical: metadata.vertical || current.vertical,
+            category: metadata.category || current.category,
+            audience: metadata.audience?.join(", ") || current.audience,
+            tags: metadata.tags?.join(", ") || current.tags,
+            caseReasons: metadata.case_reasons?.join(", ") || current.caseReasons,
+            ownerTeam: metadata.owner_team || current.ownerTeam || "CS Ops",
+            status: "draft",
+          };
+        });
+        reportNotice(
+          `Auto-filled metadata from ${preview.document_type}: ${preview.chunk_count} chunks, ${Math.round(preview.extraction_confidence * 100)}% confidence.`,
+        );
+      },
+      onError: () => reportError("Could not auto-fill metadata. You can still enter the fields manually."),
+    });
+  }
+
   function handleUpload() {
     if (!upload.file) {
       reportError("Choose a TXT, MD, PDF, DOCX, Excel, or image file before uploading.");
@@ -259,7 +332,7 @@ export function App() {
     form.append(
       "metadata",
       JSON.stringify({
-        audience: [upload.audience],
+        audience: splitList(upload.audience),
         vertical: upload.vertical,
         category: upload.category,
         tags: splitList(upload.tags),
@@ -274,23 +347,13 @@ export function App() {
         reportNotice(`Uploaded ${data.title} v${data.version_number}, ${data.chunk_count} chunks extracted for review.`);
         setSelectedChunkVersionId("");
         setUpload((current) => ({ ...current, file: null, title: "", externalId: "" }));
-        setWorkspace("documents");
+        navigateWorkspace("documents");
       },
       onError: () => reportError("Upload failed. Confirm file type, size, and AI service health."),
     });
   }
 
   function publishVersion(versionId: string) {
-    const selectedVersionUnits = selectedChunkVersionId === versionId ? extractionUnits : [];
-    const pendingReviewCount = selectedVersionUnits.filter((unit) => unit.review_status === "needs_review").length;
-    const confirmed = window.confirm(
-      pendingReviewCount > 0
-        ? `This version still has ${pendingReviewCount} units marked needs_review. Publish anyway and lock this version?`
-        : "Publish this reviewed version and archive the previous published version?",
-    );
-    if (!confirmed) {
-      return;
-    }
     publishMutation.mutate(
       { versionId, actor: "cs-lead-ui" },
       {
@@ -298,6 +361,27 @@ export function App() {
           setSelectedChunkVersionId(versionId);
           reportNotice("Version published. Previous published version was archived and Meilisearch was updated.");
         },
+        onError: () =>
+          reportError(
+            "Publish blocked. Finish readiness checks first: full SOP, reviewed units, source refs, workflow graph, owner, effective date, and high-risk warnings.",
+          ),
+      },
+    );
+  }
+
+  function bulkReviewVersion(versionId: string, scope: "all" | "atomic" = "all") {
+    bulkReviewMutation.mutate(
+      { versionId, actor: "cs-ops-ui", reviewStatus: "reviewed", scope },
+      {
+        onSuccess: () => {
+          setSelectedChunkVersionId(versionId);
+          reportNotice(
+            scope === "atomic"
+              ? "Atomic retrieval units marked reviewed. Review the full SOP page separately before publishing."
+              : "Extraction units marked reviewed. Lead can publish after the remaining readiness checks pass.",
+          );
+        },
+        onError: () => reportError("Bulk review failed. Only editable draft versions can be reviewed."),
       },
     );
   }
@@ -387,6 +471,7 @@ export function App() {
   }
 
   const busyKey =
+    metadataPreviewMutation.isPending ? "metadata-preview" :
     uploadMutation.isPending ? "upload" :
     archiveDocumentMutation.isPending ? "archive-document" :
     createSynonymMutation.isPending ? "create-synonym" :
@@ -394,121 +479,121 @@ export function App() {
     generateSuggestionsMutation.isPending ? "generate-suggestions" :
     "";
 
+  const appContext = {
+    dashboardProps: {
+      documents,
+      homepage,
+      onRunSearch: () => runSearch(),
+      onWorkspaceChange: navigateWorkspace,
+      query,
+      setQuery,
+      synonyms,
+    },
+    lookupProps: {
+      aiSuggestion,
+      booting: homepageQuery.isLoading,
+      copied,
+      copyError,
+      feedbackRate: helpfulRate,
+      filters,
+      listSource,
+      loading: searchMutation.isPending,
+      onAskAI: askAI,
+      onCopyMacro: copyMacro,
+      onSelectDocumentMatch: (match: RetrievalResult) => {
+        setSelectedDocumentMatch(match);
+        setSelected(null);
+      },
+      onOpenSOP: openSOP,
+      onRunSearch: () => runSearch(),
+      onUpdateFilter: updateFilter,
+      query,
+      selected,
+      selectedDocumentMatch,
+      selectedVersion: selected?.current_version,
+      semanticResults,
+      setQuery,
+    },
+    retrievalProps: {
+      busy: retrievalMutation.isPending,
+      filters,
+      mode: retrievalMode,
+      onModeChange: setRetrievalMode,
+      onRetrieve: () => runRetrieval(),
+      onUpdateFilter: updateFilter,
+      query,
+      retrieval,
+      setQuery,
+    },
+    documentsProps: {
+      busyKey: busyKey || (publishMutation.isPending ? "publishing" : bulkReviewMutation.isPending ? "bulk-review" : ""),
+      chunks,
+      chunksLoading: chunksQuery.isFetching,
+      documents,
+      extractionUnits,
+      extractionUnitsLoading: extractionUnitsQuery.isFetching,
+      onArchiveDocument: archiveDocument,
+      onInspectVersion: setSelectedChunkVersionId,
+      onBulkReviewVersion: bulkReviewVersion,
+      onPublishVersion: publishVersion,
+      onRefreshDocuments: () => documentsQuery.refetch(),
+      onSelectDocument: (documentId: string) => {
+        const document = documents.find((item) => item.document_id === documentId);
+        if (document) {
+          setSelectedDocument(document);
+          setSelectedChunkVersionId(document.latest_version_id ?? "");
+        }
+      },
+      onUpdateExtractionUnit: updateExtractionUnit,
+      onFileSelected: previewFileMetadata,
+      onUpload: handleUpload,
+      metadataPreview: metadataPreviewMutation.data ?? null,
+      savingUnitId: updateExtractionUnitMutation.variables?.unitId ?? "",
+      selectedDocument,
+      selectedChunkVersionId,
+      setSelectedDocument,
+      setUpload,
+      upload,
+      versionRaw: versionRawQuery.data ?? null,
+      versionRawLoading: versionRawQuery.isFetching,
+      versions,
+    },
+    synonymsProps: {
+      busyKey,
+      draft: synonymDraft,
+      onAcceptSuggestion: acceptSuggestion,
+      onCreate: createSynonymGroup,
+      onGenerateSuggestions: generateSuggestions,
+      onRefreshSuggestions: () => suggestionsQuery.refetch(),
+      onRefreshSynonyms: () => synonymsQuery.refetch(),
+      onSetStatus: (status: string) => setSynonymStatus(status === "all" ? "" : status),
+      onSync: syncSynonyms,
+      onTransition: transitionSynonym,
+      setDraft: setSynonymDraft,
+      status: synonymStatus,
+      suggestions,
+      synonyms,
+    },
+  };
+
   return (
     <AppShell
       documentCount={documents.length}
       error={error || (homepageQuery.error ? "Cannot reach the API. Check Docker Compose and port 8080." : "")}
       latency={retrieval ? `${retrieval.latency_ms}ms` : "n/a"}
       notice={notice}
+      onCommandSearch={commandSearch}
       onDismissError={() => setError("")}
       onDismissNotice={() => setNotice("")}
-      onWorkspaceChange={setWorkspace}
+      onWorkspaceChange={navigateWorkspace}
+      query={query}
+      setQuery={setQuery}
       synonymCount={synonyms.length}
       workspace={workspace}
     >
-      {workspace === "dashboard" ? (
-        <DashboardWorkspace
-          documents={documents}
-          homepage={homepage}
-          onRunSearch={() => runSearch()}
-          onWorkspaceChange={setWorkspace}
-          query={query}
-          setQuery={setQuery}
-          synonyms={synonyms}
-        />
-      ) : null}
-
-      {workspace === "lookup" ? (
-        <LookupWorkspace
-          aiSuggestion={aiSuggestion}
-          booting={homepageQuery.isLoading}
-          copied={copied}
-          copyError={copyError}
-          feedbackRate={helpfulRate}
-          filters={filters}
-          listSource={listSource}
-          loading={searchMutation.isPending}
-          onAskAI={askAI}
-          onCopyMacro={copyMacro}
-          onSelectDocumentMatch={(match) => {
-            setSelectedDocumentMatch(match);
-            setSelected(null);
-          }}
-          onOpenSOP={openSOP}
-          onRunSearch={() => runSearch()}
-          onUpdateFilter={updateFilter}
-          query={query}
-          selected={selected}
-          selectedDocumentMatch={selectedDocumentMatch}
-          selectedVersion={selected?.current_version}
-          semanticResults={semanticResults}
-          setQuery={setQuery}
-        />
-      ) : null}
-
-      {workspace === "retrieval" ? (
-        <RetrievalWorkspace
-          busy={retrievalMutation.isPending}
-          filters={filters}
-          mode={retrievalMode}
-          onModeChange={setRetrievalMode}
-          onRetrieve={() => runRetrieval()}
-          onUpdateFilter={updateFilter}
-          query={query}
-          retrieval={retrieval}
-          setQuery={setQuery}
-        />
-      ) : null}
-
-      {workspace === "documents" ? (
-        <DocumentsWorkspace
-          busyKey={busyKey || (publishMutation.isPending ? "publishing" : "")}
-          chunks={chunks}
-          chunksLoading={chunksQuery.isFetching}
-          documents={documents}
-          extractionUnits={extractionUnits}
-          extractionUnitsLoading={extractionUnitsQuery.isFetching}
-          onArchiveDocument={archiveDocument}
-          onInspectVersion={setSelectedChunkVersionId}
-          onPublishVersion={publishVersion}
-          onRefreshDocuments={() => documentsQuery.refetch()}
-          onSelectDocument={(documentId) => {
-            const document = documents.find((item) => item.document_id === documentId);
-            if (document) {
-              setSelectedDocument(document);
-              setSelectedChunkVersionId(document.latest_version_id ?? "");
-            }
-          }}
-          onUpdateExtractionUnit={updateExtractionUnit}
-          onUpload={handleUpload}
-          savingUnitId={updateExtractionUnitMutation.variables?.unitId ?? ""}
-          selectedDocument={selectedDocument}
-          selectedChunkVersionId={selectedChunkVersionId}
-          setSelectedDocument={setSelectedDocument}
-          setUpload={setUpload}
-          upload={upload}
-          versions={versions}
-        />
-      ) : null}
-
-      {workspace === "synonyms" ? (
-        <SynonymsWorkspace
-          busyKey={busyKey}
-          draft={synonymDraft}
-          onAcceptSuggestion={acceptSuggestion}
-          onCreate={createSynonymGroup}
-          onGenerateSuggestions={generateSuggestions}
-          onRefreshSuggestions={() => suggestionsQuery.refetch()}
-          onRefreshSynonyms={() => synonymsQuery.refetch()}
-          onSetStatus={(status) => setSynonymStatus(status === "all" ? "" : status)}
-          onSync={syncSynonyms}
-          onTransition={transitionSynonym}
-          setDraft={setSynonymDraft}
-          status={synonymStatus}
-          suggestions={suggestions}
-          synonyms={synonyms}
-        />
-      ) : null}
+      <KbAppProvider value={appContext}>
+        <Outlet />
+      </KbAppProvider>
     </AppShell>
   );
 }

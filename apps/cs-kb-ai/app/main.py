@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 
 from app import repository
 from app.embedding import embed_text
-from app.ingestion import prepare_document_version
+from app.ingestion import prepare_document_version, preview_document_metadata
 from app.retrieval import retrieve
 from app.schemas import (
     DocumentMetadata,
+    DocumentMetadataPreviewResponse,
     DocumentChunkSummary,
     DocumentSummary,
     DocumentVersionResponse,
@@ -67,14 +70,45 @@ async def upload_document(
     if not data:
         raise HTTPException(status_code=400, detail="empty_file")
 
-    raw_text, digest, chunks, warnings, enrichment = prepare_document_version(
-        filename=file.filename or "document.txt",
-        content_type=file.content_type or "text/plain",
-        data=data,
-        metadata=parsed_metadata,
-    )
+    try:
+        raw_text, digest, chunks, warnings, enrichment = prepare_document_version(
+            filename=file.filename or "document.txt",
+            content_type=file.content_type or "text/plain",
+            data=data,
+            metadata=parsed_metadata,
+        )
+    except ValueError as exc:
+        digest = hashlib.sha256(data).hexdigest()
+        failure_reason = str(exc)
+        failure_metadata = parsed_metadata.model_copy(
+            update={
+                "review_status": "needs_review",
+                "extraction_confidence": 0.0,
+                "extraction_status": "failed_validation",
+                "extraction_error": failure_reason,
+                "extraction_warnings": [failure_reason],
+            }
+        )
+        version = repository.create_document_version(
+            external_id=external_id or digest,
+            title=title or file.filename or digest,
+            source_filename=file.filename or "document.txt",
+            content_type=file.content_type or "application/octet-stream",
+            checksum=digest,
+            raw_text=best_effort_raw_text(data),
+            raw_data=data,
+            chunks=[],
+            metadata=failure_metadata,
+            status="draft",
+            created_by=created_by,
+            change_summary=change_summary or f"Extraction failed: {failure_reason[:180]}",
+            document_type=failure_metadata.document_type,
+            review_status="needs_review",
+            extraction_confidence=0.0,
+        )
+        return DocumentVersionResponse(**version, warnings=[failure_reason])
     if not chunks:
-        raise HTTPException(status_code=400, detail={"error": "no_chunks_created", "warnings": warnings})
+        warnings = [*warnings, "no_chunks_created"]
 
     parsed_metadata = parsed_metadata.model_copy(update=enrichment)
     version = repository.create_document_version(
@@ -84,6 +118,7 @@ async def upload_document(
         content_type=file.content_type or "text/plain",
         checksum=digest,
         raw_text=raw_text,
+        raw_data=data,
         chunks=chunks,
         metadata=parsed_metadata,
         status=status,
@@ -94,6 +129,22 @@ async def upload_document(
         extraction_confidence=enrichment["extraction_confidence"],
     )
     return DocumentVersionResponse(**version, warnings=warnings)
+
+
+@app.post("/ai/v1/documents/metadata-preview", response_model=DocumentMetadataPreviewResponse)
+async def preview_document_upload_metadata(file: UploadFile = File(...)) -> DocumentMetadataPreviewResponse:
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty_file")
+    try:
+        preview = preview_document_metadata(
+            filename=file.filename or "document.txt",
+            content_type=file.content_type or "text/plain",
+            data=data,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DocumentMetadataPreviewResponse(**preview)
 
 
 @app.get("/ai/v1/documents", response_model=list[DocumentSummary])
@@ -145,12 +196,40 @@ def get_version_raw_text(version_id: str) -> VersionRawTextResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/ai/v1/versions/{version_id}/source/pages/{page_number}")
+def get_version_source_page(version_id: str, page_number: int) -> Response:
+    try:
+        image = repository.version_source_page_image(version_id, page_number)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(content=image, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+
+
 @app.post("/ai/v1/versions/{version_id}/publish")
 def publish_version(version_id: str, payload: dict[str, str] | None = None) -> dict[str, Any]:
     try:
         return repository.publish_version(version_id, (payload or {}).get("actor", "system"))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/versions/{version_id}/bulk-review")
+def bulk_review_version(version_id: str, payload: dict[str, str] | None = None) -> dict[str, Any]:
+    try:
+        return repository.bulk_review_version(
+            version_id,
+            (payload or {}).get("actor", "system"),
+            (payload or {}).get("review_status", "reviewed"),
+            (payload or {}).get("scope", "all"),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/ai/v1/documents/{document_id}/archive")
@@ -357,6 +436,13 @@ def parse_metadata(value: str) -> DocumentMetadata:
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="invalid_metadata_json") from exc
     return DocumentMetadata(**data)
+
+
+def best_effort_raw_text(data: bytes) -> str:
+    try:
+        return data.decode("utf-8", errors="replace")[:200000]
+    except Exception:
+        return ""
 
 
 def section_to_text(value: Any) -> str:

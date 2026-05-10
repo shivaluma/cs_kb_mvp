@@ -142,6 +142,28 @@ export type DocumentSummary = {
   metadata: Record<string, unknown>;
 };
 
+export type DocumentMetadataPreview = {
+  title: string;
+  suggested_metadata: {
+    audience: string[];
+    vertical: string;
+    category: string;
+    tags: string[];
+    case_reasons: string[];
+    owner_team: string;
+    document_type: string;
+    source_type: string;
+    review_status: string;
+    extraction_confidence: number;
+  };
+  document_type: string;
+  source_type: string;
+  extraction_confidence: number;
+  chunk_count: number;
+  warnings: string[];
+  signals: Record<string, unknown>;
+};
+
 export type VersionSummary = {
   version_id: string;
   document_id: string;
@@ -195,6 +217,17 @@ export type DocumentChunk = {
   content: string;
   token_count: number;
   metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type VersionRawText = {
+  version_id: string;
+  document_id: string;
+  title: string;
+  version_number: number;
+  status: string;
+  raw_text: string;
+  chunk_count: number;
   created_at: string;
 };
 
