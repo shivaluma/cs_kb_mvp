@@ -93,14 +93,8 @@ def healthz() -> dict[str, Any]:
 @app.get("/ai/v1/chat/model-routes")
 def chat_model_routes() -> dict[str, Any]:
     return {
-        "default_route": "auto",
+        "default_route": "simple",
         "routes": [
-            {
-                "route": "auto",
-                "label": "Auto route",
-                "model": "rule-based router",
-                "description": "Route by question intent, risk signals, and retrieval complexity.",
-            },
             {
                 "route": "simple",
                 "label": "Gemini Flash Lite",

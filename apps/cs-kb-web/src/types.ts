@@ -116,7 +116,7 @@ export type ChatMessage = {
   content: string;
 };
 
-export type ChatModelRoute = "auto" | "simple" | "policy" | "high_risk" | "complex";
+export type ChatModelRoute = "simple" | "policy" | "high_risk" | "complex";
 
 export type ChatModelRouteConfig = {
   route: ChatModelRoute;

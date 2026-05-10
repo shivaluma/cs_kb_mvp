@@ -28,7 +28,7 @@ export function ChatPage() {
   const chatModelRoutesQuery = useChatModelRoutes();
   const groundedChatMutation = useGroundedChat();
   const [messages, setMessages] = useState<ChatThreadMessage[]>([]);
-  const [modelRoute, setModelRoute] = useState<ChatModelRoute>("auto");
+  const [modelRoute, setModelRoute] = useState<ChatModelRoute>("simple");
 
   useEffect(() => {
     if (!initialQuestion || initialQuestionSent.current) {

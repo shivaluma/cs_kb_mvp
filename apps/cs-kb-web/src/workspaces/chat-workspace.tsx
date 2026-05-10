@@ -10,12 +10,6 @@ import type { ChatModelRoute, ChatModelRouteConfig, ChatThreadMessage, Retrieval
 
 const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
   {
-    route: "auto",
-    label: "Auto route",
-    model: "rule-based router",
-    description: "Cho system tự chọn theo intent, risk và độ phức tạp của câu hỏi.",
-  },
-  {
     route: "simple",
     label: "Gemini Flash Lite",
     model: "google/gemini-2.5-flash-lite",
@@ -104,7 +98,7 @@ export function ChatWorkspace({
               <Badge variant="outline">published only</Badge>
               <Badge variant="outline">citations required</Badge>
               <Badge variant="outline">no policy invention</Badge>
-              <Badge variant={modelRoute === "auto" ? "secondary" : "default"}>{selectedModelRoute.label}</Badge>
+              <Badge variant="default">{selectedModelRoute.label}</Badge>
             </div>
           </div>
         </div>
@@ -197,9 +191,7 @@ export function ChatWorkspace({
             </label>
             <div className="rounded-lg border bg-background p-3">
               <div className="flex flex-wrap items-center gap-1.5">
-                <Badge variant={modelRoute === "auto" ? "secondary" : "default"}>
-                  {modelRoute === "auto" ? "auto" : "manual"}
-                </Badge>
+                <Badge variant="default">manual/default</Badge>
                 <Badge variant="outline">{selectedModelRoute.model}</Badge>
               </div>
               <p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedModelRoute.description}</p>

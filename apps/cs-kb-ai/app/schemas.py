@@ -668,7 +668,7 @@ class GroundedChatRequest(BaseModel):
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
     limit: int = Field(default=6, ge=1, le=10)
     conversation: list[ChatMessage] = Field(default_factory=list, max_length=8)
-    model_route: Literal["auto", "simple", "policy", "high_risk", "complex"] = "auto"
+    model_route: Literal["auto", "simple", "policy", "high_risk", "complex"] = "simple"
 
 
 class GroundedAnswerPayload(BaseModel):
