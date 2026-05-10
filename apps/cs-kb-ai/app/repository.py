@@ -762,6 +762,8 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
     document_metadata = version.get("metadata") or {}
     if not isinstance(document_metadata, dict):
         document_metadata = {}
+    if str(document_metadata.get("extraction_status") or "").startswith("failed"):
+        failures.append("extraction_failed_validation")
 
     has_full_sop = False
     pending_units = 0
@@ -782,6 +784,8 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         metadata = row.get("metadata") or {}
         if not isinstance(metadata, dict):
             metadata = {}
+        if str(metadata.get("extraction_status") or "").startswith("failed"):
+            failures.append("extraction_failed_validation")
         unit_type = str(metadata.get("unit_type") or row.get("section") or "")
         retrieval_scope = str(metadata.get("retrieval_scope") or "")
         text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or ""), json.dumps(metadata, ensure_ascii=False)]))

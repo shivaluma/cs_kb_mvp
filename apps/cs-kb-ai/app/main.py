@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from typing import Any
 
@@ -42,10 +43,11 @@ from app.schemas import (
     VersionRawTextResponse,
     VersionSummary,
 )
-from app.text_processing import expand_query
+from app.text_processing import chunk_text, classify_document, expand_query, extract_effective_date, extract_text
 
 
 app = FastAPI(title="CS KB AI Service", version="0.2.0")
+logger = logging.getLogger("cs_kb_ai")
 
 
 @app.on_event("startup")
@@ -150,14 +152,21 @@ async def upload_document(
     except ValueError as exc:
         digest = hashlib.sha256(data).hexdigest()
         failure_reason = str(exc)
+        logger.warning(
+            "document_upload_extraction_failed filename=%s content_type=%s reason=%s",
+            file.filename,
+            file.content_type,
+            failure_reason,
+        )
+        raw_text, failure_chunks, failure_enrichment = failed_extraction_draft(
+            filename=file.filename or "document.txt",
+            content_type=file.content_type or "application/octet-stream",
+            data=data,
+            failure_reason=failure_reason,
+            metadata=parsed_metadata,
+        )
         failure_metadata = parsed_metadata.model_copy(
-            update={
-                "review_status": "needs_review",
-                "extraction_confidence": 0.0,
-                "extraction_status": "failed_validation",
-                "extraction_error": failure_reason,
-                "extraction_warnings": [failure_reason],
-            }
+            update=failure_enrichment,
         )
         version = repository.create_document_version(
             external_id=external_id or digest,
@@ -165,14 +174,14 @@ async def upload_document(
             source_filename=file.filename or "document.txt",
             content_type=file.content_type or "application/octet-stream",
             checksum=digest,
-            raw_text=best_effort_raw_text(data),
+            raw_text=raw_text,
             raw_data=data,
-            chunks=[],
+            chunks=failure_chunks,
             metadata=failure_metadata,
             status="draft",
             created_by=created_by,
             change_summary=change_summary or f"Extraction failed: {failure_reason[:180]}",
-            document_type=failure_metadata.document_type,
+            document_type=failure_enrichment["document_type"],
             review_status="needs_review",
             extraction_confidence=0.0,
         )
@@ -288,27 +297,105 @@ def run_background_extraction(
         )
     except Exception as exc:
         failure_reason = str(exc)
+        logger.exception(
+            "background_document_extraction_failed document_id=%s version_id=%s filename=%s reason=%s",
+            document_id,
+            version_id,
+            filename,
+            failure_reason,
+        )
+        raw_text, failure_chunks, failure_enrichment = failed_extraction_draft(
+            filename=filename,
+            content_type=content_type,
+            data=data,
+            failure_reason=failure_reason,
+            metadata=metadata,
+        )
         failed_metadata = metadata.model_copy(
-            update={
-                "review_status": "needs_review",
-                "extraction_confidence": 0.0,
-                "extraction_status": "failed_validation",
-                "extraction_error": failure_reason,
-                "extraction_warnings": [failure_reason],
-            }
+            update=failure_enrichment,
         )
         repository.replace_document_version_extraction(
             document_id=document_id,
             version_id=version_id,
-            raw_text=best_effort_raw_text(data),
-            chunks=[],
+            raw_text=raw_text,
+            chunks=failure_chunks,
             metadata=failed_metadata,
-            document_type=failed_metadata.document_type,
+            document_type=failure_enrichment["document_type"],
             review_status="needs_review",
             extraction_confidence=0.0,
             actor=actor,
             change_summary=f"Background extraction failed: {failure_reason[:180]}",
         )
+
+
+def failed_extraction_draft(
+    *,
+    filename: str,
+    content_type: str,
+    data: bytes,
+    failure_reason: str,
+    metadata: DocumentMetadata,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    try:
+        raw_text, extraction_warnings = extract_text(filename, content_type, data)
+    except Exception as exc:
+        raw_text = best_effort_raw_text(data)
+        extraction_warnings = [f"raw_text_extraction_failed:{exc.__class__.__name__}"]
+    classification = classify_document(filename, content_type, raw_text)
+    effective_from = extract_effective_date(raw_text)
+    source_ref_quality = "page_only" if filename.lower().endswith(".pdf") else "structured"
+    base_metadata = {
+        **metadata.model_dump(),
+        "document_type": classification.document_type,
+        "source_type": classification.source_type,
+        "review_status": "needs_review",
+        "extraction_confidence": 0.0,
+        "extraction_status": "failed_validation",
+        "extraction_error": failure_reason,
+        "extraction_warnings": [failure_reason, *extraction_warnings, *classification.warnings],
+        "source_filename": filename,
+        "source_ref_quality": source_ref_quality,
+        "source_ref_acknowledged": source_ref_quality != "page_only",
+        "effective_from": effective_from,
+        "publish_blocked_reason": "structured_ai_extraction_failed",
+    }
+    chunks: list[dict[str, Any]] = []
+    if raw_text.strip():
+        chunks.append(
+            {
+                "chunk_index": 0,
+                "section": "full_sop",
+                "heading": filename.rsplit(".", 1)[0][:180] or "Raw source evidence",
+                "content": raw_text,
+                "token_count": len(raw_text.split()),
+                "embedding": embed_text(raw_text[:4000]),
+                "metadata": {
+                    **base_metadata,
+                    "unit_type": "full_sop",
+                    "retrieval_scope": "document",
+                    "source_evidence_only": True,
+                },
+            }
+        )
+        for source_chunk in chunk_text(raw_text)[:12]:
+            chunks.append(
+                {
+                    "chunk_index": len(chunks),
+                    "section": source_chunk.section or "text_section",
+                    "heading": source_chunk.heading or "Raw extracted section",
+                    "content": source_chunk.content,
+                    "token_count": source_chunk.token_count,
+                    "embedding": embed_text(" ".join([source_chunk.heading, source_chunk.content])),
+                    "metadata": {
+                        **base_metadata,
+                        **source_chunk.metadata,
+                        "unit_type": "text_section",
+                        "retrieval_scope": "unit",
+                        "source_evidence_only": True,
+                    },
+                }
+            )
+    return raw_text, chunks, base_metadata
 
 
 @app.post("/ai/v1/documents/metadata-preview", response_model=DocumentMetadataPreviewResponse)

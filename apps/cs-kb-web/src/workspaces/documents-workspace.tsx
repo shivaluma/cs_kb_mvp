@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Archive, BookOpen, CheckCircle2, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, Network, RefreshCw, ShieldCheck, Upload, WandSparkles } from "lucide-react";
+import { Archive, BookOpen, CheckCircle2, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, Network, RefreshCw, ShieldCheck, TriangleAlert, Upload, WandSparkles } from "lucide-react";
 
 import { DocumentFact, ReadinessCheck } from "@/components/operations";
 import { Badge } from "@/components/ui/badge";
@@ -125,6 +125,7 @@ export function DocumentsWorkspace({
   const ownerAssigned = Boolean(selectedDocument?.metadata?.owner_team || selectedDocument?.metadata?.ownerTeam);
   const policyRequiresGovernance = ["policy_rule", "policy_table"].includes(String(selectedDocument?.latest_document_type ?? ""));
   const workflowRequiresGraph = selectedDocument?.latest_document_type === "workflow_diagram";
+  const selectedExtractionIssue = extractionIssue(selectedDocument);
   const workflowGraphConfidence = Number(workflowGraphUnit?.metadata.graph_confidence ?? workflowGraph?.graph_confidence ?? workflowGraphUnit?.confidence ?? 0);
   const pageOnlySourceRefUnacknowledged = extractionUnits.filter(
     (unit) => unit.metadata.source_ref_quality === "page_only" && unit.metadata.source_ref_acknowledged !== true,
@@ -519,11 +520,12 @@ export function DocumentsWorkspace({
                         </div>
                       </div>
                       <p className="truncate text-xs text-muted-foreground">{document.source_filename}</p>
-                      <div className="flex flex-wrap gap-2">
-                        <StatusBadge status={document.latest_review_status ?? "needs_review"} />
-                        <Badge variant="outline">{document.latest_document_type ?? "unknown"}</Badge>
-                        {document.status === "archived" ? <Badge variant="outline">lookup excluded</Badge> : null}
-                      </div>
+                        <div className="flex flex-wrap gap-2">
+                          <StatusBadge status={document.latest_review_status ?? "needs_review"} />
+                          <Badge variant="outline">{document.latest_document_type ?? "unknown"}</Badge>
+                          {extractionIssue(document) ? <Badge variant="destructive">extraction failed</Badge> : null}
+                          {document.status === "archived" ? <Badge variant="outline">lookup excluded</Badge> : null}
+                        </div>
                     </button>
                   ))
                 )}
@@ -572,6 +574,27 @@ export function DocumentsWorkspace({
                     <p className="text-sm font-medium">Archived source, audit only</p>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
                       This document is hidden from active lookup and AI answers. You can inspect versions, raw extraction, and chunks for traceability.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            {selectedExtractionIssue ? (
+              <div className="mb-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3">
+                <div className="flex items-start gap-3">
+                  <TriangleAlert className="mt-0.5 size-4 text-destructive" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-destructive">Extraction failed, source evidence saved</p>
+                    <p className="mt-1 break-words text-xs leading-5 text-destructive/90">{selectedExtractionIssue.reason}</p>
+                    {selectedExtractionIssue.warnings.length ? (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {selectedExtractionIssue.warnings.slice(0, 4).map((warning) => (
+                          <Badge className="max-w-full truncate" key={warning} variant="outline">{warning}</Badge>
+                        ))}
+                      </div>
+                    ) : null}
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                      Review can continue from raw extracted text, but publish is blocked until structured AI extraction succeeds.
                     </p>
                   </div>
                 </div>
@@ -988,6 +1011,25 @@ function inferredEffectiveFrom(units: ExtractionUnit[], selectedDocument: Docume
     return selectedVersion.created_at.slice(0, 10);
   }
   return new Date().toISOString().slice(0, 10);
+}
+
+function extractionIssue(document: DocumentSummary | null) {
+  if (!document) {
+    return null;
+  }
+  const status = String(document.metadata?.extraction_status ?? "");
+  const error = String(document.metadata?.extraction_error ?? "");
+  const warnings = Array.isArray(document.metadata?.extraction_warnings)
+    ? document.metadata.extraction_warnings.map(String).filter(Boolean)
+    : [];
+  if (!status.startsWith("failed") && !error && !warnings.some((warning) => warning.includes("failed") || warning.includes("openrouter"))) {
+    return null;
+  }
+  return {
+    reason: error || warnings[0] || "Extraction failed before structured units were created.",
+    status,
+    warnings,
+  };
 }
 
 function ValidationPill({ text, valid }: { text: string; valid: boolean }) {
