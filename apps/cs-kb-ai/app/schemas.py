@@ -240,6 +240,44 @@ class WorkflowExtractionPayload(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     search_enrichment: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_workflow_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        warnings = list(value.get("warnings") or [])
+        validation_errors = list(value.get("validation_errors") or [])
+        legacy_units = collect_legacy_units(value)
+
+        if "atomic_units" not in value and legacy_units:
+            value["atomic_units"] = [unit for unit in legacy_units if unit.get("unit_type") != "full_sop"]
+            warnings.append("legacy_units_mapped_to_atomic_units")
+
+        if not value.get("full_sop"):
+            full_sop = next((unit for unit in legacy_units if unit.get("unit_type") == "full_sop"), None)
+            if full_sop is None:
+                full_sop = synthesize_full_sop_unit(value, legacy_units)
+                warnings.append("full_sop_missing_from_model_synthesized_for_review")
+            value["full_sop"] = ensure_unit_source_refs(full_sop)
+
+        if not value.get("workflow_graph"):
+            workflow_graph = extract_legacy_workflow_graph(value, legacy_units)
+            if workflow_graph is None:
+                workflow_graph = synthesize_minimal_workflow_graph(value["full_sop"])
+                warnings.append("workflow_graph_missing_from_model_synthesized_for_review")
+            value["workflow_graph"] = workflow_graph
+            warnings.append("legacy_or_missing_workflow_graph_normalized")
+
+        value["atomic_units"] = [
+            ensure_unit_source_refs(unit)
+            for unit in value.get("atomic_units", [])
+            if isinstance(unit, dict) and unit.get("content")
+        ]
+        value["warnings"] = list(dict.fromkeys(str(warning) for warning in warnings if warning))
+        value["validation_errors"] = list(dict.fromkeys(str(error) for error in validation_errors if error))
+        return value
+
 
 def stable_node_id(title: str, index: int) -> str:
     title = title.replace("Đ", "D").replace("đ", "d")
@@ -248,6 +286,130 @@ def stable_node_id(title: str, index: int) -> str:
     if not normalized:
         normalized = f"node_{index}"
     return normalized[:90]
+
+
+def collect_legacy_units(value: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for key in ("units", "atomic_units", "extracted_units", "knowledge_units"):
+        items = value.get(key)
+        if isinstance(items, list):
+            candidates.extend(item for item in items if isinstance(item, dict))
+    return candidates
+
+
+def ensure_unit_source_refs(unit: dict[str, Any]) -> dict[str, Any]:
+    content = str(unit.get("content") or unit.get("summary") or unit.get("description") or "").strip()
+    title = str(unit.get("title") or unit.get("heading") or content[:80] or "Đơn vị workflow cần review").strip()
+    unit_type = str(unit.get("unit_type") or "workflow_step").strip()
+    if unit_type not in ExtractionUnitType.__args__:
+        unit_type = "workflow_step"
+    source_refs = unit.get("source_refs")
+    metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+    if not source_refs:
+        source_refs = metadata.get("source_refs")
+    if not source_refs:
+        source_refs = [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": []}]
+    return {
+        **unit,
+        "unit_type": unit_type,
+        "title": title[:180],
+        "content": content or title,
+        "metadata": metadata,
+        "source_refs": source_refs,
+    }
+
+
+def synthesize_full_sop_unit(value: dict[str, Any], units: list[dict[str, Any]]) -> dict[str, Any]:
+    metadata = value.get("document_metadata") if isinstance(value.get("document_metadata"), dict) else {}
+    title = str(metadata.get("title") or value.get("title") or "Bản nháp SOP workflow cần review")
+    content_parts = [
+        str(unit.get("content") or unit.get("summary") or "").strip()
+        for unit in units[:12]
+        if str(unit.get("content") or unit.get("summary") or "").strip()
+    ]
+    content = "\n".join(content_parts) or "Model không trả full_sop. Backend giữ bản nháp này để CS Ops review lại từ source."
+    source_refs = first_source_refs(units) or [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": []}]
+    return {
+        "unit_type": "full_sop",
+        "title": title,
+        "content": content,
+        "confidence": min(float_or_default(metadata.get("extraction_confidence"), 0.45), 0.55),
+        "metadata": {"retrieval_scope": "document", "source_ref_quality": "page_only"},
+        "source_refs": source_refs,
+    }
+
+
+def extract_legacy_workflow_graph(value: dict[str, Any], units: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for key in ("workflow_graph", "workflow", "graph"):
+        graph = value.get(key)
+        if isinstance(graph, dict):
+            return graph
+
+    for unit in units:
+        metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+        graph = metadata.get("workflow_graph") or unit.get("workflow_graph")
+        if isinstance(graph, dict):
+            return graph
+
+    nodes = value.get("nodes")
+    edges = value.get("edges")
+    if isinstance(nodes, list) and nodes:
+        metadata = value.get("document_metadata") if isinstance(value.get("document_metadata"), dict) else {}
+        title = str(value.get("title") or metadata.get("title") or "Workflow cần review")
+        return {
+            "workflow_id": stable_node_id(title, 1),
+            "title": title,
+            "start_node_id": "",
+            "nodes": nodes,
+            "edges": edges if isinstance(edges, list) else [],
+            "graph_confidence": 0.45,
+            "requires_human_review": True,
+            "review_reason": "Model trả nodes/edges legacy; cần CS Ops xác nhận topology.",
+        }
+    return None
+
+
+def synthesize_minimal_workflow_graph(full_sop: dict[str, Any]) -> dict[str, Any]:
+    title = str(full_sop.get("title") or "Workflow cần review")
+    node_id = stable_node_id(title, 1)
+    source_refs = full_sop.get("source_refs") or [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": []}]
+    return {
+        "workflow_id": node_id,
+        "title": title,
+        "start_node_id": node_id,
+        "nodes": [
+            {
+                "id": node_id,
+                "type": "start",
+                "title": title,
+                "content": "Model không trả workflow_graph. Cần review source diagram và trích lại topology trước khi publish.",
+                "source_refs": source_refs,
+            }
+        ],
+        "edges": [],
+        "graph_confidence": 0.25,
+        "requires_human_review": True,
+        "review_reason": "Thiếu workflow_graph từ model; graph tối thiểu chỉ để giữ draft recoverable.",
+    }
+
+
+def first_source_refs(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for unit in units:
+        refs = unit.get("source_refs")
+        if isinstance(refs, list) and refs:
+            return refs
+        metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+        refs = metadata.get("source_refs")
+        if isinstance(refs, list) and refs:
+            return refs
+    return []
+
+
+def float_or_default(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class MetadataSuggestionPayload(BaseModel):

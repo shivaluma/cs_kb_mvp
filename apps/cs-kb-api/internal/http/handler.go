@@ -334,7 +334,7 @@ func (h *Handler) aiSuggest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, model.AISuggestResponse{
-		Answer: "Nen tham chieu SOP \"" + sop.Title + "\" va lam theo checklist published moi nhat. Khong cam ket refund/compensation ngoai noi dung SOP.",
+		Answer: "Nen tham chieu SOP \"" + sop.Title + "\" va lam theo noi dung published moi nhat. Khong cam ket hanh dong ngoai noi dung SOP.",
 		SuggestedSOPs: []model.AISuggestedSOP{
 			{
 				SOPID:      sop.ID,
@@ -728,7 +728,7 @@ func suggestions(query string, resultCount int) []string {
 		return nil
 	}
 	if query == "" {
-		return []string{"missing item", "double charge", "safety incident"}
+		return []string{"thu tu khoa cu the hon", "kiem tra tag/category", "hoi Lead neu chua co SOP published"}
 	}
 	return []string{"thu tag khac", "kiem tra case reason", "escalate CS Lead neu khong co SOP"}
 }

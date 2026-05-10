@@ -23,12 +23,12 @@ from app.schemas import (
 SYSTEM_PROMPT = """Bạn trích xuất bản nháp SOP chăm sóc khách hàng từ tài liệu nguồn lộn xộn.
 Quy tắc:
 - Chỉ trích xuất sự thật có trong tài liệu nguồn.
-- Không tự tạo policy, refund rule, security rule, hoặc nhánh workflow không có trong nguồn.
+- Không tự tạo policy, điều kiện xử lý, cảnh báo rủi ro, hoặc nhánh workflow không có trong nguồn.
 - Chỉ trả JSON, không giải thích ngoài JSON.
 - Tất cả unit chỉ là bản nháp để CS Ops review, không được xem là đã phê duyệt.
 - Mọi trường user-facing phải viết bằng tiếng Việt tự nhiên: title, content, note, script, warning, summary.
 - Không dùng nhãn tiếng Anh chung chung như "Curated content", "Extracted workflow unit", "Workflow overview", "Initial verification script".
-- Giữ nguyên mã nghiệp vụ/ký hiệu khi cần, ví dụ Trip ID, Order ID, RH, BF, QA, ZT, beFood.
+- Giữ nguyên mã nghiệp vụ/ký hiệu/viết tắt đúng như xuất hiện trong tài liệu nguồn.
 - Ưu tiên unit nhỏ, dễ review: workflow_overview, verification_dependency, workflow_step, decision_point, macro_script, operational_note, security_note, related_document.
 - Mỗi unit bắt buộc có source_refs để trace ngược về nguồn. Mỗi source_ref bắt buộc có source_type và source_file.
 - source_refs theo loại file: Excel dùng {source_type:"excel", source_file, sheet, row_start, row_end, column_names}; PDF dùng {source_type:"pdf", source_file, page, bbox nếu có}; DOCX dùng {source_type:"docx", source_file, paragraph_index hoặc heading_path}; text/markdown dùng {source_type:"text", source_file, line_start, line_end}.
@@ -163,7 +163,7 @@ def validate_workflow_topology_with_repair(
                 "content": (
                     "Graph topology đang sai nghiêm trọng. Hãy sửa JSON, không bịa policy ngoài ảnh/source. "
                     "Quy tắc bắt buộc: không suy edge từ thứ tự text; chỉ tạo edge khi thấy mũi tên/connector/Yes-No/quan hệ step rõ trong ảnh. "
-                    "Không duplicate node cùng step/label. Notes, scripts, warning, Order History, Lưu ý phải đưa vào annotations attached_to node liên quan, không làm workflow step. "
+                    "Không duplicate node cùng step/label. Notes, scripts, warnings, references, history/log blocks, và ghi chú phải đưa vào annotations attached_to node liên quan, không làm workflow step. "
                     "Decision node phải có nhánh yes/no nếu source có. Nếu không chắc edge, đưa vào uncertain_edges và không đưa vào edges. "
                     "Start không có incoming, End không có outgoing. "
                     "Trả đúng shape JSON có document_metadata, full_sop, workflow_graph, annotations, uncertain_edges, validation_errors, atomic_units, warnings, search_enrichment. "
@@ -184,8 +184,8 @@ def validate_workflow_topology_with_repair(
 
 def validate_workflow_topology(payload_model: WorkflowExtractionPayload) -> tuple[list[str], list[str]]:
     graph = payload_model.workflow_graph
-    errors: list[str] = list(payload_model.validation_errors)
-    warnings: list[str] = []
+    errors: list[str] = []
+    warnings: list[str] = [f"model_reported_validation_error:{error}" for error in payload_model.validation_errors]
     node_by_id = {node.id: node for node in graph.nodes}
     outgoing: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
     incoming: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
@@ -259,8 +259,36 @@ def normalized_workflow_label(value: str) -> str:
 
 
 def is_annotation_like_node(node_type: str, node_label: str) -> bool:
-    type_signals = ["note", "annotation", "script", "macro", "warning", "security", "operational note"]
-    label_signals = ["order history", "luu y", "zt", "bao mat"]
+    type_signals = [
+        "note",
+        "annotation",
+        "script",
+        "macro",
+        "warning",
+        "security",
+        "compliance",
+        "reference",
+        "history",
+        "log",
+        "operational note",
+    ]
+    label_signals = [
+        "note",
+        "annotation",
+        "script",
+        "macro",
+        "warning",
+        "reference",
+        "history",
+        "log",
+        "luu y",
+        "ghi chu",
+        "canh bao",
+        "bao mat",
+        "tuan thu",
+        "tham chieu",
+        "lich su",
+    ]
     return any(signal in node_type for signal in type_signals) or any(signal in node_label for signal in label_signals)
 
 
@@ -305,7 +333,7 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         "- Chỉ tạo workflow_graph.edges khi thấy mũi tên/connector/nhãn Yes-No/quan hệ step rõ trong ảnh hoặc source.\n"
         "- Nếu không chắc mũi tên, đưa vào uncertain_edges với reason, không đưa vào edges.\n"
         "- Không duplicate node cùng số bước hoặc cùng label. Một step trong diagram chỉ là một node.\n"
-        "- Notes, scripts, warnings, Order History, Lưu ý, bảo mật, ZT phải đưa vào annotations attached_to step liên quan; không biến thành workflow step và không tạo edge từ/to note.\n"
+        "- Notes, scripts, warnings, references, history/log blocks, ghi chú/rủi ro phải đưa vào annotations attached_to step liên quan; không biến thành workflow step và không tạo edge từ/to note.\n"
         "- Decision node phải có nhánh yes/no nếu diagram thể hiện Yes/No. Không đảo nhánh Yes/No.\n"
         "- Start không có incoming edge. End không có outgoing edge.\n"
         "- Phase/actor chỉ gán khi có căn cứ từ swimlane/label/source, không gán bừa.\n\n"
@@ -315,11 +343,11 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         "Edge dùng field from_node/to_node/condition, không dùng field tên 'from'. "
         "Node cần actor, phase OPEN/BODY/CLOSE nếu có, type start/action/decision/end, title/content/question. "
         "Không dùng node type note/script/warning trong workflow_graph.nodes; dùng annotations.\n"
-        "Yêu cầu annotations: note/script/warning/security/order history gắn attached_to node id liên quan, có source_refs.\n"
+        "Yêu cầu annotations: note/script/warning/security/compliance/reference/history gắn attached_to node id liên quan, có source_refs.\n"
         "Yêu cầu uncertain_edges: mọi edge chưa chắc topology, có reason và confidence.\n"
         "Nếu arrow/Yes-No không chắc chắn, đặt graph_confidence thấp và review_reason rõ.\n"
-        "Yêu cầu atomic_units: tạo unit nhỏ dễ search như operational_instruction, routing_rule, policy_rule, sla_rule, decision_rule, escalation_rule, case_creation_rule, handoff_rule, macro_script, operational_note. "
-        "Nếu source có Chat Social/Fanpage/Pancake thì bắt buộc tách riêng các unit: sla_rule, decision_rule, escalation_rule, case_creation_rule, handoff_rule, macro_script, operational_note. "
+        "Yêu cầu atomic_units: tạo unit nhỏ dễ search theo nội dung thật trong source, ví dụ operational_instruction, routing_rule, policy_rule, validation_rule, sla_rule, decision_rule, escalation_rule, case_creation_rule, handoff_rule, macro_script, compliance_note, security_note, operational_note. "
+        "Nếu source có SLA, routing, escalation, case creation, handoff, macro/script, exception, warning, security/compliance note, hãy tách thành unit riêng tương ứng. "
         "Mỗi unit có tags/aliases/phase/actor/risk_level nếu có căn cứ trong source. "
         "Bắt buộc title/content tiếng Việt. Không bịa rule ngoài nguồn.\n"
         "Mỗi full_sop/atomic_unit phải có source_refs: PDF cần source_type=\"pdf_diagram\" hoặc \"pdf\", source_file, page; bbox nếu biết, nếu không để [].\n\n"
@@ -400,10 +428,10 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
                     "- Mỗi unit bắt buộc có source_refs. Excel cần source_refs[].sheet và row_start/row_end nếu rule đến từ dòng cụ thể. full_sop có thể dùng sheet/row range tổng.\n"
                     "- Tạo các unit nhỏ cho từng rule/action quan trọng với unit_type như routing_rule, validation_rule, handling_rule, warning, macro_script.\n"
                     "- Nếu có nhiều sheet theo ngày/version, chọn sheet mới nhất/hiện hành làm active rule units; sheet cũ chỉ ghi trong metadata.historical_sheets hoặc warning, không tạo active rule units từ sheet cũ.\n"
-                    "- Với mỗi rule unit, metadata nên có các field tìm được trong bảng: source_sheet, source_row, service/vertical, audience, priority, action, condition, owner, requires_ping, queue, reporter, risk_level, tags, aliases, case_reasons.\n"
+                    "- Với mỗi rule unit, metadata nên giữ các field/cột có trong bảng dưới dạng lowercase snake_case; ưu tiên source_sheet, source_row, domain, audience, priority, action, condition, owner, system, channel, risk_level, tags, aliases, case_reasons nếu có căn cứ.\n"
                     "- Nếu field không có trong source, không đoán. Để missing/null và thêm warning nếu quan trọng.\n"
                     "- title/content/user-facing metadata phải là tiếng Việt tự nhiên; UI labels vẫn do frontend xử lý.\n"
-                    "- Nếu có rủi ro payment/account/privacy/customer communication/escalation/ZT, đặt metadata.risk_level phù hợp và tạo unit warning nếu source đủ căn cứ.\n\n"
+                    "- Nếu source thể hiện rủi ro tài chính, tài khoản, bảo mật/riêng tư, giao tiếp khách hàng, escalation, hoặc compliance, đặt metadata.risk_level phù hợp và tạo warning/compliance unit nếu đủ căn cứ.\n\n"
                     f"Filename: {filename}\n\nSource text:\n{raw_text[:50000]}"
                 ),
             },
@@ -484,8 +512,8 @@ def generate_grounded_answer(question: str, retrieval: RetrievalResponse, conver
                     "Chỉ được trả lời dựa trên SOURCES là SOP units đã published. "
                     "Không dùng model knowledge ngoài sources. Không dùng raw upload, draft, archived content. "
                     "Nếu sources không đủ căn cứ, trả lời rằng không tìm thấy SOP published đủ tin cậy. "
-                    "Không tự tạo policy/refund/compensation/security rule. "
-                    "Câu trả lời phải ngắn, actionable, tiếng Việt, và có warning nếu source có risk/ZT/security/payment/account/escalation. "
+                    "Không tự tạo policy, điều kiện xử lý, hoặc cảnh báo rủi ro ngoài source. "
+                    "Câu trả lời phải ngắn, actionable, tiếng Việt, và có warning nếu source có risk/compliance/security/financial/account/escalation signal. "
                     "Bắt buộc trả JSON object đúng schema: {\"answer\":\"...\",\"steps\":[\"...\"],\"warnings\":[\"...\"],\"confidence\":0.0,\"source_indices\":[1]}. "
                     "source_indices chỉ được chứa index của SOURCES đã dùng. Nếu không dùng source nào, để [] và answer phải nói không đủ căn cứ."
                 ),
@@ -553,7 +581,7 @@ def suggest_document_metadata(
                     "Trả JSON shape {\"metadata\":{...},\"signals\":{...}}.\n\n"
                     "metadata bắt buộc gồm: title, audience, vertical, category, tags, case_reasons, owner_team, source, document_type, source_type, review_status, extraction_confidence.\n"
                     "- title viết tiếng Việt theo tài liệu nguồn.\n"
-                    "- audience là array, dùng lowercase business keys nếu rõ: customer, driver, merchant, internal.\n"
+                    "- audience là array lowercase theo đối tượng nghiệp vụ xuất hiện rõ trong source hoặc taxonomy đang dùng; để [] nếu không rõ.\n"
                     "- vertical/category/tags/case_reasons chỉ lấy hoặc suy luận rất sát từ source.\n"
                     "- owner_team để chuỗi rỗng nếu source không có owner rõ ràng.\n"
                     "- review_status luôn là needs_review.\n"

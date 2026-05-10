@@ -277,52 +277,9 @@ def ensure_search_taxonomy_schema(conn: Connection[Any]) -> None:
 
 
 def seed_search_taxonomy(conn: Connection[Any]) -> None:
-    cleanup_synonym_normalized_terms(conn)
-    intents = [
-        ("missing_item", "food", "customer", ["refund", "merchant", "order_issue"], "medium"),
-        ("wrong_item", "food", "customer", ["refund", "merchant", "order_issue"], "medium"),
-        ("refund", "payment", "customer", ["compensation", "payment"], "high"),
-        ("cancel_trip", "ride-hailing", "customer", ["cancellation", "trip"], "medium"),
-    ]
-    for intent_key, domain, audience, related_tags, risk_level in intents:
-        conn.execute(
-            """
-            INSERT INTO taxonomy_intents (intent_key, domain, audience, related_tags, risk_level, status)
-            VALUES (%s, %s, %s, %s::jsonb, %s, 'active')
-            ON CONFLICT (intent_key) DO NOTHING
-            """,
-            (intent_key, domain, audience, json.dumps(related_tags), risk_level),
-        )
-
-    seed_groups = [
-        ("missing_item", "one_way", "food", "customer", ["thiếu món", "không nhận đủ món", "khach khong nhan du mon", "thiếu topping", "giao thiếu nước", "missing item"]),
-        ("wrong_item", "one_way", "food", "customer", ["sai món", "giao sai combo", "wrong item"]),
-        ("refund", "regular", "payment", "customer", ["hoàn tiền", "bồi hoàn", "cashback", "refund"]),
-        ("cancel_trip", "one_way", "ride-hailing", "customer", ["hủy cuốc", "huy cuoc", "cancel ride"]),
-    ]
-    for canonical_key, synonym_type, domain, audience, terms in seed_groups:
-        group_row = conn.execute(
-            """
-            SELECT id FROM search_synonym_groups
-            WHERE canonical_key = %s AND synonym_type = %s AND status <> 'archived'
-            LIMIT 1
-            """,
-            (canonical_key, synonym_type),
-        ).fetchone()
-        if group_row:
-            group_id = str(group_row[0])
-        else:
-            group_id = str(uuid.uuid4())
-            conn.execute(
-                """
-                INSERT INTO search_synonym_groups (
-                  id, canonical_key, synonym_type, domain, audience, status, created_by, approved_by
-                )
-                VALUES (%s, %s, %s, %s, %s, 'active', 'seed', 'seed')
-                """,
-                (group_id, canonical_key, synonym_type, domain, audience),
-            )
-        upsert_synonym_terms_tx(conn, group_id, terms)
+    # Business taxonomy and synonyms are curated data, not application defaults.
+    # New environments start empty; CS Ops/Lead seeds and approves terms through
+    # the taxonomy/synonym workflow or AI-generated suggestions.
     cleanup_synonym_normalized_terms(conn)
 
 
@@ -574,20 +531,22 @@ def is_high_risk_metadata(metadata: dict[str, Any], normalized_text: str) -> boo
     if risk_level in {"high", "critical"}:
         return True
     risk_terms = [
-        "refund",
-        "hoan tien",
+        "financial",
+        "finance",
         "payment",
+        "money",
         "thanh toan",
         "account",
         "tai khoan",
         "privacy",
         "bao mat",
         "security",
-        "zt",
         "compliance",
+        "tuan thu",
         "escalation",
-        "boi hoan",
-        "compensation",
+        "rui ro",
+        "vi pham",
+        "canh bao",
     ]
     return any(term in normalized_text for term in risk_terms)
 
@@ -1546,10 +1505,7 @@ def upsert_synonym_terms_tx(conn: Connection[Any], group_id: str, terms: list[st
 
 
 def detect_language(normalized_term: str) -> str:
-    english_markers = {"missing", "item", "wrong", "refund", "cashback", "cancel", "ride"}
-    if any(marker in normalized_term.split() for marker in english_markers):
-        return "en"
-    return "vi"
+    return "und"
 
 
 def normalize_canonical_key(value: str) -> str:
@@ -1726,18 +1682,6 @@ def infer_canonical_key(normalized_query: str) -> str:
         terms = [normalize_phrase(term["term"]) for term in group.get("terms", [])]
         if any(term and term in normalized_query for term in terms):
             return str(group["canonical_key"])
-
-    token_set = set(tokenize(normalized_query))
-    rules = [
-        ("missing_item", {"thieu", "mon"}),
-        ("missing_item", {"nhan", "du", "mon"}),
-        ("wrong_item", {"sai", "mon"}),
-        ("refund", {"hoan", "tien"}),
-        ("cancel_trip", {"huy", "cuoc"}),
-    ]
-    for canonical, required_tokens in rules:
-        if required_tokens.issubset(token_set):
-            return canonical
     return ""
 
 

@@ -54,11 +54,11 @@ def classify_document(filename: str, content_type: str, raw_text: str = "") -> D
         )
     if lower_name.endswith(".pdf") and looks_like_workflow(normalized):
         return DocumentClassification("workflow_diagram", "diagram_pdf", 0.78, True)
-    if looks_like_email_policy(lower_name, normalized):
+    if looks_like_policy_rule(lower_name, normalized):
         return DocumentClassification(
             "policy_rule",
             "docx_policy_rule" if lower_name.endswith(".docx") else "text_policy_rule",
-            0.9,
+            0.84,
             True,
             ["effective_from_missing_needs_review"],
         )
@@ -129,13 +129,15 @@ def looks_like_workflow(normalized_text: str) -> bool:
     return hits >= 4
 
 
-def looks_like_email_policy(lower_name: str, normalized_text: str) -> bool:
+def looks_like_policy_rule(lower_name: str, normalized_text: str) -> bool:
     source = normalize_phrase(lower_name) + " " + normalized_text
     signals = [
-        "email" in source or "mail" in source,
-        "xac minh" in source or "quy dinh" in source,
-        "zt" in source or "bizops" in source or "admin" in source,
-        "sai dinh dang" in source or "khong nhan duoc" in source,
+        any(term in source for term in ["quy dinh", "policy", "rule", "nguyen tac", "dieu kien"]),
+        any(term in source for term in ["neu", "thi", "truong hop", "if", "when", "condition"]),
+        any(term in source for term in ["duoc phep", "khong duoc", "bat buoc", "can", "phai"]),
+        any(term in source for term in ["xu ly", "chuyen", "kiem tra", "approve", "reject", "escalate"]),
+        any(term in source for term in ["canh bao", "rui ro", "vi pham", "bao mat", "tuan thu", "compliance"]),
+        any(term in source for term in ["=>", "->", "|"]),
     ]
     return sum(1 for hit in signals if hit) >= 3
 
