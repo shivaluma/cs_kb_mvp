@@ -155,6 +155,25 @@ class WorkflowEdge(BaseModel):
     condition: str = ""
 
 
+class WorkflowAnnotation(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    type: str = Field(min_length=1, max_length=80)
+    attached_to: str = Field(default="", max_length=120)
+    title: str = Field(default="", max_length=180)
+    content: str = Field(min_length=1)
+    risk_level: str = ""
+    source_refs: list[SourceRef] = Field(default_factory=list)
+
+
+class WorkflowUncertainEdge(BaseModel):
+    from_node: str = Field(default="", max_length=120)
+    to_node: str = Field(default="", max_length=120)
+    condition: str = ""
+    reason: str = Field(min_length=1)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    source_refs: list[SourceRef] = Field(default_factory=list)
+
+
 class WorkflowGraph(BaseModel):
     workflow_id: str = Field(min_length=1, max_length=160)
     title: str = Field(min_length=1, max_length=240)
@@ -215,6 +234,9 @@ class WorkflowExtractionPayload(BaseModel):
     full_sop: ExtractedUnit
     workflow_graph: WorkflowGraph
     atomic_units: list[ExtractedUnit] = Field(default_factory=list)
+    annotations: list[WorkflowAnnotation] = Field(default_factory=list)
+    uncertain_edges: list[WorkflowUncertainEdge] = Field(default_factory=list)
+    validation_errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     search_enrichment: dict[str, Any] = Field(default_factory=dict)
 
@@ -398,6 +420,38 @@ class RetrievalResponse(BaseModel):
     results: list[RetrievalResult]
     citations: list[Citation]
     warnings: list[str] = Field(default_factory=list)
+    latency_ms: int
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class GroundedChatRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
+    limit: int = Field(default=6, ge=1, le=10)
+    conversation: list[ChatMessage] = Field(default_factory=list, max_length=8)
+
+
+class GroundedAnswerPayload(BaseModel):
+    answer: str = Field(min_length=1)
+    steps: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    source_indices: list[int] = Field(default_factory=list)
+
+
+class GroundedChatResponse(BaseModel):
+    question: str
+    answer: str
+    steps: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
+    sources: list[RetrievalResult] = Field(default_factory=list)
+    confidence: float = 0.0
+    retrieval: RetrievalResponse
     latency_ms: int
 
 

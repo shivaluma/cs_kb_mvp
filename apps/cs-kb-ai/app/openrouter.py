@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
+import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +11,13 @@ import httpx
 from pydantic import ValidationError
 
 from app.config import settings
-from app.schemas import ExtractedUnitsPayload, MetadataSuggestionPayload, WorkflowExtractionPayload
+from app.schemas import (
+    ExtractedUnitsPayload,
+    GroundedAnswerPayload,
+    MetadataSuggestionPayload,
+    RetrievalResponse,
+    WorkflowExtractionPayload,
+)
 
 
 SYSTEM_PROMPT = """Bạn trích xuất bản nháp SOP chăm sóc khách hàng từ tài liệu nguồn lộn xộn.
@@ -32,15 +41,26 @@ def enabled() -> bool:
 
 
 def completion_content(payload: dict[str, Any], headers: dict[str, str]) -> str:
-    with httpx.Client(timeout=settings.openrouter_timeout_seconds) as client:
-        response = client.post(
-            f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-        body = response.json()
-    return str(body["choices"][0]["message"]["content"])
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=settings.openrouter_timeout_seconds) as client:
+                response = client.post(
+                    f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                body = response.json()
+            return str(body["choices"][0]["message"]["content"])
+        except httpx.TransportError as exc:
+            last_error = exc
+            if attempt == 2:
+                break
+            time.sleep(0.6 * (attempt + 1))
+    if last_error:
+        raise last_error
+    raise RuntimeError("openrouter_empty_response")
 
 
 def parse_llm_json(content: str) -> Any:
@@ -108,9 +128,10 @@ def validate_workflow_payload_with_repair(
                     "role": "user",
                     "content": (
                         "JSON trên hợp lệ nhưng sai schema. Hãy chuyển nó sang ĐÚNG shape bắt buộc: "
-                        "{\"document_metadata\":{},\"full_sop\":{},\"workflow_graph\":{},\"atomic_units\":[],\"warnings\":[],\"search_enrichment\":{}}. "
+                        "{\"document_metadata\":{},\"full_sop\":{},\"workflow_graph\":{},\"annotations\":[],\"uncertain_edges\":[],\"validation_errors\":[],\"atomic_units\":[],\"warnings\":[],\"search_enrichment\":{}}. "
                         "Không bỏ full_sop. Không bỏ workflow_graph. Nếu graph có nodes/edges trong text hoặc units, hãy tạo workflow_graph từ đó. "
                         "Nếu chỉ có units legacy, hãy chọn/tạo unit full_sop từ nội dung tổng quan và đưa các unit còn lại vào atomic_units. "
+                        "Notes/scripts/warnings phải nằm trong annotations, không nằm trong workflow_graph.nodes nếu không phải bước chính. "
                         "Chỉ trả JSON object hợp lệ, không markdown. "
                         f"Validation errors: {validation_summary(exc)}"
                     ),
@@ -121,19 +142,182 @@ def validate_workflow_payload_with_repair(
         return WorkflowExtractionPayload.model_validate(repaired), True
 
 
+def validate_workflow_topology_with_repair(
+    payload_model: WorkflowExtractionPayload,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+) -> tuple[WorkflowExtractionPayload, bool, list[str]]:
+    errors, warnings = validate_workflow_topology(payload_model)
+    if not errors:
+        payload_model.warnings = [*payload_model.warnings, *warnings]
+        return payload_model, False, []
+
+    repair_payload = {
+        **payload,
+        "temperature": 0,
+        "messages": [
+            *payload["messages"],
+            {"role": "assistant", "content": payload_model.model_dump_json()[:30000]},
+            {
+                "role": "user",
+                "content": (
+                    "Graph topology đang sai nghiêm trọng. Hãy sửa JSON, không bịa policy ngoài ảnh/source. "
+                    "Quy tắc bắt buộc: không suy edge từ thứ tự text; chỉ tạo edge khi thấy mũi tên/connector/Yes-No/quan hệ step rõ trong ảnh. "
+                    "Không duplicate node cùng step/label. Notes, scripts, warning, Order History, Lưu ý phải đưa vào annotations attached_to node liên quan, không làm workflow step. "
+                    "Decision node phải có nhánh yes/no nếu source có. Nếu không chắc edge, đưa vào uncertain_edges và không đưa vào edges. "
+                    "Start không có incoming, End không có outgoing. "
+                    "Trả đúng shape JSON có document_metadata, full_sop, workflow_graph, annotations, uncertain_edges, validation_errors, atomic_units, warnings, search_enrichment. "
+                    f"Topology errors cần sửa: {'; '.join(errors[:12])}"
+                ),
+            },
+        ],
+    }
+    try:
+        repaired = parse_llm_json(completion_content(repair_payload, headers))
+        repaired_model = WorkflowExtractionPayload.model_validate(repaired)
+        repaired_errors, repaired_warnings = validate_workflow_topology(repaired_model)
+        repaired_model.warnings = [*repaired_model.warnings, *repaired_warnings]
+        return repaired_model, True, repaired_errors
+    except Exception:
+        return payload_model, False, errors
+
+
+def validate_workflow_topology(payload_model: WorkflowExtractionPayload) -> tuple[list[str], list[str]]:
+    graph = payload_model.workflow_graph
+    errors: list[str] = list(payload_model.validation_errors)
+    warnings: list[str] = []
+    node_by_id = {node.id: node for node in graph.nodes}
+    outgoing: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
+    incoming: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
+
+    if len(node_by_id) != len(graph.nodes):
+        errors.append("duplicate_node_id")
+
+    labels: dict[str, list[str]] = {}
+    for node in graph.nodes:
+        label = normalized_workflow_label(node.title or node.question or node.content)
+        if label and label not in {"start", "end"}:
+            labels.setdefault(label, []).append(node.id)
+    duplicate_labels = [label for label, ids in labels.items() if len(ids) > 1]
+    if duplicate_labels:
+        errors.append(f"duplicate_node_labels:{','.join(duplicate_labels[:3])}")
+
+    for edge in graph.edges:
+        if edge.from_node not in node_by_id:
+            errors.append(f"edge_unknown_from:{edge.from_node}")
+            continue
+        if edge.to_node not in node_by_id:
+            errors.append(f"edge_unknown_to:{edge.to_node}")
+            continue
+        outgoing[edge.from_node].append(edge.condition or "")
+        incoming[edge.to_node].append(edge.condition or "")
+
+    for node in graph.nodes:
+        node_type = normalized_workflow_label(node.type)
+        node_label = normalized_workflow_label(" ".join([node.title, node.question, node.content]))
+        has_outgoing = bool(outgoing.get(node.id))
+        has_incoming = bool(incoming.get(node.id))
+        if is_annotation_like_node(node_type, node_label) and (has_outgoing or has_incoming):
+            errors.append(f"annotation_used_as_flow_node:{node.id}")
+        if is_start_node(node_type, node_label) and has_incoming:
+            errors.append(f"start_has_incoming:{node.id}")
+        if is_end_node(node_type, node_label) and has_outgoing:
+            errors.append(f"end_has_outgoing:{node.id}")
+        if is_decision_node(node_type, node_label, node.question):
+            confirmed_conditions = [normalize_condition(condition) for condition in outgoing.get(node.id, [])]
+            uncertain_conditions = [
+                normalize_condition(edge.condition)
+                for edge in payload_model.uncertain_edges
+                if edge.from_node == node.id or edge.from_node == node.title or edge.from_node == node.question
+            ]
+            all_conditions = confirmed_conditions + uncertain_conditions
+            if len(all_conditions) < 2:
+                errors.append(f"decision_missing_two_branches:{node.id}")
+            if len(all_conditions) >= 2 and not (has_yes_condition(all_conditions) and has_no_condition(all_conditions)):
+                errors.append(f"decision_missing_yes_no_labels:{node.id}")
+        if not has_incoming and not has_outgoing and not is_annotation_like_node(node_type, node_label):
+            warnings.append(f"disconnected_node:{node.id}")
+
+    edge_keys: set[tuple[str, str, str]] = set()
+    for edge in graph.edges:
+        key = (edge.from_node, edge.to_node, normalize_condition(edge.condition))
+        if key in edge_keys:
+            errors.append(f"duplicate_edge:{edge.from_node}->{edge.to_node}:{edge.condition}")
+        edge_keys.add(key)
+
+    if payload_model.uncertain_edges:
+        warnings.append(f"uncertain_edges_require_review:{len(payload_model.uncertain_edges)}")
+    if not payload_model.annotations:
+        warnings.append("workflow_annotations_missing")
+    return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
+
+
+def normalized_workflow_label(value: str) -> str:
+    ascii_value = unicodedata.normalize("NFD", value or "").replace("đ", "d").replace("Đ", "D")
+    ascii_value = "".join(char for char in ascii_value if unicodedata.category(char) != "Mn")
+    return re.sub(r"[^a-z0-9?]+", " ", ascii_value.lower()).strip()
+
+
+def is_annotation_like_node(node_type: str, node_label: str) -> bool:
+    type_signals = ["note", "annotation", "script", "macro", "warning", "security", "operational note"]
+    label_signals = ["order history", "luu y", "zt", "bao mat"]
+    return any(signal in node_type for signal in type_signals) or any(signal in node_label for signal in label_signals)
+
+
+def is_decision_node(node_type: str, node_label: str, question: str) -> bool:
+    return "decision" in node_type or bool(question.strip()) or "?" in node_label
+
+
+def is_start_node(node_type: str, node_label: str) -> bool:
+    return node_type == "start" or node_label in {"start", "bat dau"}
+
+
+def is_end_node(node_type: str, node_label: str) -> bool:
+    return node_type == "end" or node_label in {"end", "ket thuc"}
+
+
+def normalize_condition(value: str) -> str:
+    normalized = normalized_workflow_label(value)
+    if normalized in {"yes", "y", "co", "dung", "co cung cap"}:
+        return "yes"
+    if normalized in {"no", "n", "khong", "khong co", "no response", "no or no response"}:
+        return "no"
+    return normalized or "next"
+
+
+def has_yes_condition(conditions: list[str]) -> bool:
+    return any(condition == "yes" or condition.startswith("yes ") for condition in conditions)
+
+
+def has_no_condition(conditions: list[str]) -> bool:
+    return any(condition == "no" or condition.startswith("no ") or "no response" in condition for condition in conditions)
+
+
 def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     if not enabled():
         return [], ["openrouter_disabled"]
 
     extraction_prompt = (
         "Hãy trích xuất tài liệu workflow/swimlane SOP CS này thành JSON production draft. "
-        "Trả đúng shape {\"document_metadata\":{},\"full_sop\":{},\"workflow_graph\":{},\"atomic_units\":[],\"warnings\":[],\"search_enrichment\":{}}.\n\n"
+        "Trả đúng shape {\"document_metadata\":{},\"full_sop\":{},\"workflow_graph\":{},\"annotations\":[],\"uncertain_edges\":[],\"validation_errors\":[],\"atomic_units\":[],\"warnings\":[],\"search_enrichment\":{}}.\n\n"
+        "QUY TẮC TOPOLOGY BẮT BUỘC:\n"
+        "- Không được suy edge từ thứ tự text/OCR. Text order không phải flow order.\n"
+        "- Chỉ tạo workflow_graph.edges khi thấy mũi tên/connector/nhãn Yes-No/quan hệ step rõ trong ảnh hoặc source.\n"
+        "- Nếu không chắc mũi tên, đưa vào uncertain_edges với reason, không đưa vào edges.\n"
+        "- Không duplicate node cùng số bước hoặc cùng label. Một step trong diagram chỉ là một node.\n"
+        "- Notes, scripts, warnings, Order History, Lưu ý, bảo mật, ZT phải đưa vào annotations attached_to step liên quan; không biến thành workflow step và không tạo edge từ/to note.\n"
+        "- Decision node phải có nhánh yes/no nếu diagram thể hiện Yes/No. Không đảo nhánh Yes/No.\n"
+        "- Start không có incoming edge. End không có outgoing edge.\n"
+        "- Phase/actor chỉ gán khi có căn cứ từ swimlane/label/source, không gán bừa.\n\n"
         "Yêu cầu document_metadata: title, effective_from nếu thấy trong nguồn, document_type=\"workflow_diagram\", sub_type nếu là swimlane_process, channel, audience, actors, phases, systems, risk_level, requires_layout_extraction=true, requires_human_review=true, extraction_confidence.\n"
         "Yêu cầu full_sop: là ExtractedUnit unit_type=\"full_sop\", metadata.retrieval_scope=\"document\", title/content tiếng Việt, source_refs có page.\n"
         "Yêu cầu workflow_graph: workflow_id, title, start_node_id, nodes, edges, graph_confidence 0..1, requires_human_review=true, review_reason. "
         "Edge dùng field from_node/to_node/condition, không dùng field tên 'from'. "
-        "Node cần actor, phase OPEN/BODY/CLOSE nếu có, type start/action/decision/end/note, title/content/question. "
-        "Nếu arrow/Yes-No không chắc chắn, vẫn extract best-effort nhưng đặt graph_confidence thấp và review_reason rõ.\n"
+        "Node cần actor, phase OPEN/BODY/CLOSE nếu có, type start/action/decision/end, title/content/question. "
+        "Không dùng node type note/script/warning trong workflow_graph.nodes; dùng annotations.\n"
+        "Yêu cầu annotations: note/script/warning/security/order history gắn attached_to node id liên quan, có source_refs.\n"
+        "Yêu cầu uncertain_edges: mọi edge chưa chắc topology, có reason và confidence.\n"
+        "Nếu arrow/Yes-No không chắc chắn, đặt graph_confidence thấp và review_reason rõ.\n"
         "Yêu cầu atomic_units: tạo unit nhỏ dễ search như operational_instruction, routing_rule, policy_rule, sla_rule, decision_rule, escalation_rule, case_creation_rule, handoff_rule, macro_script, operational_note. "
         "Nếu source có Chat Social/Fanpage/Pancake thì bắt buộc tách riêng các unit: sla_rule, decision_rule, escalation_rule, case_creation_rule, handoff_rule, macro_script, operational_note. "
         "Mỗi unit có tags/aliases/phase/actor/risk_level nếu có căn cứ trong source. "
@@ -168,6 +352,9 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         content = completion_content(payload, headers)
         parsed, repaired = parse_json_with_repair(content, payload, headers)
         payload_model, schema_repaired = validate_workflow_payload_with_repair(parsed, payload, headers)
+        payload_model, topology_repaired, topology_errors = validate_workflow_topology_with_repair(payload_model, payload, headers)
+        if topology_errors:
+            return [], [f"openrouter_workflow_topology_failed:{';'.join(topology_errors[:8])}"]
         normalized = workflow_payload_to_units(payload_model, filename)
         missing_refs = source_ref_validation_errors(normalized, filename)
         if missing_refs:
@@ -177,6 +364,12 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
             warnings.append("openrouter_json_repair_used")
         if schema_repaired:
             warnings.append("openrouter_schema_repair_used")
+        if topology_repaired:
+            warnings.append("openrouter_topology_repair_used")
+        if payload_model.uncertain_edges:
+            warnings.append(f"workflow_graph_has_{len(payload_model.uncertain_edges)}_uncertain_edges")
+        if payload_model.validation_errors:
+            warnings.extend(f"workflow_graph_validation_error:{error}" for error in payload_model.validation_errors[:8])
         if payload_model.workflow_graph.requires_human_review:
             warnings.append("workflow_graph_requires_human_review")
         return [unit for unit in normalized if unit["content"]], warnings
@@ -246,6 +439,96 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         return [], [f"openrouter_rule_table_validation_failed:{validation_summary(exc)}"]
     except Exception as exc:
         return [], [f"openrouter_rule_table_extraction_failed:{exc.__class__.__name__}"]
+
+
+def generate_grounded_answer(question: str, retrieval: RetrievalResponse, conversation: list[dict[str, str]] | None = None) -> tuple[GroundedAnswerPayload | None, list[str]]:
+    if not enabled():
+        return None, ["openrouter_disabled"]
+    if not retrieval.results:
+        return None, ["missing_published_sources"]
+
+    sources = []
+    for index, result in enumerate(retrieval.results, start=1):
+        source_ref = f"[{index}] {result.title} v{result.version_number} / {result.section} / chunk {result.chunk_index}"
+        metadata = {
+            "unit_type": result.metadata.get("unit_type"),
+            "retrieval_scope": result.metadata.get("retrieval_scope"),
+            "risk_level": result.metadata.get("risk_level"),
+            "tags": result.metadata.get("tags"),
+            "aliases": result.metadata.get("aliases"),
+        }
+        sources.append(
+            "\n".join(
+                [
+                    source_ref,
+                    f"Heading: {result.heading}",
+                    f"Source file: {result.source_filename}",
+                    f"Metadata: {json.dumps(metadata, ensure_ascii=False)}",
+                    f"Content: {result.content[:1800]}",
+                ]
+            )
+        )
+
+    conversation_text = "\n".join(
+        f"{message.get('role', 'user')}: {message.get('content', '')[:800]}"
+        for message in (conversation or [])[-6:]
+        if message.get("content")
+    )
+    payload = {
+        "model": settings.openrouter_model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Bạn là SOP-grounded assistant nội bộ cho CS. "
+                    "Chỉ được trả lời dựa trên SOURCES là SOP units đã published. "
+                    "Không dùng model knowledge ngoài sources. Không dùng raw upload, draft, archived content. "
+                    "Nếu sources không đủ căn cứ, trả lời rằng không tìm thấy SOP published đủ tin cậy. "
+                    "Không tự tạo policy/refund/compensation/security rule. "
+                    "Câu trả lời phải ngắn, actionable, tiếng Việt, và có warning nếu source có risk/ZT/security/payment/account/escalation. "
+                    "Bắt buộc trả JSON object đúng schema: {\"answer\":\"...\",\"steps\":[\"...\"],\"warnings\":[\"...\"],\"confidence\":0.0,\"source_indices\":[1]}. "
+                    "source_indices chỉ được chứa index của SOURCES đã dùng. Nếu không dùng source nào, để [] và answer phải nói không đủ căn cứ."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n\n"
+                    f"Recent conversation, for wording context only, not as source of policy:\n{conversation_text or '(none)'}\n\n"
+                    "SOURCES, the only allowed evidence:\n"
+                    + "\n\n---\n\n".join(sources)
+                ),
+            },
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.05,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": settings.public_app_url,
+        "X-Title": "CS SOP Knowledge Base",
+    }
+
+    try:
+        content = completion_content(payload, headers)
+        parsed, repaired = parse_json_with_repair(content, payload, headers)
+        answer = GroundedAnswerPayload.model_validate(parsed)
+        warnings = ["openrouter_grounded_answer_used"]
+        if repaired:
+            warnings.append("openrouter_json_repair_used")
+        if not answer.source_indices:
+            warnings.append("answer_without_citation_rejected")
+            return GroundedAnswerPayload(
+                answer="Không tìm thấy SOP published đủ căn cứ để trả lời chắc chắn. Vui lòng mở Lookup hoặc escalate Lead để xác nhận.",
+                steps=[],
+                warnings=["Không có citation hợp lệ từ SOP published."],
+                confidence=0,
+                source_indices=[],
+            ), warnings
+        return answer, warnings
+    except Exception as exc:
+        return None, [f"openrouter_grounded_answer_failed:{exc.__class__.__name__}"]
 
 
 def suggest_document_metadata(
@@ -399,6 +682,12 @@ def workflow_payload_to_units(payload: WorkflowExtractionPayload, filename: str)
 
     graph = payload.workflow_graph.model_dump()
     graph_refs = payload.full_sop.source_refs
+    topology_validation_errors = payload.validation_errors
+    uncertain_edges = [edge.model_dump() for edge in payload.uncertain_edges]
+    annotations = [annotation.model_dump() for annotation in payload.annotations]
+    graph["annotations"] = annotations
+    graph["uncertain_edges"] = uncertain_edges
+    graph["validation_errors"] = topology_validation_errors
     graph_unit = {
         "unit_type": "workflow_graph",
         "title": payload.workflow_graph.title,
@@ -411,12 +700,40 @@ def workflow_payload_to_units(payload: WorkflowExtractionPayload, filename: str)
             "graph_confidence": payload.workflow_graph.graph_confidence,
             "requires_human_review": payload.workflow_graph.requires_human_review,
             "review_reason": payload.workflow_graph.review_reason,
+            "annotations": annotations,
+            "uncertain_edges": uncertain_edges,
+            "uncertain_edges_count": len(uncertain_edges),
+            "graph_validation_errors": topology_validation_errors,
+            "graph_validation_error_count": len(topology_validation_errors),
             "source_filename": filename,
             "tags": payload.search_enrichment.get("tags", []),
             "aliases": payload.search_enrichment.get("aliases", []),
         },
     }
     units.append(normalize_unit(graph_unit))
+
+    inherited_refs = [ref.model_dump() for ref in graph_refs]
+    for annotation in payload.annotations:
+        annotation_data = annotation.model_dump()
+        annotation_refs = annotation_data.get("source_refs") or inherited_refs
+        units.append(
+            normalize_unit(
+                {
+                    "unit_type": annotation_data.get("type") or "operational_note",
+                    "title": annotation_data.get("title") or annotation_data.get("type") or "Lưu ý workflow",
+                    "content": annotation_data.get("content") or "",
+                    "confidence": 0.72,
+                    "source_refs": annotation_refs,
+                    "metadata": {
+                        "retrieval_scope": "annotation",
+                        "annotation_id": annotation_data.get("id"),
+                        "attached_to": annotation_data.get("attached_to"),
+                        "risk_level": annotation_data.get("risk_level"),
+                        "source_refs": annotation_refs,
+                    },
+                }
+            )
+        )
 
     for unit in payload.atomic_units:
         units.append(normalize_unit(unit.model_dump()))
@@ -436,6 +753,11 @@ def workflow_graph_summary(graph: dict[str, Any]) -> str:
         for edge in edges[:60]
         if isinstance(edge, dict)
     ]
+    annotation_lines = [
+        f"- {annotation.get('type')}: {annotation.get('title') or annotation.get('content', '')[:80]} -> {annotation.get('attached_to', '')}"
+        for annotation in graph.get("annotations", [])[:40]
+        if isinstance(annotation, dict)
+    ] if isinstance(graph.get("annotations"), list) else []
     return "\n".join(
         [
             f"Workflow graph: {graph.get('title', '')}",
@@ -448,6 +770,9 @@ def workflow_graph_summary(graph: dict[str, Any]) -> str:
             "",
             "Edges:",
             *edge_lines,
+            "",
+            "Annotations:",
+            *annotation_lines,
         ]
     ).strip()
 

@@ -22,6 +22,10 @@ _synonym_cache: tuple[float, list[dict[str, Any]]] = (0, [])
 SYNONYM_CACHE_SECONDS = 30
 
 
+def pg_text(value: Any) -> str:
+    return str(value or "").replace("\x00", "")
+
+
 @contextmanager
 def connection() -> Iterator[Connection[Any]]:
     if pool.closed:
@@ -147,6 +151,21 @@ def ensure_schema() -> None:
               mode text NOT NULL,
               result_count integer NOT NULL,
               latency_ms integer NOT NULL,
+              created_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_chat_events (
+              id uuid PRIMARY KEY,
+              question text NOT NULL,
+              answer text NOT NULL,
+              citation_count integer NOT NULL DEFAULT 0,
+              confidence numeric NOT NULL DEFAULT 0,
+              warnings jsonb NOT NULL DEFAULT '[]'::jsonb,
+              source_chunk_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+              latency_ms integer NOT NULL DEFAULT 0,
               created_at timestamptz NOT NULL DEFAULT now()
             )
             """
@@ -342,13 +361,22 @@ def create_document_version(
 ) -> dict[str, Any]:
     document_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
-    metadata_json = json.dumps(metadata.model_dump())
+    metadata_json = pg_text(json.dumps(metadata.model_dump()))
+    clean_external_id = pg_text(external_id)
+    clean_raw_text = pg_text(raw_text)
+    clean_title = pg_text(title)
+    clean_source_filename = pg_text(source_filename)
+    clean_content_type = pg_text(content_type)
+    clean_change_summary = pg_text(change_summary)
+    clean_document_type = pg_text(document_type)
+    clean_review_status = pg_text(review_status)
+    clean_created_by = pg_text(created_by)
 
     with connection() as conn:
         with conn.transaction():
             existing = conn.execute(
                 "SELECT id FROM ai_documents WHERE external_id = %s",
-                (external_id,),
+                (clean_external_id,),
                 prepare=False,
             ).fetchone()
             if existing:
@@ -364,7 +392,7 @@ def create_document_version(
                         updated_at = now()
                     WHERE id = %s
                     """,
-                    (title, source_filename, content_type, metadata_json, document_id),
+                    (clean_title, clean_source_filename, clean_content_type, metadata_json, document_id),
                 )
             else:
                 conn.execute(
@@ -374,7 +402,7 @@ def create_document_version(
                     )
                     VALUES (%s, %s, %s, %s, %s, 'active', %s::jsonb)
                     """,
-                    (document_id, external_id, title, source_filename, content_type, metadata_json),
+                    (document_id, clean_external_id, clean_title, clean_source_filename, clean_content_type, metadata_json),
                 )
 
             next_version = conn.execute(
@@ -397,14 +425,14 @@ def create_document_version(
                     next_version,
                     status,
                     checksum,
-                    change_summary,
-                    raw_text,
+                    clean_change_summary,
+                    clean_raw_text,
                     len(chunks),
-                    document_type,
-                    "approved" if status == "published" else review_status,
+                    clean_document_type,
+                    "approved" if status == "published" else clean_review_status,
                     extraction_confidence,
-                    created_by,
-                    created_by if status == "published" else None,
+                    clean_created_by,
+                    clean_created_by if status == "published" else None,
                     status,
                 ),
             )
@@ -422,7 +450,7 @@ def create_document_version(
                         raw_data = EXCLUDED.raw_data,
                         byte_size = EXCLUDED.byte_size
                     """,
-                    (version_id, document_id, source_filename, content_type, raw_data, len(raw_data)),
+                    (version_id, document_id, clean_source_filename, clean_content_type, raw_data, len(raw_data)),
                 )
 
             insert_chunks(conn, document_id, version_id, chunks)
@@ -432,13 +460,13 @@ def create_document_version(
 
             audit_tx(
                 conn,
-                actor=created_by,
+                actor=clean_created_by,
                 action="document_version_create",
                 entity_type="ai_document_version",
                 entity_id=version_id,
                 metadata={
                     "document_id": document_id,
-                    "external_id": external_id,
+                    "external_id": clean_external_id,
                     "status": status,
                     "chunk_count": len(chunks),
                     "document_type": document_type,
@@ -450,14 +478,14 @@ def create_document_version(
     return {
         "document_id": document_id,
         "version_id": version_id,
-        "external_id": external_id,
-        "title": title,
+        "external_id": clean_external_id,
+        "title": clean_title,
         "version_number": int(next_version),
         "status": status,
         "chunk_count": len(chunks),
         "checksum": checksum,
-        "document_type": document_type,
-        "review_status": "approved" if status == "published" else review_status,
+        "document_type": clean_document_type,
+        "review_status": "approved" if status == "published" else clean_review_status,
         "extraction_confidence": extraction_confidence,
         "metadata": metadata.model_dump(),
     }
@@ -470,12 +498,12 @@ def insert_chunks(conn: Connection[Any], document_id: str, version_id: str, chun
             document_id,
             version_id,
             chunk["chunk_index"],
-            chunk["section"],
-            chunk["heading"],
-            chunk["content"],
+            pg_text(chunk["section"]),
+            pg_text(chunk["heading"]),
+            pg_text(chunk["content"]),
             chunk["token_count"],
             vector_literal(chunk["embedding"]),
-            json.dumps(chunk.get("metadata", {})),
+            pg_text(json.dumps(chunk.get("metadata", {}))),
         )
         for chunk in chunks
     ]
@@ -586,6 +614,19 @@ def workflow_graph_edge_count(metadata: dict[str, Any]) -> int:
     return len(edges) if isinstance(edges, list) else 0
 
 
+def workflow_graph_quality_failures(metadata: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    graph_errors = metadata.get("graph_validation_errors")
+    if isinstance(graph_errors, list) and graph_errors:
+        failures.append(f"workflow_graph_has_{len(graph_errors)}_validation_errors")
+    uncertain_edges = metadata.get("uncertain_edges")
+    if isinstance(uncertain_edges, list) and uncertain_edges:
+        failures.append(f"workflow_graph_has_{len(uncertain_edges)}_uncertain_edges")
+    if int(metadata.get("uncertain_edges_count") or 0) > 0:
+        failures.append(f"workflow_graph_has_{metadata.get('uncertain_edges_count')}_uncertain_edges")
+    return list(dict.fromkeys(failures))
+
+
 def missing_or_unreviewed_workflow_unit(
     unit_status_by_type: dict[str, bool],
     accepted_types: set[str],
@@ -646,6 +687,7 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
     workflow_graph_reviewed = version["document_type"] != "workflow_diagram"
     workflow_graph_confidence = 1.0
     workflow_graph_edges = 0
+    workflow_graph_quality_errors: list[str] = []
     workflow_source_ack_missing = 0
     workflow_unit_status_by_type: dict[str, bool] = {}
     missing_source_refs = 0
@@ -674,6 +716,7 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
             except (TypeError, ValueError):
                 workflow_graph_confidence = 0
             workflow_graph_edges = workflow_graph_edge_count(metadata)
+            workflow_graph_quality_errors.extend(workflow_graph_quality_failures(metadata))
         if version["document_type"] == "workflow_diagram" and workflow_source_ref_ack_missing(metadata):
             workflow_source_ack_missing += 1
         if not has_required_source_ref(version["document_type"], metadata):
@@ -696,6 +739,7 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
             failures.append("workflow_graph_low_confidence")
         if has_workflow_graph and workflow_graph_edges == 0:
             failures.append("workflow_graph_missing_edges")
+        failures.extend(workflow_graph_quality_errors)
         if workflow_source_ack_missing:
             failures.append(f"{workflow_source_ack_missing}_page_only_source_refs_need_ack")
         aggregate_text = " ".join(aggregate_text_parts)
@@ -1832,6 +1876,29 @@ def log_retrieval(query: str, filters: dict[str, Any], mode: str, result_count: 
             (str(uuid.uuid4()), query, json.dumps(filters), mode, result_count, latency_ms),
         )
     return latency_ms
+
+
+def log_chat(response: Any) -> None:
+    source_chunk_ids = [citation.chunk_id for citation in response.citations]
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO ai_chat_events (
+              id, question, answer, citation_count, confidence, warnings, source_chunk_ids, latency_ms
+            )
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+            """,
+            (
+                str(uuid.uuid4()),
+                pg_text(response.question),
+                pg_text(response.answer),
+                len(response.citations),
+                response.confidence,
+                pg_text(json.dumps(response.warnings, ensure_ascii=False)),
+                pg_text(json.dumps(source_chunk_ids, ensure_ascii=False)),
+                response.latency_ms,
+            ),
+        )
 
 
 def audit_tx(

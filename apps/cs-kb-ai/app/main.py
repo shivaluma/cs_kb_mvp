@@ -8,6 +8,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app import repository
+from app.chat import grounded_chat
 from app.embedding import embed_text
 from app.ingestion import prepare_document_version, preview_document_metadata
 from app.retrieval import retrieve
@@ -19,6 +20,8 @@ from app.schemas import (
     DocumentVersionResponse,
     ExtractionUnit,
     ExtractionUnitUpdateRequest,
+    GroundedChatRequest,
+    GroundedChatResponse,
     IndexSOPVersionRequest,
     RetrievalFilters,
     RetrievalRequest,
@@ -246,6 +249,11 @@ def retrieve_documents(request: RetrievalRequest) -> RetrievalResponse:
     return retrieve(request)
 
 
+@app.post("/ai/v1/chat", response_model=GroundedChatResponse)
+def chat(request: GroundedChatRequest) -> GroundedChatResponse:
+    return grounded_chat(request)
+
+
 @app.get("/ai/v1/search/taxonomy/intents")
 def list_taxonomy_intents(status: str = "active") -> list[dict[str, Any]]:
     return repository.list_taxonomy_intents(status)
@@ -440,7 +448,7 @@ def parse_metadata(value: str) -> DocumentMetadata:
 
 def best_effort_raw_text(data: bytes) -> str:
     try:
-        return data.decode("utf-8", errors="replace")[:200000]
+        return data.decode("utf-8", errors="replace").replace("\x00", "")[:200000]
     except Exception:
         return ""
 

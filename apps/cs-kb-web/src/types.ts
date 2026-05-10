@@ -96,6 +96,32 @@ export type RetrievalResponse = {
   latency_ms: number;
 };
 
+export type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type GroundedChatResponse = {
+  question: string;
+  answer: string;
+  steps: string[];
+  warnings: string[];
+  citations: Citation[];
+  sources: RetrievalResult[];
+  confidence: number;
+  retrieval: RetrievalResponse;
+  latency_ms: number;
+};
+
+export type ChatThreadMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+  response?: GroundedChatResponse;
+  pending?: boolean;
+};
+
 export type RetrievalResult = {
   document_id: string;
   version_id: string;

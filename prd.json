@@ -1,0 +1,161 @@
+{
+  "project": "CS SOP Knowledge Base",
+  "branchName": "ralph/frontend-state-url-refactor",
+  "description": "Refactor the frontend state architecture so route pages own their own data, shareable page state lives in URL query parameters, and App.tsx becomes a small shell with global providers only. The goal is better maintainability, fewer broad rerenders, cleaner feature boundaries, and easier future work on SOP lookup, document review, extraction, and grounded chat.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create route state refactor foundation",
+      "description": "As a frontend maintainer, I want a small shared foundation for route-owned state so that pages can move out of the current large App-level state without duplicating feedback and invalidation plumbing.",
+      "acceptanceCriteria": [
+        "Add a reusable feedback provider or equivalent hook for app-level success/error notices",
+        "Add shared query key helpers or a documented query key convention for feature hooks",
+        "Keep existing routes and navigation working with no behavior removal",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Move dashboard state into the dashboard route",
+      "description": "As a maintainer, I want the dashboard page to fetch and own its own data so that unrelated pages do not rerender from dashboard state changes.",
+      "acceptanceCriteria": [
+        "Dashboard route imports and calls only the data hooks it needs",
+        "Remove dashboard-specific props from the app-wide context/provider",
+        "Dashboard still shows source queue, archived counts, governance summary, and extraction status",
+        "Verify in browser using dev-browser skill",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Move lookup state into URL-backed route state",
+      "description": "As a CS user, I want lookup query, filters, selected quick answer, and selected SOP context to survive refresh and sharing so that lookup is predictable and easy to debug.",
+      "acceptanceCriteria": [
+        "Lookup route owns lookup search state instead of receiving it from App.tsx",
+        "Persist lookup query and primary filters in URL query parameters using nuqs or the selected URL state helper",
+        "Opening a quick answer updates the right panel without a full page reload",
+        "Reloading the page preserves the lookup query and selected result when identifiers are available",
+        "Verify in browser using dev-browser skill",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Move document review state into URL-backed route state",
+      "description": "As a CS Ops reviewer, I want selected document, version, review filter, source status, and active unit state to live with the document review route so that the review workspace is deep-linkable and isolated.",
+      "acceptanceCriteria": [
+        "Documents route owns selected document, selected version, selected unit, and review filter state",
+        "Persist selected document id, version id, unit id, and review filter in URL query parameters when possible",
+        "Approve/review unit actions use optimistic TanStack Query updates without causing page reload",
+        "Archive status is reflected in source queue and document detail after mutation without broad app refetches",
+        "Verify in browser using dev-browser skill",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Move retrieval lab state into the retrieval route",
+      "description": "As a maintainer, I want retrieval testing state scoped to the retrieval page so that expensive search/test state does not live in the global app shell.",
+      "acceptanceCriteria": [
+        "Retrieval lab route owns query, mode, filters, and result selection state",
+        "Persist retrieval query and search mode in URL query parameters",
+        "Retrieval mutations and result fetches invalidate only retrieval-related query keys",
+        "Verify in browser using dev-browser skill",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Move synonyms state into the synonyms route",
+      "description": "As a CS Ops user, I want synonym management filters and draft form state isolated to the synonyms page so that taxonomy work does not affect lookup or document review performance.",
+      "acceptanceCriteria": [
+        "Synonyms route owns status filter, selected group, form draft, and sync action state",
+        "Persist synonym status filter and selected group id in URL query parameters when possible",
+        "Create, approve, reject, and sync actions invalidate only synonym-related query keys",
+        "Verify in browser using dev-browser skill",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Move grounded chat state into the chat route",
+      "description": "As a CS user, I want grounded chat state scoped to the chat page while still allowing a question to be seeded from the URL so that chat remains isolated from SOP lookup and document review.",
+      "acceptanceCriteria": [
+        "Chat route owns thread messages, pending question, selected citation, and submit state",
+        "Support an optional URL query parameter for initial chat question",
+        "Chat answers render citations with actions to open quick answer or full SOP",
+        "Chat page does not answer without backend-provided citations",
+        "Verify in browser using dev-browser skill",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Split frontend API hooks by feature",
+      "description": "As a frontend maintainer, I want API hooks split by domain so that each page imports only the hooks it needs and large shared hook files stop becoming implicit global dependencies.",
+      "acceptanceCriteria": [
+        "Split the current broad API hook file into feature-oriented hook modules for documents, lookup/search, synonyms, chat, dashboard, and shared utilities",
+        "Keep a compatibility barrel export only if it does not reintroduce circular dependencies",
+        "Each route imports feature hooks directly from the relevant module",
+        "No import cycles are introduced",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Simplify App shell and app context",
+      "description": "As a maintainer, I want App.tsx and app context to contain only shell-level concerns so that future feature work does not keep growing a god component.",
+      "acceptanceCriteria": [
+        "App.tsx contains routing shell, providers, navigation state, and command/global search concerns only",
+        "Remove page-specific props from the app context after all migrated routes own their state",
+        "Route components no longer depend on one mega app context for feature data",
+        "Existing navigation, command access, and route rendering continue to work",
+        "Verify in browser using dev-browser skill",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Add performance guardrails after state migration",
+      "description": "As a product user, I want heavy pages to stay responsive so that document review, lookup, and chat remain usable with large SOP documents and many retrieval units.",
+      "acceptanceCriteria": [
+        "Use deferred input state for global command/search inputs that trigger expensive filtering",
+        "Lazy-render or memoize heavy document review panels where it reduces unnecessary rendering without hiding current content",
+        "Scope TanStack Query invalidations to the smallest affected query key after mutations",
+        "Large text inputs for raw text upload avoid blocking keystrokes with expensive synchronous parsing",
+        "Verify in browser using dev-browser skill",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

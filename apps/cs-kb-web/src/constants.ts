@@ -1,10 +1,11 @@
-import { Bot, FileText, LayoutDashboard, Search, WandSparkles } from "lucide-react";
+import { Bot, FileText, LayoutDashboard, MessageSquareText, Search, WandSparkles } from "lucide-react";
 
 import type { FilterState, SynonymDraft, UploadState } from "@/types";
 
 export const workspacePaths = {
   dashboard: "/",
   lookup: "/lookup",
+  chat: "/chat",
   documents: "/documents",
   synonyms: "/synonyms",
   retrieval: "/retrieval",
@@ -60,6 +61,13 @@ export const navItems = [
     label: "SOP Lookup",
     icon: Search,
     description: "Agent-facing SOP and approved document lookup.",
+  },
+  {
+    id: "chat",
+    path: workspacePaths.chat,
+    label: "SOP Chat",
+    icon: MessageSquareText,
+    description: "Grounded assistant that answers only from published curated SOP units.",
   },
   {
     id: "documents",

@@ -23,7 +23,12 @@ type WorkflowGraphMetadata = {
   review_reason?: string;
   nodes?: Array<{ id?: string; type?: string; actor?: string; phase?: string; title?: string; question?: string }>;
   edges?: Array<{ from_node?: string; to_node?: string; condition?: string }>;
+  annotations?: Array<{ id?: string; type?: string; attached_to?: string; title?: string; content?: string; risk_level?: string }>;
+  uncertain_edges?: Array<{ from_node?: string; to_node?: string; condition?: string; reason?: string; confidence?: number }>;
+  validation_errors?: string[];
 };
+type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
+type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
 
 export function DocumentsWorkspace({
   busyKey,
@@ -295,16 +300,16 @@ export function DocumentsWorkspace({
                   type="file"
                 />
                 <Button
-                  className="w-full justify-start overflow-hidden"
+                  className="max-w-full min-w-0 justify-start overflow-hidden"
                   onClick={() => fileInputRef.current?.click()}
                   type="button"
                   variant="outline"
                 >
                   <Upload data-icon="inline-start" className="size-4 shrink-0" />
-                  <span className="truncate">{selectedFile ? selectedFile.name : "Choose source file"}</span>
+                  <span className="min-w-0 flex-1 truncate text-left">{selectedFile ? selectedFile.name : "Choose source file"}</span>
                 </Button>
                 {selectedFile ? (
-                  <div className="rounded-lg border bg-muted/25 p-3">
+                  <div className="min-w-0 rounded-lg border bg-muted/25 p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <p className="truncate text-xs font-semibold">{selectedFile.name}</p>
@@ -974,6 +979,9 @@ function WorkflowGraphPanel({
   graph?: WorkflowGraphMetadata;
   graphUnit?: ExtractionUnit;
 }) {
+  const validationErrors = graph?.validation_errors ?? graphUnit?.metadata.graph_validation_errors ?? [];
+  const uncertainEdges = graph?.uncertain_edges ?? graphUnit?.metadata.uncertain_edges ?? [];
+  const annotations = graph?.annotations ?? graphUnit?.metadata.annotations ?? [];
   return (
     <Card className="rounded-xl">
       <CardHeader className="border-b pb-4">
@@ -1004,39 +1012,32 @@ function WorkflowGraphPanel({
                 {String(graph.review_reason ?? graphUnit.metadata.review_reason ?? "Review graph branches and arrow direction before publish.")}
               </p>
             </div>
-            <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.25fr)_minmax(20rem,0.75fr)]">
-              <div className="min-h-[30rem] rounded-xl border bg-background p-3">
+            {Array.isArray(validationErrors) && validationErrors.length ? (
+              <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-destructive">Topology validation blockers</p>
+                  <Badge variant="destructive">{validationErrors.length} issues</Badge>
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {validationErrors.slice(0, 8).map((error, index) => (
+                    <p className="rounded-lg border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground" key={`${error}-${index}`}>
+                      {String(error)}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div className="grid gap-4 2xl:grid-cols-[minmax(22rem,0.85fr)_minmax(0,1.35fr)]">
+              <div className="rounded-xl border bg-background p-3">
                 <WorkflowMermaid graph={graph} />
               </div>
-              <ScrollArea className="h-[30rem] rounded-xl border p-3">
-                <div className="space-y-3">
-                  <div className="grid gap-3">
-                    {(graph.nodes ?? []).slice(0, 40).map((node) => (
-                      <div className="rounded-lg border bg-card p-3" key={node.id ?? node.title}>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge variant="secondary">{node.type ?? "node"}</Badge>
-                          {node.phase ? <Badge variant="outline">{node.phase}</Badge> : null}
-                          {node.actor ? <Badge variant="outline">{node.actor}</Badge> : null}
-                        </div>
-                        <p className="mt-2 text-sm font-medium">{node.title ?? node.question}</p>
-                        <p className="mt-1 font-mono text-[10px] text-muted-foreground">{node.id}</p>
-                      </div>
-                    ))}
-                  </div>
-                  {(graph.edges ?? []).length ? (
-                    <div className="rounded-lg border bg-muted/20 p-3">
-                      <p className="text-xs font-semibold text-muted-foreground">Edges</p>
-                      <div className="mt-2 space-y-1">
-                        {(graph.edges ?? []).slice(0, 80).map((edge, index) => (
-                          <p className="font-mono text-[11px] text-muted-foreground" key={`${edge.from_node}-${edge.to_node}-${index}`}>
-                            {edge.from_node} {edge.condition ? `--${edge.condition}--` : "--"}&gt; {edge.to_node}
-                          </p>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
+              <ScrollArea className="h-[30rem] rounded-xl border">
+                <WorkflowBranchTable graph={graph} />
               </ScrollArea>
+            </div>
+            <div className="grid gap-4 2xl:grid-cols-2">
+              <WorkflowAnnotationsPanel annotations={Array.isArray(annotations) ? annotations : []} />
+              <WorkflowUncertainEdgesPanel edges={Array.isArray(uncertainEdges) ? uncertainEdges : []} graph={graph} />
             </div>
           </div>
         ) : (
@@ -1047,9 +1048,129 @@ function WorkflowGraphPanel({
   );
 }
 
+function WorkflowAnnotationsPanel({ annotations }: { annotations: NonNullable<WorkflowGraphMetadata["annotations"]> }) {
+  return (
+    <div className="rounded-xl border bg-background">
+      <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+        <p className="text-xs font-semibold text-muted-foreground">Annotations, notes, scripts</p>
+        <Badge variant="outline">{annotations.length}</Badge>
+      </div>
+      {annotations.length ? (
+        <ScrollArea className="h-64">
+          <div className="divide-y">
+            {annotations.slice(0, 40).map((annotation, index) => (
+              <div className="p-3" key={annotation.id ?? `${annotation.type}-${index}`}>
+                <div className="flex flex-wrap items-center gap-1">
+                  <Badge variant={annotation.risk_level === "high" ? "destructive" : "outline"}>{annotation.type ?? "annotation"}</Badge>
+                  {annotation.attached_to ? <Badge variant="secondary">attached: {annotation.attached_to}</Badge> : null}
+                </div>
+                <p className="mt-2 text-sm font-medium leading-5">{annotation.title || "Lưu ý workflow"}</p>
+                <p className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">{annotation.content}</p>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      ) : (
+        <p className="p-3 text-xs leading-5 text-muted-foreground">No annotations extracted. For diagrams, notes/scripts should be separated from main workflow steps.</p>
+      )}
+    </div>
+  );
+}
+
+function WorkflowUncertainEdgesPanel({
+  edges,
+  graph,
+}: {
+  edges: NonNullable<WorkflowGraphMetadata["uncertain_edges"]>;
+  graph: WorkflowGraphMetadata;
+}) {
+  const resolver = useMemo(() => buildWorkflowNodeResolver(graph), [graph]);
+  return (
+    <div className="rounded-xl border bg-background">
+      <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+        <p className="text-xs font-semibold text-muted-foreground">Uncertain edges needing review</p>
+        <Badge variant={edges.length ? "destructive" : "outline"}>{edges.length}</Badge>
+      </div>
+      {edges.length ? (
+        <ScrollArea className="h-64">
+          <div className="divide-y">
+            {edges.slice(0, 40).map((edge, index) => (
+              <div className="grid gap-2 p-3 text-sm" key={`${edge.from_node}-${edge.to_node}-${index}`}>
+                <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)] items-start gap-2">
+                  <NodeSummary node={resolver.resolve(edge.from_node)} fallback={edge.from_node} />
+                  <Badge className="justify-center" variant="outline">{edge.condition || "unclear"}</Badge>
+                  <NodeSummary node={resolver.resolve(edge.to_node)} fallback={edge.to_node} />
+                </div>
+                <p className="text-xs leading-5 text-muted-foreground">{edge.reason}</p>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      ) : (
+        <p className="p-3 text-xs leading-5 text-muted-foreground">No uncertain edges. Decision branches still require graph review before publishing workflow diagrams.</p>
+      )}
+    </div>
+  );
+}
+
+function WorkflowBranchTable({ graph }: { graph: WorkflowGraphMetadata }) {
+  const resolver = useMemo(() => buildWorkflowNodeResolver(graph), [graph]);
+  const branches = (graph.edges ?? []).slice(0, 100).map((edge, index) => {
+    return {
+      condition: edge.condition || "Next",
+      from: resolver.resolve(edge.from_node),
+      index,
+      rawFrom: edge.from_node,
+      rawTo: edge.to_node,
+      to: resolver.resolve(edge.to_node),
+    };
+  });
+
+  return (
+    <div className="divide-y">
+      <div className="sticky top-0 z-10 grid grid-cols-[2.5rem_minmax(0,1fr)_8rem_minmax(0,1fr)] gap-3 border-b bg-card px-3 py-2 text-xs font-semibold text-muted-foreground">
+        <span>#</span>
+        <span>From</span>
+        <span>Condition</span>
+        <span>Next step</span>
+      </div>
+      {branches.length ? branches.map((branch) => (
+        <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_8rem_minmax(0,1fr)] gap-3 px-3 py-3 text-sm" key={`${branch.rawFrom}-${branch.rawTo}-${branch.index}`}>
+          <span className="text-xs text-muted-foreground">{branch.index + 1}</span>
+          <NodeSummary node={branch.from} fallback={branch.rawFrom} />
+          <div>
+            <Badge variant={branch.condition.toLowerCase() === "yes" ? "secondary" : branch.condition.toLowerCase() === "no" ? "outline" : "outline"}>
+              {branch.condition}
+            </Badge>
+          </div>
+          <NodeSummary node={branch.to} fallback={branch.rawTo} />
+        </div>
+      )) : (
+        <div className="p-4 text-sm text-muted-foreground">No graph branches were extracted.</div>
+      )}
+    </div>
+  );
+}
+
+function NodeSummary({ fallback, node }: { fallback?: string; node?: WorkflowNodeMetadata }) {
+  return (
+    <div className="min-w-0">
+      <p className="line-clamp-2 font-medium leading-5">{node?.title || node?.question || fallback || "Unknown step"}</p>
+      <div className="mt-1 flex flex-wrap gap-1">
+        {node?.type ? <Badge variant="outline">{node.type}</Badge> : null}
+        {node?.phase ? <Badge variant="outline">{node.phase}</Badge> : null}
+        {node?.actor ? <Badge variant="outline">{node.actor}</Badge> : null}
+      </div>
+    </div>
+  );
+}
+
 function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
+  const [svgSize, setSvgSize] = useState<{ height: number; width: number } | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const svgRef = useRef<HTMLDivElement>(null);
   const chart = useMemo(() => workflowGraphToMermaid(graph), [graph]);
   const renderId = useMemo(() => `workflow-graph-${Math.random().toString(36).slice(2)}`, [chart]);
 
@@ -1065,6 +1186,12 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
       try {
         const mermaid = (await import("mermaid")).default;
         mermaid.initialize({
+          flowchart: {
+            curve: "basis",
+            htmlLabels: true,
+            nodeSpacing: 42,
+            rankSpacing: 54,
+          },
           startOnLoad: false,
           securityLevel: "strict",
           theme: "neutral",
@@ -1085,20 +1212,93 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
     };
   }, [chart, renderId]);
 
+  useEffect(() => {
+    if (!svg) {
+      setSvgSize(null);
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const element = svgRef.current?.querySelector("svg");
+      if (!(element instanceof SVGSVGElement)) {
+        return;
+      }
+      const viewBox = element.viewBox.baseVal;
+      const rect = element.getBoundingClientRect();
+      const width = viewBox.width || rect.width;
+      const height = viewBox.height || rect.height;
+      if (width && height) {
+        setSvgSize({ height, width });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [svg]);
+
   return (
     <div className="rounded-lg border bg-background p-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-semibold text-muted-foreground">Mermaid workflow preview</p>
-        <Badge variant="outline">{graph.edges?.length ?? 0} edges</Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          {svg ? (
+            <div className="flex items-center overflow-hidden rounded-lg border bg-card">
+              <Button
+                className="h-7 rounded-none border-0 px-2 text-xs"
+                disabled={zoom <= 0.6}
+                onClick={() => setZoom((value) => Math.max(0.6, Number((value - 0.15).toFixed(2))))}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                −
+              </Button>
+              <span className="min-w-12 border-x px-2 text-center text-xs font-medium tabular-nums text-muted-foreground">
+                {Math.round(zoom * 100)}%
+              </span>
+              <Button
+                className="h-7 rounded-none border-0 px-2 text-xs"
+                disabled={zoom >= 2}
+                onClick={() => setZoom((value) => Math.min(2, Number((value + 0.15).toFixed(2))))}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                +
+              </Button>
+              <Button
+                className="h-7 rounded-none border-0 border-l px-2 text-xs"
+                disabled={zoom === 1}
+                onClick={() => setZoom(1)}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                Reset
+              </Button>
+            </div>
+          ) : null}
+          <Badge variant="outline">{graph.edges?.length ?? 0} edges</Badge>
+        </div>
       </div>
       {svg ? (
-        <div className="overflow-auto rounded-md bg-muted/20 p-2">
-          <div className="[&_svg]:mx-auto [&_svg]:max-w-none" dangerouslySetInnerHTML={{ __html: svg }} />
+        <div className="max-h-[42rem] overflow-auto rounded-md border bg-muted/20 p-3">
+          <div
+            className="relative"
+            style={{
+              height: svgSize ? svgSize.height * zoom : undefined,
+              minHeight: svgSize ? undefined : "20rem",
+              width: svgSize ? svgSize.width * zoom : undefined,
+            }}
+          >
+            <div
+              className="origin-top-left [&_svg]:max-w-none"
+              dangerouslySetInnerHTML={{ __html: svg }}
+              ref={svgRef}
+              style={{ transform: `scale(${zoom})` }}
+            />
+          </div>
         </div>
       ) : error ? (
         <div className="rounded-md border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
-          Mermaid could not render this graph. Use the node and edge list below to review the extraction.
-          <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded border bg-background p-2 font-mono text-[10px]">{chart}</pre>
+          Mermaid could not render this graph. Use the readable branch table next to this panel to review the extraction.
         </div>
       ) : (
         <div className="flex items-center gap-2 rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
@@ -1111,35 +1311,22 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
 }
 
 function workflowGraphToMermaid(graph: WorkflowGraphMetadata) {
-  const nodes = graph.nodes ?? [];
   const edges = graph.edges ?? [];
-  if (!nodes.length) {
+  if (!edges.length) {
     return "";
   }
-  const nodeIdByOriginal = new Map<string, string>();
+  const resolver = buildWorkflowNodeResolver(graph);
+  const endpointIds = new Map<string, string>();
   const lines = ["flowchart LR"];
 
-  nodes.slice(0, 80).forEach((node, index) => {
-    const originalId = String(node.id || node.title || node.question || `node_${index}`);
-    const mermaidId = `n${index}`;
-    nodeIdByOriginal.set(originalId, mermaidId);
-    if (node.title) {
-      nodeIdByOriginal.set(String(node.title), mermaidId);
-    }
-    if (node.question) {
-      nodeIdByOriginal.set(String(node.question), mermaidId);
-    }
-    const labelParts = [node.title || node.question || originalId, node.actor, node.phase].filter(Boolean);
-    const label = escapeMermaidLabel(labelParts.join(" | "));
-    lines.push(`  ${mermaidId}["${label}"]`);
-  });
-
   edges.slice(0, 120).forEach((edge) => {
-    const from = nodeIdByOriginal.get(String(edge.from_node || "")) ?? sanitizeMermaidId(edge.from_node);
-    const to = nodeIdByOriginal.get(String(edge.to_node || "")) ?? sanitizeMermaidId(edge.to_node);
+    const from = mermaidEndpointId(edge.from_node, endpointIds);
+    const to = mermaidEndpointId(edge.to_node, endpointIds);
     if (!from || !to) {
       return;
     }
+    ensureMermaidNode(lines, from, resolver.label(edge.from_node));
+    ensureMermaidNode(lines, to, resolver.label(edge.to_node));
     const condition = String(edge.condition || "").trim();
     lines.push(condition ? `  ${from} -->|"${escapeMermaidLabel(condition)}"| ${to}` : `  ${from} --> ${to}`);
   });
@@ -1147,15 +1334,183 @@ function workflowGraphToMermaid(graph: WorkflowGraphMetadata) {
   return lines.join("\n");
 }
 
-function sanitizeMermaidId(value?: string) {
-  const normalized = String(value || "")
-    .replace(/[^a-zA-Z0-9_]/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return normalized ? `x_${normalized}` : "";
+function ensureMermaidNode(lines: string[], id: string, label: string) {
+  const declaration = `  ${id}["${escapeMermaidLabel(label)}"]`;
+  if (!lines.includes(declaration)) {
+    lines.push(declaration);
+  }
+}
+
+function mermaidEndpointId(value: string | undefined, endpointIds: Map<string, string>) {
+  const key = String(value || "").trim();
+  if (!key) {
+    return "";
+  }
+  const existing = endpointIds.get(key);
+  if (existing) {
+    return existing;
+  }
+  const id = `n${endpointIds.size}`;
+  endpointIds.set(key, id);
+  return id;
 }
 
 function escapeMermaidLabel(value: string) {
-  return value.replace(/"/g, "'").replace(/\|/g, "/").slice(0, 140);
+  const clean = value.replace(/"/g, "'").replace(/\|/g, "/").replace(/\s+/g, " ").trim();
+  return wrapMermaidLabel(clean, 34).slice(0, 220);
+}
+
+function wrapMermaidLabel(value: string, maxLineLength: number) {
+  const words = value.split(" ");
+  const lines: string[] = [];
+  let current = "";
+  words.forEach((word) => {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length > maxLineLength && current) {
+      lines.push(current);
+      current = word;
+      return;
+    }
+    current = candidate;
+  });
+  if (current) {
+    lines.push(current);
+  }
+  return lines.slice(0, 4).join("<br/>");
+}
+
+function buildWorkflowNodeResolver(graph: WorkflowGraphMetadata) {
+  const nodes = graph.nodes ?? [];
+  const exact = new Map<string, WorkflowNodeMetadata>();
+  const normalized = new Map<string, WorkflowNodeMetadata>();
+  const buckets = {
+    decision: [] as WorkflowNodeMetadata[],
+    end: [] as WorkflowNodeMetadata[],
+    note: [] as WorkflowNodeMetadata[],
+    orderHistory: [] as WorkflowNodeMetadata[],
+    script: [] as WorkflowNodeMetadata[],
+    start: [] as WorkflowNodeMetadata[],
+    step: [] as WorkflowNodeMetadata[],
+  };
+
+  nodes.forEach((node, index) => {
+    [node.id, node.title, node.question].filter(Boolean).forEach((value) => {
+      exact.set(String(value), node);
+      normalized.set(normalizeWorkflowKey(String(value)), node);
+    });
+    classifyWorkflowNode(node, index, nodes.length).forEach((kind) => {
+      buckets[kind].push(node);
+    });
+  });
+
+  function resolve(value?: string) {
+    const raw = String(value || "").trim();
+    if (!raw) {
+      return undefined;
+    }
+    const direct = exact.get(raw) ?? normalized.get(normalizeWorkflowKey(raw));
+    if (direct) {
+      return direct;
+    }
+    const code = parseWorkflowCode(raw);
+    if (!code) {
+      return undefined;
+    }
+    const bucket = buckets[code.kind];
+    if (!bucket.length) {
+      return undefined;
+    }
+    if (code.kind === "note" && /general/i.test(raw)) {
+      return bucket[bucket.length - 1];
+    }
+    const index = Math.max(0, Math.min(bucket.length - 1, code.ordinal - 1));
+    return bucket[index];
+  }
+
+  function label(value?: string) {
+    const node = resolve(value);
+    const main = node?.title || node?.question || readableWorkflowEndpoint(value);
+    const meta = [node?.actor, node?.phase].filter(Boolean).join(" / ");
+    return meta ? `${main} (${meta})` : main;
+  }
+
+  return { label, resolve };
+}
+
+function classifyWorkflowNode(node: WorkflowNodeMetadata, index: number, nodeCount: number) {
+  const raw = normalizeWorkflowKey(`${node.id || ""} ${node.type || ""} ${node.title || ""} ${node.question || ""}`);
+  const kinds: WorkflowNodeKind[] = [];
+  if (raw.includes("start") || raw.includes("bat dau") || index === 0) {
+    kinds.push("start");
+  }
+  if (raw.includes("end") || raw.includes("ket thuc") || index === nodeCount - 1) {
+    kinds.push("end");
+  }
+  if (raw.includes("decision") || raw.includes("quyet dinh") || Boolean(node.question) || raw.includes("?")) {
+    kinds.push("decision");
+  }
+  if (raw.includes("script") || raw.includes("macro")) {
+    kinds.push("script");
+  }
+  if (raw.includes("note") || raw.includes("luu y")) {
+    kinds.push("note");
+  }
+  if (raw.includes("order history")) {
+    kinds.push("orderHistory");
+  }
+  if (!kinds.some((kind) => ["decision", "script", "note", "orderHistory", "start", "end"].includes(kind))) {
+    kinds.push("step");
+  }
+  return kinds;
+}
+
+function parseWorkflowCode(value: string) {
+  const normalized = value.replace(/^x[_-]?/i, "").replace(/[_-]+/g, " ");
+  if (/^start$/i.test(normalized)) {
+    return { kind: "start" as const, ordinal: 1 };
+  }
+  if (/^end$/i.test(normalized)) {
+    return { kind: "end" as const, ordinal: 1 };
+  }
+  if (/order history/i.test(normalized)) {
+    return { kind: "orderHistory" as const, ordinal: 1 };
+  }
+  const match = normalized.match(/^(step|decision|script|note)\s*([0-9]+)?/i);
+  if (!match) {
+    return null;
+  }
+  const kindByCode = {
+    decision: "decision",
+    note: "note",
+    script: "script",
+    step: "step",
+  } as const;
+  return {
+    kind: kindByCode[match[1].toLowerCase() as keyof typeof kindByCode],
+    ordinal: Number(match[2] || 1),
+  };
+}
+
+function readableWorkflowEndpoint(value?: string) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "Unknown step";
+  }
+  return raw
+    .replace(/^x[_-]?/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b([a-z])/g, (match) => match.toUpperCase());
+}
+
+function normalizeWorkflowKey(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/đ/g, "d")
+    .replace(/[^a-z0-9?]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isDocumentLayer(unit: ExtractionUnit) {

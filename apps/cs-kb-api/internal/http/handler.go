@@ -62,6 +62,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/raw", h.proxyAIVersionRaw)
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/source/pages/{page}", h.proxyAIVersionSourcePage)
 	mux.HandleFunc("POST /api/v1/ai/retrieve", h.proxyAI("/ai/v1/retrieve"))
+	mux.HandleFunc("POST /api/v1/ai/chat", h.proxyAI("/ai/v1/chat"))
 
 	return cors(mux)
 }

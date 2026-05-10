@@ -2,6 +2,7 @@ import { createRootRoute, createRoute, createRouter, Navigate } from "@tanstack/
 
 import { App } from "@/App";
 import { workspacePaths } from "@/constants";
+import { ChatPage } from "@/pages/chat-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { DocumentsPage } from "@/pages/documents-page";
 import { LookupPage } from "@/pages/lookup-page";
@@ -25,6 +26,12 @@ const lookupRoute = createRoute({
   component: LookupPage,
 });
 
+const chatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.chat,
+  component: ChatPage,
+});
+
 const documentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: workspacePaths.documents,
@@ -46,6 +53,7 @@ const retrievalRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   dashboardRoute,
   lookupRoute,
+  chatRoute,
   documentsRoute,
   synonymsRoute,
   retrievalRoute,
