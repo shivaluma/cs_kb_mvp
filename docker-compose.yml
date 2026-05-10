@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: ./apps/cs-kb-web/Dockerfile
     environment:
-      VITE_API_BASE_URL: http://localhost:${API_PORT:-8080}
+      API_BASE_URL: http://localhost:${API_PORT:-8080}
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:
