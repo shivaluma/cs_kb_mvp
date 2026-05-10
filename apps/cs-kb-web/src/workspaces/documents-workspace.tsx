@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Archive, BookOpen, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, Network, RefreshCw, ShieldCheck, Upload, WandSparkles } from "lucide-react";
+import { Archive, BookOpen, CheckCircle2, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, Network, RefreshCw, ShieldCheck, Upload, WandSparkles } from "lucide-react";
 
 import { DocumentFact, ReadinessCheck } from "@/components/operations";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +29,7 @@ type WorkflowGraphMetadata = {
 };
 type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
 type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
+type ReviewFilter = "needs_review" | "reviewed" | "approved" | "atomic" | "all";
 
 export function DocumentsWorkspace({
   busyKey,
@@ -64,7 +65,7 @@ export function DocumentsWorkspace({
   extractionUnits: ExtractionUnit[];
   extractionUnitsLoading: boolean;
   onArchiveDocument: (document: DocumentSummary) => void;
-  onBulkReviewVersion: (versionId: string, scope?: "all" | "atomic") => void;
+  onBulkReviewVersion: (versionId: string, scope?: "all" | "atomic", reviewStatus?: "reviewed" | "approved", force?: boolean) => void;
   onInspectVersion: (versionId: string) => void;
   onFileSelected: (file: File | null) => void;
   onPublishVersion: (versionId: string) => void;
@@ -102,6 +103,7 @@ export function DocumentsWorkspace({
   const [rawTextName, setRawTextName] = useState("raw-sop-draft.md");
   const [rawTextStats, setRawTextStats] = useState({ bytes: 0, chars: 0, lines: 0 });
   const [sourceFilter, setSourceFilter] = useState<"active" | "archived" | "all">("active");
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("needs_review");
   const activeDocuments = documents.filter((document) => document.status === "active");
   const archivedDocuments = documents.filter((document) => document.status === "archived");
   const visibleDocuments = documents.filter((document) => {
@@ -119,6 +121,7 @@ export function DocumentsWorkspace({
   const pendingAtomicReviewCount = atomicUnits.filter((unit) => unit.review_status === "needs_review").length;
   const highRiskUnitCount = extractionUnits.filter(hasRiskSignal).length;
   const effectiveDateReviewed = extractionUnits.some(hasEffectiveDateSignal);
+  const defaultEffectiveFrom = inferredEffectiveFrom(extractionUnits, selectedDocument, selectedVersion);
   const ownerAssigned = Boolean(selectedDocument?.metadata?.owner_team || selectedDocument?.metadata?.ownerTeam);
   const policyRequiresGovernance = ["policy_rule", "policy_table"].includes(String(selectedDocument?.latest_document_type ?? ""));
   const workflowRequiresGraph = selectedDocument?.latest_document_type === "workflow_diagram";
@@ -144,6 +147,13 @@ export function DocumentsWorkspace({
     },
     { reviewed: 0, security: 0, total: 0 },
   );
+  const reviewFilterCounts: Record<ReviewFilter, number> = {
+    needs_review: extractionUnits.filter((unit) => unit.review_status === "needs_review").length,
+    reviewed: extractionUnits.filter((unit) => unit.review_status === "reviewed").length,
+    approved: extractionUnits.filter((unit) => unit.review_status === "approved").length,
+    atomic: atomicUnits.length,
+    all: extractionUnits.length,
+  };
   const readinessChecks = [
     {
       detail: fullSopUnit ? fullSopUnit.title : "Missing document-level layer",
@@ -212,6 +222,10 @@ export function DocumentsWorkspace({
     Number(selectedVersion?.extraction_confidence ?? 1) < 0.85;
   const selectedVersionCanBulkReview = Boolean(selectedVersion) && canEditSelectedVersion && pendingReviewCount > 0 && !bulkReviewBlocked;
   const selectedVersionCanBulkReviewAtomic = Boolean(selectedVersion) && canEditSelectedVersion && pendingAtomicReviewCount > 0 && !bulkReviewBlocked;
+  const filteredDocumentLayer = fullSopUnit && unitMatchesReviewFilter(fullSopUnit, reviewFilter, false) ? fullSopUnit : null;
+  const filteredAtomicUnits = atomicUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, true));
+  const filteredUnitsCount = (filteredDocumentLayer ? 1 : 0) + filteredAtomicUnits.length;
+  const canBulkApproveVisible = Boolean(selectedVersion) && canEditSelectedVersion && filteredUnitsCount > 0;
 
   function refreshRawTextStats() {
     const text = rawTextRef.current?.value ?? "";
@@ -600,6 +614,19 @@ export function DocumentsWorkspace({
                     Approve all atomic units
                   </Button>
                 ) : null}
+                {selectedVersion && canEditSelectedVersion ? (
+                  <Button
+                    className="h-8 px-3"
+                    disabled={busyKey === "bulk-review" || extractionUnits.length === 0}
+                    onClick={() => onBulkReviewVersion(selectedVersion.version_id, "all", "approved", true)}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {busyKey === "bulk-review" ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <CheckCircle2 data-icon="inline-start" className="size-3.5" />}
+                    Approve all
+                  </Button>
+                ) : null}
                 {selectedVersionCanBulkReview && selectedVersion ? (
                   <Button
                     className="h-8 px-3"
@@ -757,7 +784,7 @@ export function DocumentsWorkspace({
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <CardTitle>Extraction review</CardTitle>
-                  <CardDescription>Edit the full SOP page and atomic retrieval units before publishing.</CardDescription>
+                  <CardDescription>Default view shows only units that still need review. Use bulk approve for test runs.</CardDescription>
                 </div>
                 {reviewStats.total ? (
                   <div className="flex flex-wrap gap-2">
@@ -788,33 +815,80 @@ export function DocumentsWorkspace({
                     versionRaw={versionRaw}
                   />
                   <div className="min-w-0">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <div className="text-xs font-medium text-muted-foreground">Structured units</div>
-                      <Badge variant="outline">{selectedIsArchived ? "audit only" : selectedVersion?.status === "published" ? "locked" : "editable draft"}</Badge>
+                    <div className="sticky top-3 z-10 mb-3 rounded-xl border bg-background/95 p-3 shadow-sm backdrop-blur">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-xs font-semibold">Structured units</div>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            Showing {filteredUnitsCount} of {extractionUnits.length}. {selectedVersion?.status === "published" ? "Published versions are locked." : "Draft units are editable."}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant="outline">{selectedIsArchived ? "audit only" : selectedVersion?.status === "published" ? "locked" : "editable draft"}</Badge>
+                          <Button
+                            disabled={!canBulkApproveVisible || busyKey === "bulk-review"}
+                            onClick={() => selectedVersion && onBulkReviewVersion(selectedVersion.version_id, reviewFilter === "atomic" ? "atomic" : "all", "approved", true)}
+                            size="sm"
+                            type="button"
+                            variant="secondary"
+                          >
+                            {busyKey === "bulk-review" ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <CheckCircle2 data-icon="inline-start" className="size-4" />}
+                            Approve visible
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-1 rounded-lg border bg-muted/15 p-1">
+                        {REVIEW_FILTERS.map((filter) => (
+                          <Button
+                            className="h-8 px-3"
+                            key={filter.value}
+                            onClick={() => setReviewFilter(filter.value)}
+                            size="sm"
+                            type="button"
+                            variant={reviewFilter === filter.value ? "secondary" : "ghost"}
+                          >
+                            {filter.label}
+                            <span className="ml-1 rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                              {reviewFilterCounts[filter.value]}
+                            </span>
+                          </Button>
+                        ))}
+                      </div>
                     </div>
                     <ScrollArea className="h-[52rem] pr-3">
                       <div className="space-y-3">
-                        {fullSopUnit ? (
+                        {filteredUnitsCount === 0 ? (
+                          <EmptyPanel
+                            icon={CheckCircle2}
+                            title={reviewFilter === "needs_review" ? "No units need review" : "No units in this filter"}
+                            text={reviewFilter === "needs_review" ? "Switch to All or Approved to audit completed units." : "Change the review filter to inspect another group."}
+                            compact
+                          />
+                        ) : null}
+                        {filteredDocumentLayer ? (
                           <section className="space-y-2">
                             <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                               <BookOpen className="size-4" />
                               Document layer
                             </div>
                             <ExtractionReviewEditor
+                              defaultEffectiveFrom={defaultEffectiveFrom}
                               disabled={!canEditSelectedVersion}
                               onSave={onUpdateExtractionUnit}
-                              saving={savingUnitId === fullSopUnit.unit_id}
-                              unit={fullSopUnit}
+                              saving={savingUnitId === filteredDocumentLayer.unit_id}
+                              unit={filteredDocumentLayer}
                             />
                           </section>
                         ) : null}
-                        <section className="space-y-2">
+                        {filteredAtomicUnits.length ? (
+                          <section className="space-y-2">
                           <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                             <Layers3 className="size-4" />
                             Atomic retrieval units
                           </div>
-                          {atomicUnits.map((unit) => (
+                          {filteredAtomicUnits.map((unit) => (
                             <ExtractionReviewEditor
+                              defaultEffectiveFrom={defaultEffectiveFrom}
                               disabled={!canEditSelectedVersion}
                               key={unit.unit_id}
                               onSave={onUpdateExtractionUnit}
@@ -823,6 +897,7 @@ export function DocumentsWorkspace({
                             />
                           ))}
                         </section>
+                        ) : null}
                       </div>
                     </ScrollArea>
                   </div>
@@ -878,6 +953,41 @@ export function DocumentsWorkspace({
       </section>
     </div>
   );
+}
+
+const REVIEW_FILTERS: Array<{ label: string; value: ReviewFilter }> = [
+  { label: "Needs review", value: "needs_review" },
+  { label: "Reviewed", value: "reviewed" },
+  { label: "Approved", value: "approved" },
+  { label: "Atomic", value: "atomic" },
+  { label: "All", value: "all" },
+];
+
+function unitMatchesReviewFilter(unit: ExtractionUnit, filter: ReviewFilter, isAtomic: boolean) {
+  if (filter === "all") {
+    return true;
+  }
+  if (filter === "atomic") {
+    return isAtomic;
+  }
+  return unit.review_status === filter;
+}
+
+function inferredEffectiveFrom(units: ExtractionUnit[], selectedDocument: DocumentSummary | null, selectedVersion?: VersionSummary) {
+  for (const unit of units) {
+    const value = unit.metadata.effective_from ?? unit.metadata.effectiveFrom;
+    if (value) {
+      return String(value);
+    }
+  }
+  const documentValue = selectedDocument?.metadata?.effective_from ?? selectedDocument?.metadata?.effectiveFrom;
+  if (documentValue) {
+    return String(documentValue);
+  }
+  if (selectedVersion?.created_at) {
+    return selectedVersion.created_at.slice(0, 10);
+  }
+  return new Date().toISOString().slice(0, 10);
 }
 
 function ValidationPill({ text, valid }: { text: string; valid: boolean }) {

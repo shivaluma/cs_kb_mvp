@@ -400,11 +400,13 @@ def publish_version(version_id: str, payload: dict[str, str] | None = None) -> d
 @app.post("/ai/v1/versions/{version_id}/bulk-review")
 def bulk_review_version(version_id: str, payload: dict[str, str] | None = None) -> dict[str, Any]:
     try:
+        data = payload or {}
         return repository.bulk_review_version(
             version_id,
-            (payload or {}).get("actor", "system"),
-            (payload or {}).get("review_status", "reviewed"),
-            (payload or {}).get("scope", "all"),
+            data.get("actor", "system"),
+            data.get("review_status", "reviewed"),
+            data.get("scope", "all"),
+            bool(data.get("force", False)),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

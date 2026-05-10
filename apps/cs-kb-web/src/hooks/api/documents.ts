@@ -117,11 +117,12 @@ export function usePublishVersion() {
 export function useBulkReviewVersion() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (payload: { versionId: string; actor: string; reviewStatus: "reviewed" | "approved"; scope?: "all" | "atomic" }) =>
+    mutationFn: (payload: { versionId: string; actor: string; reviewStatus: "reviewed" | "approved"; scope?: "all" | "atomic"; force?: boolean }) =>
       apiPost(`/api/v1/ai/versions/${payload.versionId}/bulk-review`, {
         actor: payload.actor,
         review_status: payload.reviewStatus,
         scope: payload.scope ?? "all",
+        force: payload.force ?? false,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.documents });

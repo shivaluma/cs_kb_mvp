@@ -49,11 +49,13 @@ type Draft = {
 };
 
 export function ExtractionReviewEditor({
+  defaultEffectiveFrom,
   disabled,
   onSave,
   saving,
   unit,
 }: {
+  defaultEffectiveFrom?: string;
   disabled: boolean;
   onSave: (unit: ExtractionUnit, update: ExtractionUnitUpdate) => void;
   saving: boolean;
@@ -74,6 +76,8 @@ export function ExtractionReviewEditor({
   function buildUpdate(reviewStatus = draft.reviewStatus): ExtractionUnitUpdate {
     const workflowGraph = parseWorkflowGraphJson(draft.workflowGraphJson);
     const workflowGraphPatch = workflowGraph ? workflowGraphMetadataPatch(workflowGraph) : {};
+    const autoReviewing = reviewStatus === "reviewed" || reviewStatus === "approved";
+    const effectiveFrom = draft.effectiveFrom || defaultEffectiveFrom || "";
     return {
       title: draft.title.trim(),
       content: draft.content.trim(),
@@ -84,8 +88,8 @@ export function ExtractionReviewEditor({
       metadata: {
         ...unit.metadata,
         risk_level: draft.riskLevel,
-        effective_from: draft.effectiveFrom,
-        source_ref_acknowledged: draft.sourceRefAcknowledged,
+        effective_from: effectiveFrom,
+        source_ref_acknowledged: autoReviewing && unit.metadata.source_ref_quality === "page_only" ? true : draft.sourceRefAcknowledged,
         ...workflowGraphPatch,
       },
     };

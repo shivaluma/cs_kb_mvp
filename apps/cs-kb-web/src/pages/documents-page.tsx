@@ -205,16 +205,30 @@ export function DocumentsPage() {
     );
   }
 
-  function bulkReviewVersion(versionId: string, scope: "all" | "atomic" = "all") {
+  function bulkReviewVersion(versionId: string, scope: "all" | "atomic" = "all", reviewStatus: "reviewed" | "approved" = "reviewed", force = false) {
+    if (force && reviewStatus === "approved") {
+      const confirmed = window.confirm(
+        scope === "atomic"
+          ? "Approve all atomic units in this draft? Use this for test runs only after checking source quality."
+          : "Approve all extraction units in this draft? Use this for test runs only after checking source quality.",
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
     bulkReviewMutation.mutate(
-      { versionId, actor: "cs-ops-ui", reviewStatus: "reviewed", scope },
+      { versionId, actor: "cs-ops-ui", reviewStatus, scope, force },
       {
         onSuccess: () => {
           setParams({ version: versionId });
           reportNotice(
-            scope === "atomic"
-              ? "Atomic retrieval units marked reviewed. Review the full SOP page separately before publishing."
-              : "Extraction units marked reviewed. Lead can publish after the remaining readiness checks pass.",
+            reviewStatus === "approved"
+              ? scope === "atomic"
+                ? "Atomic retrieval units approved. Review the full SOP page separately before publishing."
+                : "Extraction units approved. Publish gate still validates source refs, owner, effective date, and graph requirements."
+              : scope === "atomic"
+                ? "Atomic retrieval units marked reviewed. Review the full SOP page separately before publishing."
+                : "Extraction units marked reviewed. Lead can publish after the remaining readiness checks pass.",
           );
         },
         onError: () => reportError("Bulk review failed. Only editable draft versions can be reviewed."),

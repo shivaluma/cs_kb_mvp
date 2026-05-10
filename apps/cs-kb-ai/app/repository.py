@@ -844,7 +844,7 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         raise ValueError("publish_readiness_failed:" + ",".join(failures))
 
 
-def bulk_review_version(version_id: str, actor: str, review_status: str = "reviewed", scope: str = "all") -> dict[str, Any]:
+def bulk_review_version(version_id: str, actor: str, review_status: str = "reviewed", scope: str = "all", force: bool = False) -> dict[str, Any]:
     if review_status not in {"reviewed", "approved"}:
         raise ValueError("invalid_review_status")
     if scope not in {"all", "atomic"}:
@@ -857,7 +857,8 @@ def bulk_review_version(version_id: str, actor: str, review_status: str = "revie
                 SELECT v.id::text AS version_id,
                        document_id::text AS document_id,
                        v.status,
-                       v.document_type
+                       v.document_type,
+                       v.effective_from
                 FROM ai_document_versions v
                 WHERE v.id = %s
                 FOR UPDATE
@@ -876,18 +877,25 @@ def bulk_review_version(version_id: str, actor: str, review_status: str = "revie
                 """,
                 (version_id,),
             ).fetchall()
-            if has_bulk_review_blocker(row["document_type"], risk_rows):
+            if not force and has_bulk_review_blocker(row["document_type"], risk_rows):
                 raise ValueError("bulk_review_blocked_high_risk_or_low_confidence")
 
+            effective_from = inferred_effective_from(risk_rows, row.get("effective_from"))
             updated_count = conn.execute(
                 """
                 UPDATE ai_chunks
                 SET metadata = jsonb_set(
                   jsonb_set(
-                    jsonb_set(metadata, '{review_status}', to_jsonb(%s::text), true),
-                    '{reviewed_by}', to_jsonb(%s::text), true
+                    jsonb_set(
+                      jsonb_set(
+                        jsonb_set(metadata, '{review_status}', to_jsonb(%s::text), true),
+                        '{reviewed_by}', to_jsonb(%s::text), true
+                      ),
+                      '{reviewed_at}', to_jsonb(%s::text), true
+                    ),
+                    '{source_ref_acknowledged}', 'true'::jsonb, true
                   ),
-                  '{reviewed_at}', to_jsonb(%s::text), true
+                  '{effective_from}', to_jsonb(COALESCE(NULLIF(metadata->>'effective_from', ''), %s)::text), true
                 )
                 WHERE version_id = %s
                   AND (
@@ -896,7 +904,7 @@ def bulk_review_version(version_id: str, actor: str, review_status: str = "revie
                     AND COALESCE(metadata->>'unit_type', '') <> 'full_sop'
                   )
                 """,
-                (review_status, actor, datetime.now(timezone.utc).isoformat(), version_id, scope),
+                (review_status, actor, datetime.now(timezone.utc).isoformat(), effective_from, version_id, scope),
             ).rowcount
             remaining_needs_review = conn.execute(
                 """
@@ -926,7 +934,7 @@ def bulk_review_version(version_id: str, actor: str, review_status: str = "revie
                 action="document_version_bulk_review",
                 entity_type="ai_document_version",
                 entity_id=version_id,
-                metadata={"review_status": review_status, "scope": scope, "updated_count": updated_count},
+                metadata={"review_status": review_status, "scope": scope, "force": force, "updated_count": updated_count},
             )
             return {
                 "version_id": version_id,
@@ -936,6 +944,21 @@ def bulk_review_version(version_id: str, actor: str, review_status: str = "revie
                 "remaining_needs_review": int(remaining_needs_review or 0),
                 "updated_count": int(updated_count or 0),
             }
+
+
+def inferred_effective_from(rows: list[dict[str, Any]], version_effective_from: Any) -> str:
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        value = metadata.get("effective_from") or metadata.get("effectiveFrom")
+        if value:
+            return str(value)
+    if isinstance(version_effective_from, datetime):
+        return version_effective_from.date().isoformat()
+    if version_effective_from:
+        return str(version_effective_from).split("T", 1)[0].split(" ", 1)[0]
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def publish_version_tx(conn: Connection[Any], version_id: str, actor: str) -> dict[str, Any]:
