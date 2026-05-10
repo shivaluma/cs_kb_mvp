@@ -100,6 +100,7 @@ export function DocumentsWorkspace({
   const selectedFile = upload.file;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const rawTextRef = useRef<HTMLTextAreaElement | null>(null);
+  const reviewSectionRef = useRef<HTMLDivElement | null>(null);
   const maxBytes = 15 * 1024 * 1024;
   const maxChars = maxBytes;
   const allowedExtensions = [".txt", ".md", ".markdown", ".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".png", ".jpg", ".jpeg", ".webp"];
@@ -117,6 +118,7 @@ export function DocumentsWorkspace({
   const [rawTextStats, setRawTextStats] = useState({ bytes: 0, chars: 0, lines: 0 });
   const [sourceFilter, setSourceFilter] = useState<"active" | "archived" | "all">("active");
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("needs_review");
+  const [requiredUnitFocus, setRequiredUnitFocus] = useState<RequiredWorkflowUnit | null>(null);
   const activeDocuments = documents.filter((document) => document.status === "active");
   const archivedDocuments = documents.filter((document) => document.status === "archived");
   const visibleDocuments = documents.filter((document) => {
@@ -250,8 +252,19 @@ export function DocumentsWorkspace({
   const selectedVersionCanBulkReviewAtomic = Boolean(selectedVersion) && canEditSelectedVersion && pendingAtomicReviewCount > 0 && !bulkReviewBlocked;
   const filteredDocumentLayer = fullSopUnit && unitMatchesReviewFilter(fullSopUnit, reviewFilter, false) ? fullSopUnit : null;
   const filteredAtomicUnits = atomicUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, true));
+  const focusedRequiredUnits = requiredUnitFocus
+    ? filteredAtomicUnits.filter((unit) => requiredUnitFocus.types.includes(unit.unit_type))
+    : [];
   const filteredUnitsCount = (filteredDocumentLayer ? 1 : 0) + filteredAtomicUnits.length;
   const canBulkApproveVisible = Boolean(selectedVersion) && canEditSelectedVersion && filteredUnitsCount > 0;
+
+  function focusReviewRequirement(requirement: RequiredWorkflowUnit) {
+    setRequiredUnitFocus(requirement);
+    setReviewFilter("needs_review");
+    window.setTimeout(() => {
+      reviewSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  }
 
   function refreshRawTextStats() {
     const text = rawTextRef.current?.value ?? "";
@@ -710,13 +723,13 @@ export function DocumentsWorkspace({
                 return;
               }
               onCreateExtractionUnit(selectedVersion.version_id, buildWorkflowRequirementStub(requirement, selectedDocument, selectedVersion, defaultEffectiveFrom));
-              setReviewFilter("needs_review");
+              focusReviewRequirement(requirement);
             }}
             onConvertCandidate={(unit, requirement) => {
               onUpdateExtractionUnit(unit, buildWorkflowRequirementConversion(unit, requirement, defaultEffectiveFrom));
-              setReviewFilter("needs_review");
+              focusReviewRequirement(requirement);
             }}
-            onShowReviewQueue={() => setReviewFilter("needs_review")}
+            onReviewExisting={focusReviewRequirement}
             requirements={workflowRequirementStatuses}
           />
         ) : null}
@@ -729,7 +742,7 @@ export function DocumentsWorkspace({
           />
         ) : null}
 
-        <Card className="rounded-xl">
+        <Card className="rounded-xl" ref={reviewSectionRef}>
           <CardHeader className="border-b pb-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -889,7 +902,7 @@ export function DocumentsWorkspace({
                         <div>
                           <div className="text-xs font-semibold">Structured units</div>
                           <p className="mt-1 text-[11px] text-muted-foreground">
-                            Showing {filteredUnitsCount} of {extractionUnits.length}. {selectedVersion?.status === "published" ? "Published versions are locked." : "Draft units are editable."}
+                            Showing {filteredUnitsCount} of {extractionUnits.length}. {requiredUnitFocus ? `Focused on ${requiredUnitFocus.label}.` : selectedVersion?.status === "published" ? "Published versions are locked." : "Draft units are editable."}
                           </p>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
@@ -923,6 +936,16 @@ export function DocumentsWorkspace({
                           </Button>
                         ))}
                       </div>
+                      {requiredUnitFocus ? (
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-secondary/35 px-3 py-2">
+                          <p className="text-xs leading-5 text-muted-foreground">
+                            Focused requirement: <span className="font-semibold text-foreground">{requiredUnitFocus.label}</span>. Edit the matching unit below, then mark reviewed or approve.
+                          </p>
+                          <Button onClick={() => setRequiredUnitFocus(null)} size="sm" type="button" variant="ghost">
+                            Clear focus
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
                     <ScrollArea className="h-[52rem] pr-3">
                       <div className="space-y-3">
@@ -955,7 +978,12 @@ export function DocumentsWorkspace({
                             <Layers3 className="size-4" />
                             Atomic retrieval units
                           </div>
-                          {filteredAtomicUnits.map((unit) => (
+                          {focusedRequiredUnits.length ? (
+                            <div className="rounded-lg border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
+                              Showing matching unit(s) first for <span className="font-semibold text-foreground">{requiredUnitFocus?.label}</span>.
+                            </div>
+                          ) : null}
+                          {sortUnitsForRequirementFocus(filteredAtomicUnits, requiredUnitFocus).map((unit) => (
                             <ExtractionReviewEditor
                               defaultEffectiveFrom={defaultEffectiveFrom}
                               disabled={!canEditSelectedVersion}
@@ -1042,6 +1070,17 @@ function unitMatchesReviewFilter(unit: ExtractionUnit, filter: ReviewFilter, isA
   return unit.review_status === filter;
 }
 
+function sortUnitsForRequirementFocus(units: ExtractionUnit[], requirement: RequiredWorkflowUnit | null) {
+  if (!requirement) {
+    return units;
+  }
+  return [...units].sort((left, right) => {
+    const leftMatch = requirement.types.includes(left.unit_type) ? 0 : 1;
+    const rightMatch = requirement.types.includes(right.unit_type) ? 0 : 1;
+    return leftMatch - rightMatch || left.unit_index - right.unit_index;
+  });
+}
+
 function inferredEffectiveFrom(units: ExtractionUnit[], selectedDocument: DocumentSummary | null, selectedVersion?: VersionSummary) {
   for (const unit of units) {
     const value = unit.metadata.effective_from ?? unit.metadata.effectiveFrom;
@@ -1092,7 +1131,7 @@ function WorkflowRequirementsPanel({
   defaultEffectiveFrom,
   onConvertCandidate,
   onCreate,
-  onShowReviewQueue,
+  onReviewExisting,
   requirements,
 }: {
   busy: boolean;
@@ -1100,7 +1139,7 @@ function WorkflowRequirementsPanel({
   defaultEffectiveFrom: string;
   onConvertCandidate: (unit: ExtractionUnit, requirement: RequiredWorkflowUnit) => void;
   onCreate: (requirement: RequiredWorkflowUnit) => void;
-  onShowReviewQueue: () => void;
+  onReviewExisting: (requirement: RequiredWorkflowUnit) => void;
   requirements: WorkflowRequirementStatus[];
 }) {
   const missingCount = requirements.filter((requirement) => requirement.status !== "ready").length;
@@ -1127,6 +1166,7 @@ function WorkflowRequirementsPanel({
           const candidate = requirement.candidateUnits[0];
           const needsReview = requirement.status === "needs_review";
           const missing = requirement.status === "missing";
+          const existingUnit = requirement.matchingUnits[0];
           return (
             <article className="rounded-xl border bg-muted/10 p-3" key={requirement.key}>
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1149,8 +1189,8 @@ function WorkflowRequirementsPanel({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {needsReview ? (
-                    <Button onClick={onShowReviewQueue} size="sm" type="button" variant="outline">
-                      Review existing
+                    <Button onClick={() => onReviewExisting(requirement)} size="sm" type="button" variant="outline">
+                      Open in review list
                     </Button>
                   ) : null}
                   {missing && candidate ? (
@@ -1162,17 +1202,26 @@ function WorkflowRequirementsPanel({
                       variant="outline"
                     >
                       <WandSparkles data-icon="inline-start" className="size-4" />
-                      Prepare candidate
+                      Convert candidate
                     </Button>
                   ) : null}
                   {missing ? (
                     <Button disabled={!canEdit || busy} onClick={() => onCreate(requirement)} size="sm" type="button" variant="secondary">
                       {busy ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Plus data-icon="inline-start" className="size-4" />}
-                      Create review stub
+                      Add blank unit
                     </Button>
                   ) : null}
                 </div>
               </div>
+              {existingUnit ? (
+                <p className="mt-3 text-[11px] text-muted-foreground">
+                  Existing unit: <span className="font-medium text-foreground">{existingUnit.title}</span>
+                </p>
+              ) : missing ? (
+                <p className="mt-3 text-[11px] text-muted-foreground">
+                  Use Convert candidate when suggested source looks right, or Add blank unit if CS Ops needs to write it manually from the source viewer.
+                </p>
+              ) : null}
             </article>
           );
         })}
