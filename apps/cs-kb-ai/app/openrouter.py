@@ -14,7 +14,6 @@ from app.config import settings
 from app.schemas import (
     ExtractedUnitsPayload,
     GroundedAnswerPayload,
-    MetadataSuggestionPayload,
     RetrievalResponse,
     WorkflowExtractionPayload,
 )
@@ -382,7 +381,15 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         payload_model, schema_repaired = validate_workflow_payload_with_repair(parsed, payload, headers)
         payload_model, topology_repaired, topology_errors = validate_workflow_topology_with_repair(payload_model, payload, headers)
         if topology_errors:
-            return [], [f"openrouter_workflow_topology_failed:{';'.join(topology_errors[:8])}"]
+            payload_model.validation_errors = list(dict.fromkeys([*payload_model.validation_errors, *topology_errors]))
+            payload_model.warnings = [
+                *payload_model.warnings,
+                "workflow_topology_requires_manual_review",
+                *[f"workflow_topology_error:{error}" for error in topology_errors[:8]],
+            ]
+            payload_model.workflow_graph.requires_human_review = True
+            if not payload_model.workflow_graph.review_reason:
+                payload_model.workflow_graph.review_reason = "Graph topology has validator warnings and must be reviewed before publish."
         normalized = workflow_payload_to_units(payload_model, filename)
         missing_refs = source_ref_validation_errors(normalized, filename)
         if missing_refs:
@@ -607,9 +614,14 @@ def suggest_document_metadata(
 
     content = completion_content(payload, headers)
     parsed, repaired = parse_json_with_repair(content, payload, headers)
-    payload_model = MetadataSuggestionPayload.model_validate(parsed)
-    metadata = payload_model.metadata.model_dump()
-    signals = payload_model.signals
+    if not isinstance(parsed, dict):
+        raise ValueError("metadata_suggestion_not_object")
+    if isinstance(parsed.get("metadata"), dict):
+        metadata = parsed["metadata"]
+        signals = parsed.get("signals") if isinstance(parsed.get("signals"), dict) else {}
+    else:
+        metadata = parsed
+        signals = parsed.get("signals") if isinstance(parsed.get("signals"), dict) else {}
     warnings = ["openrouter_metadata_suggestion_used"]
     if repaired:
         warnings.append("openrouter_json_repair_used")

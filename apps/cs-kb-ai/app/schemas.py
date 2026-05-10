@@ -202,7 +202,7 @@ class WorkflowGraph(BaseModel):
                 node_id = original_id or stable_node_id(title, index)
                 id_map[original_id or str(index)] = node_id
                 id_map[title] = node_id
-                normalized_nodes.append({**node, "id": node_id, "title": title})
+                normalized_nodes.append({**node, "id": node_id, "title": title[:240]})
             value["nodes"] = normalized_nodes
             if not value.get("start_node_id") and normalized_nodes and isinstance(normalized_nodes[0], dict):
                 value["start_node_id"] = normalized_nodes[0].get("id")
@@ -274,6 +274,17 @@ class WorkflowExtractionPayload(BaseModel):
             for unit in value.get("atomic_units", [])
             if isinstance(unit, dict) and unit.get("content")
         ]
+        value["annotations"] = [
+            ensure_workflow_annotation(annotation, index)
+            for index, annotation in enumerate(value.get("annotations", []), start=1)
+            if isinstance(annotation, dict) and (
+                annotation.get("content")
+                or annotation.get("title")
+                or annotation.get("note")
+                or annotation.get("text")
+                or annotation.get("description")
+            )
+        ]
         value["warnings"] = list(dict.fromkeys(str(warning) for warning in warnings if warning))
         value["validation_errors"] = list(dict.fromkeys(str(error) for error in validation_errors if error))
         return value
@@ -315,6 +326,33 @@ def ensure_unit_source_refs(unit: dict[str, Any]) -> dict[str, Any]:
         "title": title[:180],
         "content": content or title,
         "metadata": metadata,
+        "source_refs": source_refs,
+    }
+
+
+def ensure_workflow_annotation(annotation: dict[str, Any], index: int) -> dict[str, Any]:
+    content = str(
+        annotation.get("content")
+        or annotation.get("note")
+        or annotation.get("text")
+        or annotation.get("description")
+        or annotation.get("title")
+        or ""
+    ).strip()
+    title = str(annotation.get("title") or content[:80] or f"Ghi chú {index}").strip()
+    annotation_type = str(annotation.get("type") or annotation.get("unit_type") or annotation.get("annotation_type") or "operational_note").strip()
+    source_refs = annotation.get("source_refs")
+    if not source_refs:
+        source_refs = annotation.get("metadata", {}).get("source_refs") if isinstance(annotation.get("metadata"), dict) else None
+    if not source_refs:
+        source_refs = [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": []}]
+    annotation_id = str(annotation.get("id") or stable_node_id(title or annotation_type, index)).strip()
+    return {
+        **annotation,
+        "id": annotation_id[:120],
+        "type": annotation_type[:80] or "operational_note",
+        "title": title[:180],
+        "content": content or title,
         "source_refs": source_refs,
     }
 

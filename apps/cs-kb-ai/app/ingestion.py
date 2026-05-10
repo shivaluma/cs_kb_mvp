@@ -110,11 +110,10 @@ def preview_document_metadata(
     content_type: str,
     data: bytes,
 ) -> dict[str, Any]:
-    raw_text, digest, chunks, warnings, enrichment = prepare_document_version(
+    raw_text, digest, chunks, warnings, enrichment = prepare_metadata_preview_source(
         filename=filename,
         content_type=content_type,
         data=data,
-        metadata=DocumentMetadata(source="metadata_preview"),
     )
     suggestion, signals = suggest_metadata(filename, raw_text, chunks, enrichment)
     return {
@@ -127,6 +126,58 @@ def preview_document_metadata(
         "warnings": [*warnings, f"checksum:{digest[:12]}"],
         "signals": signals,
     }
+
+
+def prepare_metadata_preview_source(
+    *,
+    filename: str,
+    content_type: str,
+    data: bytes,
+) -> tuple[str, str, list[dict[str, Any]], list[str], dict[str, Any]]:
+    warnings: list[str] = []
+    if is_spreadsheet_file(filename.lower(), content_type):
+        raw_text, extraction_warnings, source_chunks = extract_spreadsheet(filename.lower(), data)
+        warnings.extend(extraction_warnings)
+    else:
+        raw_text, extraction_warnings = extract_text(filename, content_type, data)
+        warnings.extend(extraction_warnings)
+        source_chunks = chunk_text(raw_text)
+
+    classification = classify_document(filename, content_type, raw_text)
+    warnings.extend(classification.warnings)
+    source_chunks = ensure_full_sop_layer(
+        source_chunks,
+        raw_text,
+        filename,
+        classification.source_type,
+        classification.document_type,
+    )
+
+    enrichment = {
+        "document_type": classification.document_type,
+        "source_type": classification.source_type,
+        "review_status": "needs_review",
+        "extraction_confidence": classification.confidence,
+        "extraction_status": "previewed",
+        "extraction_error": "",
+        "extraction_warnings": warnings,
+    }
+    chunks = [
+        {
+            "chunk_index": chunk.chunk_index,
+            "section": chunk.section,
+            "heading": chunk.heading,
+            "content": chunk.content,
+            "token_count": chunk.token_count,
+            "metadata": {
+                **enrichment,
+                "source_filename": filename,
+                **chunk.metadata,
+            },
+        }
+        for chunk in source_chunks[:30]
+    ]
+    return raw_text, checksum(data), chunks, list(dict.fromkeys(warnings)), enrichment
 
 
 def suggest_metadata(
