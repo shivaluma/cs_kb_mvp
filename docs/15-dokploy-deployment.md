@@ -6,8 +6,8 @@ This project is deployed as three Dokploy apps plus managed infrastructure servi
 
 ### `cs-kb-web`
 
-- Build context: repository root
-- Dockerfile: `apps/cs-kb-web/Dockerfile`
+- Build context: `apps/cs-kb-web`
+- Dockerfile: `Dockerfile`
 - Internal port: `3000`
 - Health path: `/healthz`
 

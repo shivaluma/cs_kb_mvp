@@ -1,20 +1,19 @@
 FROM node:22-alpine AS build
 
-WORKDIR /repo
+WORKDIR /app
 RUN corepack enable
-COPY pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/cs-kb-web/package.json apps/cs-kb-web/package.json
-RUN pnpm install --filter cs-kb-web... --frozen-lockfile --ignore-scripts
-COPY apps/cs-kb-web apps/cs-kb-web
-WORKDIR /repo/apps/cs-kb-web
+
+COPY package.json ./
+RUN pnpm install --ignore-scripts
+COPY . .
 RUN pnpm run build
 
 FROM nginx:1.27-alpine AS runtime
 
-COPY apps/cs-kb-web/docker/nginx.conf /etc/nginx/conf.d/default.conf
-COPY apps/cs-kb-web/docker/entrypoint.sh /docker-entrypoint.d/40-cs-kb-env.sh
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY docker/entrypoint.sh /docker-entrypoint.d/40-cs-kb-env.sh
 RUN chmod +x /docker-entrypoint.d/40-cs-kb-env.sh
-COPY --from=build /repo/apps/cs-kb-web/dist /usr/share/nginx/html
+COPY --from=build /app/dist /usr/share/nginx/html
 
 ENV API_BASE_URL=http://localhost:8080
 EXPOSE 3000
