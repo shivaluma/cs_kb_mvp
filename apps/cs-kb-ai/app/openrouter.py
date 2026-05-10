@@ -480,7 +480,13 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         return [], [f"openrouter_rule_table_extraction_failed:{exc.__class__.__name__}"]
 
 
-def generate_grounded_answer(question: str, retrieval: RetrievalResponse, conversation: list[dict[str, str]] | None = None) -> tuple[GroundedAnswerPayload | None, list[str]]:
+def generate_grounded_answer(
+    question: str,
+    retrieval: RetrievalResponse,
+    conversation: list[dict[str, str]] | None = None,
+    model: str | None = None,
+    strict_grounding: bool = True,
+) -> tuple[GroundedAnswerPayload | None, list[str]]:
     if not enabled():
         return None, ["openrouter_disabled"]
     if not retrieval.results:
@@ -514,7 +520,7 @@ def generate_grounded_answer(question: str, retrieval: RetrievalResponse, conver
         if message.get("content")
     )
     payload = {
-        "model": settings.openrouter_chat_model,
+        "model": model or settings.openrouter_chat_model,
         "messages": [
             {
                 "role": "system",
@@ -525,6 +531,13 @@ def generate_grounded_answer(question: str, retrieval: RetrievalResponse, conver
                     "Nếu sources không đủ căn cứ, trả lời rằng không tìm thấy SOP published đủ tin cậy. "
                     "Không tự tạo policy, điều kiện xử lý, hoặc cảnh báo rủi ro ngoài source. "
                     "Câu trả lời phải ngắn, actionable, tiếng Việt, và có warning nếu source có risk/compliance/security/financial/account/escalation signal. "
+                    + (
+                        "Đây là câu hỏi có rủi ro cao hoặc policy/exception: nếu source không nêu rõ điều kiện/action, bắt buộc từ chối kết luận và hướng dẫn mở source/escalate Lead. "
+                        "Không dùng ngôn ngữ chắc chắn cho refund/payment/account/privacy/ZT nếu citation không nói rõ. "
+                        if strict_grounding
+                        else ""
+                    )
+                    +
                     "Bắt buộc trả JSON object đúng schema: {\"answer\":\"...\",\"steps\":[\"...\"],\"warnings\":[\"...\"],\"confidence\":0.0,\"source_indices\":[1]}. "
                     "source_indices chỉ được chứa index của SOURCES đã dùng. Nếu không dùng source nào, để [] và answer phải nói không đủ căn cứ."
                 ),
@@ -553,7 +566,7 @@ def generate_grounded_answer(question: str, retrieval: RetrievalResponse, conver
         content = completion_content(payload, headers)
         parsed, repaired = parse_json_with_repair(content, payload, headers)
         answer = GroundedAnswerPayload.model_validate(parsed)
-        warnings = ["openrouter_grounded_answer_used"]
+        warnings = ["openrouter_grounded_answer_used", f"openrouter_model:{model or settings.openrouter_chat_model}"]
         if repaired:
             warnings.append("openrouter_json_repair_used")
         if not answer.source_indices:

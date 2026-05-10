@@ -5,7 +5,7 @@ import re
 import unicodedata
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 DocumentStatus = Literal["active", "archived"]
@@ -652,10 +652,13 @@ class ChatMessage(BaseModel):
 
 
 class GroundedChatRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     question: str = Field(min_length=1, max_length=4000)
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
     limit: int = Field(default=6, ge=1, le=10)
     conversation: list[ChatMessage] = Field(default_factory=list, max_length=8)
+    model_route: Literal["auto", "simple", "policy", "high_risk", "complex"] = "auto"
 
 
 class GroundedAnswerPayload(BaseModel):
@@ -667,6 +670,8 @@ class GroundedAnswerPayload(BaseModel):
 
 
 class GroundedChatResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     question: str
     answer: str
     steps: list[str] = Field(default_factory=list)
@@ -676,6 +681,9 @@ class GroundedChatResponse(BaseModel):
     confidence: float = 0.0
     retrieval: RetrievalResponse
     latency_ms: int
+    model_route: str = "auto"
+    model_used: str = ""
+    model_reason: str = ""
 
 
 class SynonymTerm(BaseModel):

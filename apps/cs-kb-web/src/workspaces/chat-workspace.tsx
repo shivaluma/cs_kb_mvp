@@ -210,12 +210,15 @@ function ChatBubble({
                 {response.citations.length ? `${response.citations.length} citations` : "no citation"}
               </Badge>
               <Badge variant="outline">{Math.round(response.confidence * 100)}% confidence</Badge>
+              {response.model_route ? <Badge variant="outline">{response.model_route}</Badge> : null}
+              {response.model_used ? <Badge variant="outline">{response.model_used}</Badge> : null}
               <Badge variant="outline">{response.latency_ms}ms</Badge>
               <Button onClick={() => onCopy(response.answer)} size="sm" type="button" variant="outline">
                 <Clipboard data-icon="inline-start" className="size-4" />
                 Copy answer
               </Button>
             </div>
+            {response.model_reason ? <p className="text-xs text-muted-foreground">Model routing: {response.model_reason}</p> : null}
             {response.sources.length ? (
               <div className="grid gap-2">
                 <p className="text-xs font-semibold text-muted-foreground">Published sources used</p>

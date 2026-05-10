@@ -23,6 +23,26 @@ class Settings:
         self.openrouter_vision_model = os.getenv("OPENROUTER_VISION_MODEL", self.openrouter_extraction_model)
         self.openrouter_metadata_model = os.getenv("OPENROUTER_METADATA_MODEL", self.openrouter_model)
         self.openrouter_chat_model = os.getenv("OPENROUTER_CHAT_MODEL", self.openrouter_model)
+        self.openrouter_chat_simple_model = os.getenv(
+            "OPENROUTER_CHAT_SIMPLE_MODEL",
+            os.getenv("OPENROUTER_CHAT_MODEL_SIMPLE", "google/gemini-2.5-flash-lite"),
+        ).strip()
+        self.openrouter_chat_policy_model = os.getenv(
+            "OPENROUTER_CHAT_POLICY_MODEL",
+            os.getenv("OPENROUTER_CHAT_MODEL_POLICY", "deepseek/deepseek-v3.2"),
+        ).strip()
+        self.openrouter_chat_high_risk_model = os.getenv(
+            "OPENROUTER_CHAT_HIGH_RISK_MODEL",
+            os.getenv("OPENROUTER_CHAT_MODEL_HIGH_RISK", "deepseek/deepseek-v3.2"),
+        ).strip()
+        self.openrouter_chat_complex_model = os.getenv(
+            "OPENROUTER_CHAT_COMPLEX_MODEL",
+            os.getenv("OPENROUTER_CHAT_MODEL_COMPLEX", "moonshotai/kimi-k2.6"),
+        ).strip()
+        self.openrouter_chat_fallback_model = os.getenv(
+            "OPENROUTER_CHAT_FALLBACK_MODEL",
+            os.getenv("OPENROUTER_CHAT_MODEL_FALLBACK", "moonshotai/kimi-k2.6"),
+        ).strip()
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()

@@ -126,6 +126,9 @@ export type GroundedChatResponse = {
   confidence: number;
   retrieval: RetrievalResponse;
   latency_ms: number;
+  model_route: string;
+  model_used: string;
+  model_reason: string;
 };
 
 export type ChatThreadMessage = {
