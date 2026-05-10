@@ -18,12 +18,13 @@ class ChatModelRoutingTest(unittest.TestCase):
         route, _reason = classify_chat_route(GroundedChatRequest(question="Khi nào cần chuyển xử lý cho Lead?"), empty_retrieval())
 
         self.assertEqual(route, "policy")
+        self.assertEqual(model_for_route(route), "moonshotai/kimi-k2.5")
 
     def test_high_risk_question_uses_high_risk_route(self) -> None:
         route, _reason = classify_chat_route(GroundedChatRequest(question="Có được cung cấp Order ID cho khách không?"), empty_retrieval())
 
         self.assertEqual(route, "high_risk")
-        self.assertEqual(model_for_route(route), "deepseek/deepseek-v3.2")
+        self.assertEqual(model_for_route(route), "moonshotai/kimi-k2.5")
 
     def test_complex_macro_question_uses_complex_route(self) -> None:
         route, _reason = classify_chat_route(GroundedChatRequest(question="Soạn macro phản hồi thật gọn dựa trên các SOP này"), empty_retrieval())

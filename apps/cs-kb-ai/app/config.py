@@ -29,11 +29,11 @@ class Settings:
         ).strip()
         self.openrouter_chat_policy_model = os.getenv(
             "OPENROUTER_CHAT_POLICY_MODEL",
-            os.getenv("OPENROUTER_CHAT_MODEL_POLICY", "deepseek/deepseek-v3.2"),
+            os.getenv("OPENROUTER_CHAT_MODEL_POLICY", "moonshotai/kimi-k2.5"),
         ).strip()
         self.openrouter_chat_high_risk_model = os.getenv(
             "OPENROUTER_CHAT_HIGH_RISK_MODEL",
-            os.getenv("OPENROUTER_CHAT_MODEL_HIGH_RISK", "deepseek/deepseek-v3.2"),
+            os.getenv("OPENROUTER_CHAT_MODEL_HIGH_RISK", "moonshotai/kimi-k2.5"),
         ).strip()
         self.openrouter_chat_complex_model = os.getenv(
             "OPENROUTER_CHAT_COMPLEX_MODEL",
