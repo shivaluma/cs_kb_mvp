@@ -114,6 +114,55 @@ func (s *Store) Close() {
 	s.db.Close()
 }
 
+func (s *Store) PostgresHealth(ctx context.Context) model.HealthStatus {
+	start := time.Now()
+	if err := s.db.Ping(ctx); err != nil {
+		return model.HealthStatus{
+			Name:      "postgres",
+			Status:    "down",
+			LatencyMS: time.Since(start).Milliseconds(),
+			Detail:    err.Error(),
+		}
+	}
+	return model.HealthStatus{
+		Name:      "postgres",
+		Status:    "healthy",
+		LatencyMS: time.Since(start).Milliseconds(),
+		Detail:    "Postgres pool ping succeeded",
+	}
+}
+
+func (s *Store) MeiliHealth(ctx context.Context) model.HealthStatus {
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.cfg.MeiliHost, "/")+"/health", nil)
+	if err != nil {
+		return model.HealthStatus{Name: "meilisearch", Status: "down", Detail: err.Error()}
+	}
+	if s.cfg.MeiliMasterKey != "" {
+		req.Header.Set("Authorization", "Bearer "+s.cfg.MeiliMasterKey)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return model.HealthStatus{
+			Name:      "meilisearch",
+			Status:    "down",
+			LatencyMS: time.Since(start).Milliseconds(),
+			Detail:    err.Error(),
+		}
+	}
+	defer resp.Body.Close()
+	status := "healthy"
+	if resp.StatusCode >= 300 {
+		status = "degraded"
+	}
+	return model.HealthStatus{
+		Name:      "meilisearch",
+		Status:    status,
+		LatencyMS: time.Since(start).Milliseconds(),
+		Detail:    resp.Status,
+	}
+}
+
 func (s *Store) EnsureSchema(ctx context.Context) error {
 	_, err := s.db.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS kb_sops (

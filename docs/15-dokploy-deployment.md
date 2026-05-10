@@ -58,6 +58,7 @@ OPENROUTER_MODEL=google/gemini-2.5-flash-lite
 OPENROUTER_WORKFLOW_MODEL=google/gemini-2.5-flash-lite
 OPENROUTER_AUDIT_MODEL=deepseek/deepseek-v3.2
 PUBLIC_APP_URL=https://<web-domain>
+QDRANT_URL=https://<qdrant-domain-or-internal-url> # optional, shown as not configured when empty
 ```
 
 The AI service owns extraction, embeddings, retrieval, and grounded answer generation. Upload can succeed while extraction returns a recoverable failed draft.

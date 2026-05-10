@@ -5,12 +5,16 @@ import {
   BookOpen,
   CheckCircle2,
   Clock,
+  Database,
   FileClock,
   FileText,
   Gauge,
   GitPullRequest,
+  HardDrive,
   Layers3,
+  RefreshCw,
   Search,
+  Server,
   ShieldCheck,
   Sparkles,
   WandSparkles,
@@ -25,24 +29,30 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatDate } from "@/lib/format";
-import type { DocumentSummary, Homepage, SOP, SynonymGroup } from "@/types";
+import type { DocumentSummary, Homepage, ServiceHealth, SystemHealth, SOP, SynonymGroup } from "@/types";
 import type { Workspace } from "@/constants";
 
 export function DashboardWorkspace({
   documents,
   homepage,
+  isSystemHealthLoading,
   onRunSearch,
   onWorkspaceChange,
   query,
+  refetchSystemHealth,
   setQuery,
+  systemHealth,
   synonyms,
 }: {
   documents: DocumentSummary[];
   homepage?: Homepage;
+  isSystemHealthLoading: boolean;
   onRunSearch: () => void;
   onWorkspaceChange: (workspace: Workspace) => void;
   query: string;
+  refetchSystemHealth: () => void;
   setQuery: (query: string) => void;
+  systemHealth?: SystemHealth;
   synonyms: SynonymGroup[];
 }) {
   const activeDocuments = documents.filter((document) => document.status === "active");
@@ -114,11 +124,12 @@ export function DashboardWorkspace({
       </Card>
 
       <Tabs className="space-y-4" defaultValue="agent">
-        <TabsList className="grid h-auto grid-cols-2 gap-1 md:inline-grid md:grid-cols-4">
+        <TabsList className="grid h-auto grid-cols-2 gap-1 md:inline-grid md:grid-cols-5">
           <TabsTrigger value="agent">Agent Home</TabsTrigger>
           <TabsTrigger value="search">Search Analytics</TabsTrigger>
           <TabsTrigger value="health">Content Health</TabsTrigger>
           <TabsTrigger value="review">Review Queue</TabsTrigger>
+          <TabsTrigger value="system">System Health</TabsTrigger>
         </TabsList>
 
         <TabsContent value="agent">
@@ -159,9 +170,162 @@ export function DashboardWorkspace({
             reviewDocuments={reviewDocuments}
           />
         </TabsContent>
+
+        <TabsContent value="system">
+          <SystemHealthPanel
+            health={systemHealth}
+            isLoading={isSystemHealthLoading}
+            onRefresh={refetchSystemHealth}
+          />
+        </TabsContent>
       </Tabs>
     </div>
   );
+}
+
+function SystemHealthPanel({
+  health,
+  isLoading,
+  onRefresh,
+}: {
+  health?: SystemHealth;
+  isLoading: boolean;
+  onRefresh: () => void;
+}) {
+  const services = health?.services ?? [];
+  const downCount = services.filter((service) => service.status === "down").length;
+  const degradedCount = services.filter((service) => service.status === "degraded" || service.status === "unknown").length;
+  const healthyCount = services.filter((service) => service.status === "healthy").length;
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+      <Card className="rounded-xl">
+        <CardHeader className="border-b pb-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <SystemStatusBadge status={health?.status ?? (isLoading ? "unknown" : "down")} />
+                <Badge variant="outline">Auto refresh 30s</Badge>
+              </div>
+              <CardTitle className="mt-3">Infrastructure monitor</CardTitle>
+              <CardDescription className="mt-2 max-w-[72ch] leading-6">
+                Runtime checks for API, database, Meilisearch, AI retrieval service, pgvector, and Qdrant configuration.
+              </CardDescription>
+            </div>
+            <Button onClick={onRefresh} type="button" variant="outline">
+              <RefreshCw data-icon="inline-start" className="size-4" />
+              Refresh
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-4">
+          {isLoading && services.length === 0 ? (
+            <EmptyPanel
+              icon={Server}
+              title="Checking services"
+              text="The monitor is calling the API health endpoint and upstream dependencies."
+            />
+          ) : services.length === 0 ? (
+            <EmptyPanel
+              icon={AlertTriangle}
+              title="No health data"
+              text="The system health endpoint is unavailable or returned no service checks."
+            />
+          ) : (
+            <div className="grid gap-3 lg:grid-cols-2">
+              {services.map((service) => (
+                <ServiceHealthRow key={service.name} service={service} />
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <aside className="space-y-4">
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>Health summary</CardTitle>
+            <CardDescription>
+              {health?.checked_at ? `Last checked ${formatDate(health.checked_at)}` : "Waiting for first check"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-4">
+            <KpiCard icon={CheckCircle2} label="Healthy" value={healthyCount} />
+            <KpiCard icon={AlertTriangle} label="Needs attention" tone={degradedCount + downCount > 0 ? "warning" : "default"} value={degradedCount + downCount} />
+          </CardContent>
+        </Card>
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>Debug order</CardTitle>
+            <CardDescription>Use this order when a deployed page looks like a CORS failure.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-4 text-sm leading-6 text-muted-foreground">
+            <p>1. API process and CORS headers.</p>
+            <p>2. API to AI internal URL.</p>
+            <p>3. AI to Postgres pgvector.</p>
+            <p>4. Meilisearch indexing and query health.</p>
+          </CardContent>
+        </Card>
+      </aside>
+    </div>
+  );
+}
+
+function ServiceHealthRow({ service }: { service: ServiceHealth }) {
+  const Icon = serviceIcon(service.name);
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted/30">
+            <Icon className="size-4 text-muted-foreground" />
+          </div>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold">{serviceLabel(service.name)}</div>
+            <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{service.detail}</p>
+          </div>
+        </div>
+        <SystemStatusBadge status={service.status} />
+      </div>
+      <div className="mt-4 flex items-center justify-between rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        <span>Latency</span>
+        <span className="font-medium tabular-nums text-foreground">{service.latency_ms}ms</span>
+      </div>
+    </div>
+  );
+}
+
+function SystemStatusBadge({ status }: { status: ServiceHealth["status"] }) {
+  if (status === "healthy") {
+    return <Badge variant="secondary">Healthy</Badge>;
+  }
+  if (status === "skipped") {
+    return <Badge variant="outline">Not configured</Badge>;
+  }
+  if (status === "down") {
+    return <Badge variant="destructive">Down</Badge>;
+  }
+  return <Badge variant="outline">Degraded</Badge>;
+}
+
+function serviceIcon(name: string) {
+  if (name.includes("postgres") || name.includes("pgvector")) return Database;
+  if (name.includes("meili")) return Search;
+  if (name.includes("qdrant")) return HardDrive;
+  if (name.includes("ai")) return WandSparkles;
+  return Server;
+}
+
+function serviceLabel(name: string) {
+  const labels: Record<string, string> = {
+    api: "Go API",
+    postgres: "API Postgres",
+    meilisearch: "Meilisearch",
+    ai_service: "AI service",
+    ai_postgres_pgvector: "AI Postgres pgvector",
+    qdrant: "Qdrant",
+  };
+  return labels[name] ?? name.replace(/_/g, " ");
 }
 
 function AgentHome({

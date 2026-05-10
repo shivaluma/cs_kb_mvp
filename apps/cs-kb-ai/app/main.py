@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app import repository
 from app.chat import grounded_chat
+from app.config import settings
 from app.embedding import embed_text
 from app.ingestion import prepare_document_version, preview_document_metadata
 from app.retrieval import retrieve
@@ -51,8 +54,71 @@ def startup() -> None:
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok", "service": "cs-kb-ai", "retrieval_store": "postgres_pgvector"}
+def healthz() -> dict[str, Any]:
+    services: list[dict[str, Any]] = [
+        {
+            "name": "ai_service",
+            "status": "healthy",
+            "latency_ms": 0,
+            "detail": "FastAPI process is serving requests",
+        }
+    ]
+    try:
+        db_status = repository.health_check()
+        services.append({"name": "ai_postgres_pgvector", **db_status})
+    except Exception as exc:
+        services.append(
+            {
+                "name": "ai_postgres_pgvector",
+                "status": "down",
+                "latency_ms": 0,
+                "detail": exc.__class__.__name__,
+            }
+        )
+
+    services.append(qdrant_health())
+    overall = "healthy" if all(service["status"] in {"healthy", "skipped"} for service in services) else "degraded"
+    return {
+        "status": overall,
+        "service": "cs-kb-ai",
+        "retrieval_store": "postgres_pgvector",
+        "services": services,
+    }
+
+
+def qdrant_health() -> dict[str, Any]:
+    if not settings.qdrant_url:
+        return {
+            "name": "qdrant",
+            "status": "skipped",
+            "latency_ms": 0,
+            "detail": "QDRANT_URL is not configured; retrieval is using Postgres pgvector",
+        }
+    target = settings.qdrant_url.rstrip("/") + "/readyz"
+    start = time.perf_counter()
+    try:
+        response = httpx.get(target, timeout=3)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        if response.status_code < 300:
+            return {
+                "name": "qdrant",
+                "status": "healthy",
+                "latency_ms": latency_ms,
+                "detail": "Qdrant ready endpoint is reachable",
+            }
+        return {
+            "name": "qdrant",
+            "status": "degraded",
+            "latency_ms": latency_ms,
+            "detail": f"HTTP {response.status_code}",
+        }
+    except Exception as exc:
+        return {
+            "name": "qdrant",
+            "status": "down",
+            "latency_ms": int((time.perf_counter() - start) * 1000),
+            "detail": exc.__class__.__name__,
+        }
 
 
 @app.post("/ai/v1/documents/upload", response_model=DocumentVersionResponse)

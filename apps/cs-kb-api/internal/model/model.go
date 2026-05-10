@@ -56,6 +56,13 @@ type SOPMetrics struct {
 	NotHelpful int `json:"not_helpful"`
 }
 
+type HealthStatus struct {
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	LatencyMS int64  `json:"latency_ms"`
+	Detail    string `json:"detail"`
+}
+
 type SearchRequest struct {
 	Query           string        `json:"query"`
 	Filters         SearchFilters `json:"filters"`

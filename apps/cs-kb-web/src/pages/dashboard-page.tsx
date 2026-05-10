@@ -5,6 +5,7 @@ import { RouteLoading } from "@/components/route-loading";
 import { workspacePaths, type Workspace } from "@/constants";
 import { useDocuments } from "@/hooks/api/documents";
 import { useHomepage } from "@/hooks/api/homepage";
+import { useSystemHealth } from "@/hooks/api/system";
 import { useSynonyms } from "@/hooks/api/synonyms";
 import { useUrlSearch } from "@/hooks/use-url-search";
 
@@ -18,6 +19,7 @@ export function DashboardPage() {
   const query = getParam("q", "khach khong nhan du mon co duoc refund khong");
   const homepageQuery = useHomepage();
   const documentsQuery = useDocuments();
+  const systemHealthQuery = useSystemHealth();
   const synonymsQuery = useSynonyms("active");
   const documents = [...(documentsQuery.data ?? [])].sort((left, right) => {
     if (left.status !== right.status) {
@@ -46,10 +48,13 @@ export function DashboardPage() {
       <DashboardWorkspace
         documents={documents}
         homepage={homepageQuery.data}
+        isSystemHealthLoading={systemHealthQuery.isLoading}
         onRunSearch={runLookup}
         onWorkspaceChange={navigateWorkspace}
         query={query}
+        refetchSystemHealth={() => void systemHealthQuery.refetch()}
         setQuery={setQuery}
+        systemHealth={systemHealthQuery.data}
         synonyms={synonymsQuery.data ?? []}
       />
     </Suspense>

@@ -53,6 +53,7 @@ def ensure_schema() -> None:
             $$;
             """
         )
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_documents (
@@ -195,6 +196,17 @@ def ensure_schema() -> None:
         )
         ensure_search_taxonomy_schema(conn)
         seed_search_taxonomy(conn)
+
+
+def health_check() -> dict[str, Any]:
+    start = time.perf_counter()
+    with connection() as conn:
+        conn.execute("SELECT 1")
+    return {
+        "status": "healthy",
+        "latency_ms": int((time.perf_counter() - start) * 1000),
+        "detail": "Postgres and pgvector schema are reachable",
+    }
 
 
 def ensure_search_taxonomy_schema(conn: Connection[Any]) -> None:

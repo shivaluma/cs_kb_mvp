@@ -60,6 +60,21 @@ export type Homepage = {
   category_shortcuts: Array<{ key: string; label: string }>;
 };
 
+export type ServiceHealthStatus = "healthy" | "degraded" | "down" | "unknown" | "skipped";
+
+export type ServiceHealth = {
+  name: string;
+  status: ServiceHealthStatus;
+  latency_ms: number;
+  detail: string;
+};
+
+export type SystemHealth = {
+  status: ServiceHealthStatus;
+  checked_at: string;
+  services: ServiceHealth[];
+};
+
 export type AISuggestion = {
   answer: string;
   suggested_sops: Array<{

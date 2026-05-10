@@ -30,6 +30,7 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", h.health)
+	mux.HandleFunc("GET /api/v1/system/health", h.systemHealth)
 	mux.HandleFunc("GET /api/v1/sops", h.listSOPs)
 	mux.HandleFunc("POST /api/v1/sops", h.createSOP)
 	mux.HandleFunc("GET /api/v1/sops/{id}", h.getSOP)
@@ -75,6 +76,95 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"service": "cs-kb-api",
 	})
+}
+
+type systemHealthResponse struct {
+	Status    string               `json:"status"`
+	CheckedAt string               `json:"checked_at"`
+	Services  []model.HealthStatus `json:"services"`
+}
+
+func (h *Handler) systemHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	services := []model.HealthStatus{
+		{Name: "api", Status: "healthy", LatencyMS: 0, Detail: "Go API process is serving requests"},
+		h.store.PostgresHealth(ctx),
+		h.store.MeiliHealth(ctx),
+	}
+	services = append(services, h.aiHealth(ctx)...)
+
+	status := "healthy"
+	for _, service := range services {
+		if service.Status == "down" {
+			status = "down"
+			break
+		}
+		if service.Status == "degraded" || service.Status == "unknown" {
+			status = "degraded"
+		}
+	}
+	writeJSON(w, http.StatusOK, systemHealthResponse{
+		Status:    status,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		Services:  services,
+	})
+}
+
+func (h *Handler) aiHealth(ctx context.Context) []model.HealthStatus {
+	target := strings.TrimRight(h.cfg.AIBaseURL, "/") + "/healthz"
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return []model.HealthStatus{{Name: "ai_service", Status: "down", Detail: err.Error()}}
+	}
+	resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
+	if err != nil {
+		return []model.HealthStatus{{
+			Name:      "ai_service",
+			Status:    "down",
+			LatencyMS: time.Since(start).Milliseconds(),
+			Detail:    err.Error(),
+		}}
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	latency := time.Since(start).Milliseconds()
+	if resp.StatusCode >= 300 {
+		return []model.HealthStatus{{
+			Name:      "ai_service",
+			Status:    "down",
+			LatencyMS: latency,
+			Detail:    "HTTP " + resp.Status + ": " + truncateLogBody(body),
+		}}
+	}
+
+	var decoded struct {
+		Status   string               `json:"status"`
+		Services []model.HealthStatus `json:"services"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return []model.HealthStatus{{
+			Name:      "ai_service",
+			Status:    "unknown",
+			LatencyMS: latency,
+			Detail:    "AI health response is not JSON",
+		}}
+	}
+	if len(decoded.Services) == 0 {
+		status := decoded.Status
+		if status == "" || status == "ok" {
+			status = "healthy"
+		}
+		return []model.HealthStatus{{Name: "ai_service", Status: status, LatencyMS: latency, Detail: "AI service health endpoint reachable"}}
+	}
+	for index := range decoded.Services {
+		if decoded.Services[index].LatencyMS == 0 && decoded.Services[index].Name == "ai_service" {
+			decoded.Services[index].LatencyMS = latency
+		}
+	}
+	return decoded.Services
 }
 
 func (h *Handler) listSOPs(w http.ResponseWriter, r *http.Request) {

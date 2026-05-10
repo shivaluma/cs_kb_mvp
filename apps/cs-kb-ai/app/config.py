@@ -21,6 +21,7 @@ class Settings:
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
+        self.qdrant_url = os.getenv("QDRANT_URL", "").strip()
 
 
 settings = Settings()
