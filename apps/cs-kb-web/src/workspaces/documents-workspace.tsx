@@ -15,7 +15,7 @@ import { API_BASE_URL } from "@/config";
 import { workspacePaths } from "@/constants";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, UploadState, VersionRawText, VersionSummary } from "@/types";
+import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, UploadState, VersionRawText, VersionSummary } from "@/types";
 
 type WorkflowGraphMetadata = {
   workflow_id?: string;
@@ -55,6 +55,7 @@ export function DocumentsWorkspace({
   extractionUnits,
   extractionUnitsLoading,
   extractionPipeline,
+  extractionPipelineInspection,
   extractionPipelineLoading,
   onArchiveDocument,
   onBulkReviewVersion,
@@ -84,6 +85,7 @@ export function DocumentsWorkspace({
   extractionUnits: ExtractionUnit[];
   extractionUnitsLoading: boolean;
   extractionPipeline: ExtractionJobSummary[];
+  extractionPipelineInspection: ExtractionPipelineInspection | null;
   extractionPipelineLoading: boolean;
   onArchiveDocument: (document: DocumentSummary) => void;
   onBulkReviewVersion: (versionId: string, scope?: "all" | "atomic", reviewStatus?: "reviewed" | "approved", force?: boolean) => void;
@@ -1187,7 +1189,7 @@ export function DocumentsWorkspace({
           </TabsContent>
 
           <TabsContent className="mt-0 space-y-4" value="chunks">
-            <ExtractionPipelineTrace jobs={extractionPipeline} loading={extractionPipelineLoading} />
+            <ExtractionPipelineTrace inspection={extractionPipelineInspection} jobs={extractionPipeline} loading={extractionPipelineLoading} />
 
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">

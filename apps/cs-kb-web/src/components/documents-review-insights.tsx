@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, GitBranch, Loader2, Search, TriangleAlert } from "lucide-react";
+import { CheckCircle2, Copy, FileJson, GitBranch, Loader2, Search, Terminal, TriangleAlert } from "lucide-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { DocumentSummary, ExtractionJobSummary, ExtractionStageOutput, ExtractionUnit, VersionSummary } from "@/types";
+import type { DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionStageOutput, VersionSummary, ExtractionUnit } from "@/types";
 
 type ReadinessCheckLike = {
   detail: string;
@@ -48,62 +49,194 @@ export type DraftPreviewResult = {
   unit: ExtractionUnit;
 };
 
-const PIPELINE_STAGES = ["map", "classify", "reduce", "ai_structure", "plan", "refine", "verify", "commit"];
+const PIPELINE_STAGES = ["map", "classify", "workflow_semantic_refine", "ai_structure", "plan", "reduce", "refine", "verify", "commit"];
 
-export function ExtractionPipelineTrace({ jobs, loading }: { jobs: ExtractionJobSummary[]; loading: boolean }) {
+export function ExtractionPipelineTrace({ inspection, jobs, loading }: { inspection: ExtractionPipelineInspection | null; jobs: ExtractionJobSummary[]; loading: boolean }) {
   const job = jobs[0];
-  const outputs = job?.outputs ?? [];
-  const outputByStage = PIPELINE_STAGES.map((stage) => ({
-    outputs: outputs.filter((output) => output.stage === stage),
-    stage,
-  }));
+  const outputs = inspection?.artifacts ?? job?.outputs ?? [];
+  const [selectedArtifactId, setSelectedArtifactId] = useState("");
+  const selectedArtifact = outputs.find((output) => output.id === selectedArtifactId) ?? outputs[0] ?? null;
+  const stageSummaries = inspection?.stage_summary?.length
+    ? inspection.stage_summary
+    : PIPELINE_STAGES.map((stage) => {
+        const stageOutputs = outputs.filter((output) => output.stage === stage);
+        return {
+          artifact_types: stageOutputs.map((output) => output.artifact_type),
+          errors: stageOutputs.flatMap((output) => (output.error ? [output.error] : [])),
+          output_count: stageOutputs.length,
+          stage,
+          statuses: stageOutputs.map((output) => output.status),
+          summary: stageOutputs[0] ? artifactSummary(stageOutputs[0]) : "No artifact captured for this stage.",
+          warnings: [],
+        };
+      });
+  const issueSummary = inspection?.issue_summary;
+  const markdownEndpoint = inspection?.version_id
+    ? `/api/v1/ai/versions/${inspection.version_id}/extraction-pipeline/inspection.md`
+    : "";
+
+  useEffect(() => {
+    if (!outputs.length) {
+      setSelectedArtifactId("");
+      return;
+    }
+    if (!outputs.some((output) => output.id === selectedArtifactId)) {
+      setSelectedArtifactId(outputs[0].id);
+    }
+  }, [outputs, selectedArtifactId]);
+
+  function copyInspectionReport() {
+    if (!inspection?.summary_markdown) {
+      return;
+    }
+    void navigator.clipboard?.writeText(inspection.summary_markdown);
+  }
+
+  function copySelectedArtifact() {
+    if (!selectedArtifact) {
+      return;
+    }
+    void navigator.clipboard?.writeText(JSON.stringify(selectedArtifact, null, 2));
+  }
+
   return (
     <Card className="rounded-xl">
       <CardHeader className="border-b pb-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <CardTitle>Extraction pipeline trace</CardTitle>
-            <CardDescription>MAP/CLASSIFY/REDUCE/PLAN/REFINE/VERIFY artifacts for debugging this draft without exposing draft content to agent search.</CardDescription>
+            <CardTitle>Extraction inspector</CardTitle>
+            <CardDescription>Stage trace, artifact payloads, and copyable API report for debugging one document version.</CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
             {loading ? <Badge variant="outline"><Loader2 data-icon="inline-start" className="size-3 animate-spin" /> Loading</Badge> : null}
-            {job ? <Badge variant={job.status === "failed" ? "destructive" : job.status === "degraded" ? "outline" : "secondary"}>{job.status}</Badge> : <Badge variant="outline">no trace</Badge>}
-            {job?.current_stage ? <Badge variant="outline">{job.current_stage}</Badge> : null}
+            {inspection || job ? <Badge variant={(inspection?.status ?? job?.status) === "failed" ? "destructive" : (inspection?.status ?? job?.status) === "degraded" ? "outline" : "secondary"}>{inspection?.status ?? job?.status}</Badge> : <Badge variant="outline">no trace</Badge>}
+            {inspection?.current_stage || job?.current_stage ? <Badge variant="outline">{inspection?.current_stage ?? job?.current_stage}</Badge> : null}
+            {inspection?.job_id ? <Badge variant="outline">{inspection.job_id.slice(0, 8)}</Badge> : null}
           </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-4 pt-4">
-        {!job ? (
+        {!job && !inspection ? (
           <EmptyPanel icon={GitBranch} title="No pipeline trace yet" text="New uploads will persist source blocks, classification, reconcile suggestions, structuring plan, and verification reports here." compact />
         ) : (
           <>
-            <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">
-              {outputByStage.map(({ stage, outputs: stageOutputs }) => {
-                const failed = stageOutputs.some((output) => output.status === "failed");
-                const degraded = stageOutputs.some((output) => output.status === "degraded");
+            <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.45fr)]">
+              <div className="rounded-xl border bg-muted/15 p-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <Terminal className="size-4" />
+                    API report
+                  </div>
+                  <Button disabled={!inspection?.summary_markdown} onClick={copyInspectionReport} size="sm" type="button" variant="outline">
+                    <Copy data-icon="inline-start" className="size-3.5" />
+                    Copy report
+                  </Button>
+                </div>
+                <p className="break-all font-mono text-xs leading-5 text-muted-foreground">
+                  {markdownEndpoint || "Select a version with a persisted extraction job."}
+                </p>
+                {inspection?.summary_markdown ? (
+                  <pre className="mt-3 max-h-44 overflow-auto rounded-lg border bg-background p-3 text-xs leading-5 text-muted-foreground">
+                    {inspection.summary_markdown}
+                  </pre>
+                ) : null}
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+                <InspectorMetric label="Failed outputs" tone={issueSummary?.failed_output_count ? "danger" : "normal"} value={String(issueSummary?.failed_output_count ?? 0)} />
+                <InspectorMetric label="Degraded outputs" tone={issueSummary?.degraded_output_count ? "warning" : "normal"} value={String(issueSummary?.degraded_output_count ?? 0)} />
+                <InspectorMetric label="Warnings" tone={issueSummary?.warning_count ? "warning" : "normal"} value={String(issueSummary?.warning_count ?? 0)} />
+                <InspectorMetric label="Coverage" tone={(issueSummary?.coverage_score ?? 100) < 70 ? "warning" : "normal"} value={issueSummary?.coverage_score == null ? "-" : `${issueSummary.coverage_score}/100`} />
+              </div>
+            </div>
+
+            {issueSummary?.hard_blockers?.length ? (
+              <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-destructive">Publish blockers</p>
+                  <Badge variant="destructive">{issueSummary.hard_blockers.length}</Badge>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-destructive/90">{issueSummary.hard_blockers.join(", ")}</p>
+              </div>
+            ) : null}
+
+            <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-5">
+              {stageSummaries.map((stageSummary) => {
+                const failed = stageSummary.statuses.includes("failed");
+                const degraded = stageSummary.statuses.includes("degraded");
                 return (
-                  <div className="rounded-lg border bg-muted/10 p-3" key={stage}>
+                  <div className="rounded-lg border bg-muted/10 p-3" key={stageSummary.stage}>
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{stage.replace(/_/g, " ")}</span>
-                      <Badge variant={failed ? "destructive" : degraded ? "outline" : stageOutputs.length ? "secondary" : "outline"}>
-                        {stageOutputs.length || "none"}
+                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{stageSummary.stage.replace(/_/g, " ")}</span>
+                      <Badge variant={failed ? "destructive" : degraded ? "outline" : stageSummary.output_count ? "secondary" : "outline"}>
+                        {stageSummary.output_count || "none"}
                       </Badge>
                     </div>
-                    {stageOutputs[0] ? <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{artifactSummary(stageOutputs[0])}</p> : null}
+                    <p className="mt-2 line-clamp-3 text-xs leading-5 text-muted-foreground">{stageSummary.summary}</p>
                   </div>
                 );
               })}
             </div>
 
-            <div className="grid gap-3 xl:grid-cols-2">
-              {outputs.map((output) => (
-                <PipelineArtifactCard key={output.id} output={output} />
-              ))}
+            <div className="grid gap-3 xl:grid-cols-[minmax(18rem,0.45fr)_minmax(0,1fr)]">
+              <div className="rounded-xl border bg-muted/10 p-2">
+                <div className="mb-2 flex items-center gap-2 px-2 py-1 text-xs font-semibold text-muted-foreground">
+                  <FileJson className="size-4" />
+                  Artifacts
+                </div>
+                <div className="grid gap-1">
+                  {outputs.map((output) => (
+                    <button
+                      className={`rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted/35 ${selectedArtifact?.id === output.id ? "bg-muted/45" : "bg-background"}`}
+                      key={output.id}
+                      onClick={() => setSelectedArtifactId(output.id)}
+                      type="button"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate text-xs font-semibold">{output.artifact_type.replace(/_/g, " ")}</span>
+                        <Badge variant={output.status === "failed" ? "destructive" : output.status === "degraded" ? "outline" : "secondary"}>{output.status}</Badge>
+                      </div>
+                      <p className="mt-1 truncate text-[11px] text-muted-foreground">{output.stage.replace(/_/g, " ")}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {selectedArtifact ? (
+                <div className="space-y-3">
+                  <PipelineArtifactCard output={selectedArtifact} />
+                  <div className="rounded-xl border bg-muted/10 p-3">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h3 className="text-sm font-semibold">Raw artifact JSON</h3>
+                        <p className="mt-1 text-xs text-muted-foreground">Exact payload persisted by the extraction pipeline.</p>
+                      </div>
+                      <Button onClick={copySelectedArtifact} size="sm" type="button" variant="outline">
+                        <Copy data-icon="inline-start" className="size-3.5" />
+                        Copy JSON
+                      </Button>
+                    </div>
+                    <pre className="max-h-[34rem] overflow-auto rounded-lg border bg-background p-3 text-xs leading-5 text-muted-foreground">
+                      {JSON.stringify(selectedArtifact, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </>
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function InspectorMetric({ label, tone, value }: { label: string; tone: "danger" | "normal" | "warning"; value: string }) {
+  return (
+    <div className="rounded-xl border bg-muted/15 p-3">
+      <div className="text-xs font-medium text-muted-foreground">{label}</div>
+      <div className={tone === "danger" ? "mt-1 text-lg font-semibold text-destructive" : tone === "warning" ? "mt-1 text-lg font-semibold text-amber-700" : "mt-1 text-lg font-semibold"}>
+        {value}
+      </div>
+    </div>
   );
 }
 

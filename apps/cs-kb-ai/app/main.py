@@ -24,6 +24,7 @@ from app.schemas import (
     DocumentSummary,
     DocumentVersionResponse,
     ExtractionJobSummary,
+    ExtractionPipelineInspection,
     ExtractionUnit,
     ExtractionUnitCreateRequest,
     ExtractionUnitUpdateRequest,
@@ -159,6 +160,150 @@ def qdrant_health() -> dict[str, Any]:
             "latency_ms": int((time.perf_counter() - start) * 1000),
             "detail": exc.__class__.__name__,
         }
+
+
+PIPELINE_INSPECTION_STAGE_ORDER = [
+    "map",
+    "classify",
+    "workflow_semantic_refine",
+    "ai_structure",
+    "plan",
+    "reduce",
+    "refine",
+    "verify",
+    "commit",
+]
+
+
+def build_extraction_pipeline_inspection(job: dict[str, Any]) -> dict[str, Any]:
+    outputs = [dict(output) for output in job.get("outputs", []) if isinstance(output, dict)]
+    stage_names = [
+        *PIPELINE_INSPECTION_STAGE_ORDER,
+        *[
+            str(output.get("stage") or "")
+            for output in outputs
+            if output.get("stage") and str(output.get("stage")) not in PIPELINE_INSPECTION_STAGE_ORDER
+        ],
+    ]
+    stage_summary = [
+        stage_inspection_summary(stage, [output for output in outputs if output.get("stage") == stage])
+        for stage in dict.fromkeys(stage_names)
+    ]
+    issue_summary = pipeline_issue_summary(outputs)
+    inspection = {
+        "version_id": str(job.get("version_id") or ""),
+        "document_id": str(job.get("document_id") or ""),
+        "job_id": str(job.get("id") or ""),
+        "status": str(job.get("status") or "unknown"),
+        "current_stage": str(job.get("current_stage") or ""),
+        "source_type": str(job.get("source_type") or ""),
+        "document_type": str(job.get("document_type") or "unknown"),
+        "risk_level": str(job.get("risk_level") or ""),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "stage_order": list(dict.fromkeys(stage_names)),
+        "stage_summary": stage_summary,
+        "issue_summary": issue_summary,
+        "artifacts": outputs,
+    }
+    inspection["summary_markdown"] = pipeline_inspection_markdown(inspection)
+    return inspection
+
+
+def stage_inspection_summary(stage: str, outputs: list[dict[str, Any]]) -> dict[str, Any]:
+    warnings: list[str] = []
+    for output in outputs:
+        warnings.extend(payload_warning_strings(output.get("payload")))
+    return {
+        "stage": stage,
+        "output_count": len(outputs),
+        "statuses": list(dict.fromkeys(str(output.get("status") or "completed") for output in outputs)),
+        "artifact_types": list(dict.fromkeys(str(output.get("artifact_type") or "") for output in outputs if output.get("artifact_type"))),
+        "errors": [str(output.get("error")) for output in outputs if output.get("error")],
+        "warnings": warnings[:20],
+        "summary": stage_summary_text(stage, outputs, warnings),
+    }
+
+
+def pipeline_issue_summary(outputs: list[dict[str, Any]]) -> dict[str, Any]:
+    hard_blockers: list[str] = []
+    coverage_score: int | None = None
+    warnings: list[str] = []
+    for output in outputs:
+        payload = output.get("payload") if isinstance(output.get("payload"), dict) else {}
+        warnings.extend(payload_warning_strings(payload))
+        if output.get("artifact_type") in {"verification_report", "publish_readiness_report"}:
+            hard_blockers.extend(str(item) for item in payload.get("hard_blockers", []) if item)
+            if payload.get("coverage_score") is not None:
+                try:
+                    coverage_score = int(payload.get("coverage_score"))
+                except (TypeError, ValueError):
+                    coverage_score = None
+    return {
+        "failed_output_count": sum(1 for output in outputs if output.get("status") == "failed"),
+        "degraded_output_count": sum(1 for output in outputs if output.get("status") == "degraded"),
+        "warning_count": len(list(dict.fromkeys(warnings))),
+        "hard_blockers": list(dict.fromkeys(hard_blockers)),
+        "coverage_score": coverage_score,
+    }
+
+
+def payload_warning_strings(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    warnings = payload.get("warnings")
+    if not isinstance(warnings, list):
+        return []
+    return [str(warning) for warning in warnings if warning]
+
+
+def stage_summary_text(stage: str, outputs: list[dict[str, Any]], warnings: list[str]) -> str:
+    if not outputs:
+        return "No artifact captured for this stage."
+    failed = sum(1 for output in outputs if output.get("status") == "failed")
+    degraded = sum(1 for output in outputs if output.get("status") == "degraded")
+    artifacts = ", ".join(dict.fromkeys(str(output.get("artifact_type") or "artifact") for output in outputs))
+    status = f"{failed} failed" if failed else f"{degraded} degraded" if degraded else "completed"
+    warning_suffix = f", {len(warnings)} warning(s)" if warnings else ""
+    return f"{stage}: {len(outputs)} artifact(s), {status}{warning_suffix}. {artifacts}"
+
+
+def pipeline_inspection_markdown(inspection: dict[str, Any]) -> str:
+    issue_summary = inspection.get("issue_summary") if isinstance(inspection.get("issue_summary"), dict) else {}
+    lines = [
+        f"# Extraction pipeline inspection",
+        "",
+        f"- Version: `{inspection.get('version_id', '')}`",
+        f"- Document: `{inspection.get('document_id', '')}`",
+        f"- Job: `{inspection.get('job_id', '')}`",
+        f"- Status: `{inspection.get('status', 'unknown')}` at `{inspection.get('current_stage', '')}`",
+        f"- Type: `{inspection.get('document_type', 'unknown')}` / `{inspection.get('source_type', '')}`",
+        f"- Risk: `{inspection.get('risk_level', '')}`",
+        "",
+        "## Issues",
+        "",
+        f"- Failed outputs: {issue_summary.get('failed_output_count', 0)}",
+        f"- Degraded outputs: {issue_summary.get('degraded_output_count', 0)}",
+        f"- Warnings: {issue_summary.get('warning_count', 0)}",
+        f"- Coverage score: {issue_summary.get('coverage_score') if issue_summary.get('coverage_score') is not None else 'n/a'}",
+        f"- Hard blockers: {', '.join(issue_summary.get('hard_blockers') or []) or 'none'}",
+        "",
+        "## Stages",
+        "",
+    ]
+    for stage in inspection.get("stage_summary", []):
+        if not isinstance(stage, dict):
+            continue
+        lines.append(f"- `{stage.get('stage')}`: {stage.get('summary')}")
+    lines.extend(["", "## Artifacts", ""])
+    for artifact in inspection.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        label = f"{artifact.get('stage')} / {artifact.get('artifact_type')}"
+        status = artifact.get("status") or "completed"
+        error = str(artifact.get("error") or "")
+        lines.append(f"- `{label}`: `{status}`{f' ({error})' if error else ''}")
+    return "\n".join(lines).strip() + "\n"
 
 
 @app.post("/ai/v1/documents/upload", response_model=DocumentVersionResponse)
@@ -522,6 +667,23 @@ def list_document_extraction_units(document_id: str, version_id: str = "") -> li
 @app.get("/ai/v1/versions/{version_id}/extraction-pipeline", response_model=list[ExtractionJobSummary])
 def list_version_extraction_pipeline(version_id: str) -> list[ExtractionJobSummary]:
     return [ExtractionJobSummary(**row) for row in repository.list_extraction_pipeline(version_id)]
+
+
+@app.get("/ai/v1/versions/{version_id}/extraction-pipeline/inspection", response_model=ExtractionPipelineInspection)
+def inspect_version_extraction_pipeline(version_id: str) -> ExtractionPipelineInspection:
+    jobs = repository.list_extraction_pipeline(version_id)
+    if not jobs:
+        raise HTTPException(status_code=404, detail="extraction_pipeline_not_found")
+    return ExtractionPipelineInspection(**build_extraction_pipeline_inspection(jobs[0]))
+
+
+@app.get("/ai/v1/versions/{version_id}/extraction-pipeline/inspection.md")
+def inspect_version_extraction_pipeline_markdown(version_id: str) -> Response:
+    jobs = repository.list_extraction_pipeline(version_id)
+    if not jobs:
+        raise HTTPException(status_code=404, detail="extraction_pipeline_not_found")
+    inspection = build_extraction_pipeline_inspection(jobs[0])
+    return Response(content=inspection["summary_markdown"], media_type="text/plain; charset=utf-8")
 
 
 @app.patch("/ai/v1/extraction-units/{unit_id}", response_model=ExtractionUnit)

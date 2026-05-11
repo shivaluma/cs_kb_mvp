@@ -737,6 +737,42 @@ class ExtractionJobSummary(BaseModel):
     outputs: list[ExtractionStageOutput] = Field(default_factory=list)
 
 
+class ExtractionStageInspection(BaseModel):
+    stage: str
+    output_count: int = 0
+    statuses: list[str] = Field(default_factory=list)
+    artifact_types: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class ExtractionPipelineIssueSummary(BaseModel):
+    failed_output_count: int = 0
+    degraded_output_count: int = 0
+    warning_count: int = 0
+    hard_blockers: list[str] = Field(default_factory=list)
+    coverage_score: int | None = None
+
+
+class ExtractionPipelineInspection(BaseModel):
+    version_id: str
+    document_id: str = ""
+    job_id: str = ""
+    status: str = "unknown"
+    current_stage: str = ""
+    source_type: str = ""
+    document_type: str = "unknown"
+    risk_level: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    stage_order: list[str] = Field(default_factory=list)
+    stage_summary: list[ExtractionStageInspection] = Field(default_factory=list)
+    issue_summary: ExtractionPipelineIssueSummary = Field(default_factory=ExtractionPipelineIssueSummary)
+    artifacts: list[ExtractionStageOutput] = Field(default_factory=list)
+    summary_markdown: str = ""
+
+
 class ExtractionUnit(BaseModel):
     unit_id: str
     document_id: str

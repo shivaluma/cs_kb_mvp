@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import type {
   DocumentChunk,
+  ExtractionPipelineInspection,
   ExtractionJobSummary,
   DocumentMetadataPreview,
   DocumentSummary,
@@ -59,6 +60,15 @@ export function useExtractionPipeline(versionId?: string) {
     enabled: Boolean(versionId),
     queryKey: queryKeys.extractionPipeline(versionId ?? ""),
     queryFn: () => apiGet<ExtractionJobSummary[]>(`/api/v1/ai/versions/${versionId}/extraction-pipeline`),
+  });
+}
+
+export function useExtractionPipelineInspection(versionId?: string) {
+  return useQuery({
+    enabled: Boolean(versionId),
+    queryKey: queryKeys.extractionPipelineInspection(versionId ?? ""),
+    queryFn: () => apiGet<ExtractionPipelineInspection>(`/api/v1/ai/versions/${versionId}/extraction-pipeline/inspection`),
+    retry: false,
   });
 }
 

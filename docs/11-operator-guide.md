@@ -98,6 +98,7 @@ Check:
 - `Version` should start as `draft`.
 - `Extraction review` should show extracted units.
 - `Indexed chunks` should show raw retrieval chunks for debugging.
+- `Debug` → `Extraction inspector` should show the persisted pipeline report, stage timeline, artifact list, and raw artifact JSON.
 
 For each extraction unit:
 
@@ -107,6 +108,14 @@ For each extraction unit:
 - Published versions are read-only by design.
 
 For large Excel files, batch review can be done through API by updating every extraction unit to `approved`, then publishing from UI.
+
+To inspect the same pipeline from a terminal:
+
+```bash
+python apps/cs-kb-ai/scripts/inspect_extraction_pipeline.py <version_id> --base-url http://localhost:8000
+```
+
+Use `--json` when you need the full normalized inspection payload.
 
 ## 5. Publish
 

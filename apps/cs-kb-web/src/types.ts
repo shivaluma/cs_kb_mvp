@@ -306,6 +306,40 @@ export type ExtractionJobSummary = {
   outputs: ExtractionStageOutput[];
 };
 
+export type ExtractionStageInspection = {
+  stage: string;
+  output_count: number;
+  statuses: string[];
+  artifact_types: string[];
+  errors: string[];
+  warnings: string[];
+  summary: string;
+};
+
+export type ExtractionPipelineInspection = {
+  version_id: string;
+  document_id: string;
+  job_id: string;
+  status: string;
+  current_stage: string;
+  source_type: string;
+  document_type: string;
+  risk_level: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  stage_order: string[];
+  stage_summary: ExtractionStageInspection[];
+  issue_summary: {
+    failed_output_count: number;
+    degraded_output_count: number;
+    warning_count: number;
+    hard_blockers: string[];
+    coverage_score?: number | null;
+  };
+  artifacts: ExtractionStageOutput[];
+  summary_markdown: string;
+};
+
 export type VersionRawText = {
   version_id: string;
   document_id: string;

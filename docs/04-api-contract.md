@@ -73,6 +73,9 @@ AI service internal base path: `/ai/v1`
 | `POST` | `/documents/upload` | Upload messy source files, classify, extract draft units, chunk, embed, and create a draft/published version |
 | `GET` | `/documents/{id}/versions` | List document versions |
 | `GET` | `/documents/{id}/extraction-units` | List classified extraction units for curation review. Workflow PDFs can produce `decision_point`, `workflow_step`, `macro_script`, `operational_note`, and `security_note` units |
+| `GET` | `/versions/{id}/extraction-pipeline` | List persisted extraction jobs and stage artifacts for a document version |
+| `GET` | `/versions/{id}/extraction-pipeline/inspection` | Return normalized pipeline inspection JSON with stage summaries, issues, artifacts, and a readable report |
+| `GET` | `/versions/{id}/extraction-pipeline/inspection.md` | Return the same inspection report as plain text for terminal/debug use |
 | `PATCH` | `/extraction-units/{id}` | Update a draft extraction unit title, content, unit type, confidence, review status, metadata, and regenerated embedding |
 | `POST` | `/documents/{id}/archive` | Archive document and hide from retrieval |
 | `POST` | `/versions/{id}/publish` | Publish version and archive previous published version |
