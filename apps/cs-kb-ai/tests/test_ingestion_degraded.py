@@ -17,6 +17,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.original_workflow_v2_extractor = ingestion.extract_workflow_units_v2
         self.original_renderer = ingestion.render_pdf_pages_as_data_urls
         self.original_refiner = ingestion.refine_extracted_units
+        self.original_source_evidence_formatter = ingestion.format_source_evidence_view
 
     def tearDown(self) -> None:
         ingestion.extract_rule_table_units = self.original_rule_extractor
@@ -24,6 +25,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         ingestion.extract_workflow_units_v2 = self.original_workflow_v2_extractor
         ingestion.render_pdf_pages_as_data_urls = self.original_renderer
         ingestion.refine_extracted_units = self.original_refiner
+        ingestion.format_source_evidence_view = self.original_source_evidence_formatter
 
     def test_docx_policy_rule_openrouter_disabled_creates_degraded_units(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_disabled"])
@@ -143,6 +145,58 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(ai_breakdown["payload"]["attempt_count"], 1)
         self.assertEqual(ai_breakdown["payload"]["selected_flow"], "rule_table")
         self.assertEqual(ai_breakdown["payload"]["attempts"][0]["raw_response"]["text"], "{\"units\":[]}")
+
+    def test_source_evidence_view_artifact_is_persisted_for_review_ui(self) -> None:
+        def fake_source_formatter(filename: str, raw_text: str, document_type: str, source_type: str):
+            openrouter.record_ai_breakdown(
+                {
+                    "flow": "source_evidence_view",
+                    "model": "test/model",
+                    "status": "completed",
+                    "raw_response": {"text": "{\"markdown\":\"# SOP\"}", "chars": 19, "truncated": False},
+                    "parsed_response": {"json": "{\"markdown\":\"# SOP\"}", "chars": 19, "truncated": False},
+                    "warnings": [],
+                }
+            )
+            return (
+                {
+                    "title": filename.rsplit(".", 1)[0],
+                    "format": "markdown",
+                    "formatter": "ai_source_evidence_view",
+                    "model": "test/model",
+                    "markdown": "# SOP\n\n- Dòng nguồn đã được format.",
+                    "raw_text_chars": len(raw_text),
+                    "sections": [{"title": "SOP", "source_hint": "paragraph", "confidence": 0.8}],
+                    "warnings": [],
+                    "coverage_report": {"raw_text_chars": len(raw_text), "formatted_chars": 32},
+                },
+                ["openrouter_source_evidence_formatter_used"],
+                "",
+            )
+
+        ingestion.format_source_evidence_view = fake_source_formatter
+        ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
+
+        _raw, _digest, _chunks, _warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định xác minh địa chỉ email.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=docx_email_verification_bytes(),
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        source_view = next(
+            artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_evidence_view"
+        )
+        breakdown = next(
+            artifact
+            for artifact in enrichment["pipeline_artifacts"]
+            if artifact["artifact_type"] == "source_evidence_ai_breakdown"
+        )
+        self.assertEqual(source_view["stage"], "map")
+        self.assertEqual(source_view["status"], "completed")
+        self.assertEqual(source_view["payload"]["format"], "markdown")
+        self.assertIn("Dòng nguồn đã được format", source_view["payload"]["markdown"])
+        self.assertEqual(breakdown["payload"]["selected_flow"], "source_evidence_view")
 
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])

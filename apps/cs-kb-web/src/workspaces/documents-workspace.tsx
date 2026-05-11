@@ -34,7 +34,7 @@ type WorkflowGraphMetadata = {
 type WorkflowEdgeMetadata = NonNullable<WorkflowGraphMetadata["edges"]>[number];
 type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
 type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
-type DocumentStep = "gate" | "workflow" | "sop" | "publish" | "review" | "chunks";
+type DocumentStep = "view" | "gate" | "workflow" | "sop" | "publish" | "review" | "chunks";
 type ReviewFilter = "needs_review" | "reviewed" | "approved" | "atomic" | "all";
 type RequiredWorkflowUnit = {
   key: string;
@@ -46,6 +46,17 @@ type WorkflowRequirementStatus = RequiredWorkflowUnit & {
   matchingUnits: ExtractionUnit[];
   reviewedUnits: ExtractionUnit[];
   status: "missing" | "needs_review" | "ready";
+};
+type SourceEvidenceViewPayload = {
+  coverage_report?: Record<string, unknown>;
+  formatter?: string;
+  markdown?: string;
+  markdown_truncated?: boolean;
+  model?: string;
+  raw_text_chars?: number;
+  sections?: Array<Record<string, unknown>>;
+  title?: string;
+  warnings?: string[];
 };
 
 export function DocumentsWorkspace({
@@ -135,7 +146,7 @@ export function DocumentsWorkspace({
   const [rawTextStats, setRawTextStats] = useState({ bytes: 0, chars: 0, lines: 0 });
   const [sourceFilter, setSourceFilter] = useState<"active" | "archived" | "all">("active");
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("needs_review");
-  const [documentStep, setDocumentStep] = useState<DocumentStep>("review");
+  const [documentStep, setDocumentStep] = useState<DocumentStep>("view");
   const [requiredUnitFocus, setRequiredUnitFocus] = useState<RequiredWorkflowUnit | null>(null);
   const activeDocuments = documents.filter((document) => document.status === "active");
   const archivedDocuments = documents.filter((document) => document.status === "archived");
@@ -148,6 +159,7 @@ export function DocumentsWorkspace({
   const fullSopUnit = extractionUnits.find((unit) => isDocumentLayer(unit));
   const workflowGraphUnit = extractionUnits.find((unit) => unit.unit_type === "workflow_graph" || Boolean(unit.metadata.workflow_graph));
   const workflowGraph = workflowGraphUnit?.metadata.workflow_graph as WorkflowGraphMetadata | undefined;
+  const sourceEvidenceView = useMemo(() => sourceEvidenceViewPayload(extractionPipeline), [extractionPipeline]);
   const workflowGraphValidationErrors = workflowGraph?.validation_errors ?? workflowGraphUnit?.metadata.graph_validation_errors ?? [];
   const workflowGraphUncertainEdges = workflowGraph?.uncertain_edges ?? workflowGraphUnit?.metadata.uncertain_edges ?? [];
   const workflowEdgeReviewSummary = buildWorkflowEdgeReviewSummary(workflowGraph, workflowGraphUnit);
@@ -714,7 +726,8 @@ export function DocumentsWorkspace({
 
         <Tabs className="space-y-4" onValueChange={(value) => setDocumentStep(value as DocumentStep)} value={documentStep}>
           <div className="sticky top-4 z-20 rounded-xl border bg-background/95 p-2 shadow-sm backdrop-blur">
-            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-3 xl:grid-cols-6">
+            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-4 xl:grid-cols-7">
+              <TabsTrigger value="view">0. View</TabsTrigger>
               <TabsTrigger className="gap-2" value="review">
                 1. Review
                 {pendingReviewCount ? (
@@ -742,6 +755,16 @@ export function DocumentsWorkspace({
               <TabsTrigger value="chunks">6. Debug</TabsTrigger>
             </TabsList>
           </div>
+
+          <TabsContent className="mt-0 space-y-4" value="view">
+            <SourceDocumentView
+              loading={versionRawLoading || extractionPipelineLoading}
+              selectedDocument={selectedDocument}
+              selectedVersion={selectedVersion}
+              sourceEvidenceView={sourceEvidenceView}
+              versionRaw={versionRaw}
+            />
+          </TabsContent>
 
           <TabsContent className="mt-0 space-y-4" value="review">
           <Card className="rounded-xl" ref={reviewSectionRef}>
@@ -777,6 +800,7 @@ export function DocumentsWorkspace({
                     loading={versionRawLoading}
                     selectedDocument={selectedDocument}
                     selectedVersion={selectedVersion}
+                    sourceEvidenceView={sourceEvidenceView}
                     versionRaw={versionRaw}
                   />
                   <div className="min-w-0">
@@ -1483,25 +1507,123 @@ function WorkflowRequirementsPanel({
   );
 }
 
+function SourceDocumentView({
+  loading,
+  selectedDocument,
+  selectedVersion,
+  sourceEvidenceView,
+  versionRaw,
+}: {
+  loading: boolean;
+  selectedDocument: DocumentSummary | null;
+  selectedVersion?: VersionSummary;
+  sourceEvidenceView: SourceEvidenceViewPayload | null;
+  versionRaw: VersionRawText | null;
+}) {
+  const [mode, setMode] = useState<"formatted" | "raw">("formatted");
+  const rawText = versionRaw?.raw_text ?? "";
+  const formattedMarkdown = sourceEvidenceView?.markdown?.trim() || formatRawEvidenceMarkdown(rawText);
+  const warnings = sourceEvidenceView?.warnings ?? [];
+  return (
+    <Card className="rounded-xl">
+      <CardHeader className="border-b pb-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary">source view</Badge>
+              {sourceEvidenceView?.formatter ? <Badge variant="outline">AI formatted</Badge> : <Badge variant="outline">local format</Badge>}
+              <Badge variant="outline">v{selectedVersion?.version_number ?? "-"}</Badge>
+            </div>
+            <CardTitle className="mt-3">{sourceEvidenceView?.title || selectedDocument?.source_filename || "Source document"}</CardTitle>
+            <CardDescription>
+              Read the source as a clean SOP view. Switch to raw when auditing extraction fidelity.
+            </CardDescription>
+          </div>
+          <div className="flex rounded-lg border bg-muted/20 p-1">
+            <Button className="h-8 px-3" onClick={() => setMode("formatted")} size="sm" type="button" variant={mode === "formatted" ? "secondary" : "ghost"}>
+              Formatted
+            </Button>
+            <Button className="h-8 px-3" onClick={() => setMode("raw")} size="sm" type="button" variant={mode === "raw" ? "secondary" : "ghost"}>
+              Raw
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="pt-4">
+        {!selectedDocument ? (
+          <EmptyPanel icon={BookOpen} title="Select a document" text="Choose a source file to read it as an SOP." compact />
+        ) : loading ? (
+          <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            Loading source view
+          </div>
+        ) : rawText ? (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+            <div className="min-w-0 rounded-xl border bg-background">
+              {mode === "formatted" ? (
+                <MarkdownEvidence markdown={formattedMarkdown} />
+              ) : (
+                <ScrollArea className="h-[48rem] p-4">
+                  <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-6 text-muted-foreground">{rawText}</pre>
+                </ScrollArea>
+              )}
+            </div>
+            <aside className="space-y-3">
+              <div className="rounded-xl border bg-muted/15 p-3">
+                <div className="text-xs font-semibold">Source health</div>
+                <div className="mt-3 grid gap-2 text-xs text-muted-foreground">
+                  <div className="flex justify-between gap-2"><span>Raw chars</span><span>{rawText.length.toLocaleString()}</span></div>
+                  <div className="flex justify-between gap-2"><span>Formatted chars</span><span>{formattedMarkdown.length.toLocaleString()}</span></div>
+                  <div className="flex justify-between gap-2"><span>Sections</span><span>{sourceEvidenceView?.sections?.length ?? countMarkdownHeadings(formattedMarkdown)}</span></div>
+                  <div className="flex justify-between gap-2"><span>Model</span><span className="text-right">{sourceEvidenceView?.model || "n/a"}</span></div>
+                </div>
+              </div>
+              {warnings.length ? (
+                <div className="rounded-xl border bg-muted/15 p-3">
+                  <div className="text-xs font-semibold">Formatter warnings</div>
+                  <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5 text-muted-foreground">
+                    {warnings.slice(0, 8).map((warning) => <li key={warning}>{warning}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+              {sourceEvidenceView?.markdown_truncated ? (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-5 text-amber-800">
+                  Formatted view was truncated. Use Raw mode for full evidence.
+                </div>
+              ) : null}
+            </aside>
+          </div>
+        ) : (
+          <EmptyPanel icon={FileText} title="No source view loaded" text="Raw extraction is unavailable for this version." compact />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function SourceViewer({
   extractionUnits,
   loading,
   selectedDocument,
   selectedVersion,
+  sourceEvidenceView,
   versionRaw,
 }: {
   extractionUnits: ExtractionUnit[];
   loading: boolean;
   selectedDocument: DocumentSummary;
   selectedVersion?: VersionSummary;
+  sourceEvidenceView: SourceEvidenceViewPayload | null;
   versionRaw: VersionRawText | null;
 }) {
   const [failedPreviewUrl, setFailedPreviewUrl] = useState("");
+  const [mode, setMode] = useState<"formatted" | "raw">("formatted");
   const isPdfSource = selectedDocument.source_filename.toLowerCase().endsWith(".pdf") || selectedDocument.latest_document_type === "workflow_diagram";
   const previewUrl =
     isPdfSource && selectedVersion
       ? `${API_BASE_URL}/api/v1/ai/versions/${selectedVersion.version_id}/source/pages/1`
       : "";
+  const formattedMarkdown = sourceEvidenceView?.markdown?.trim() || formatRawEvidenceMarkdown(versionRaw?.raw_text ?? "");
   const references = extractionUnits
     .map(sourceReference)
     .filter(Boolean)
@@ -1545,6 +1667,14 @@ function SourceViewer({
             ))}
           </div>
         ) : null}
+        <div className="flex rounded-lg border bg-background p-1">
+          <Button className="h-7 flex-1 px-2 text-xs" onClick={() => setMode("formatted")} size="sm" type="button" variant={mode === "formatted" ? "secondary" : "ghost"}>
+            Formatted
+          </Button>
+          <Button className="h-7 flex-1 px-2 text-xs" onClick={() => setMode("raw")} size="sm" type="button" variant={mode === "raw" ? "secondary" : "ghost"}>
+            Raw
+          </Button>
+        </div>
         {loading ? (
           <div className="flex items-center gap-2 rounded-lg border bg-background/60 p-3 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
@@ -1552,7 +1682,11 @@ function SourceViewer({
           </div>
         ) : versionRaw?.raw_text ? (
           <ScrollArea className="h-[40rem] rounded-lg border bg-background p-3">
-            <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5 text-muted-foreground">{versionRaw.raw_text}</pre>
+            {mode === "formatted" ? (
+              <MarkdownEvidence compact markdown={formattedMarkdown} />
+            ) : (
+              <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5 text-muted-foreground">{versionRaw.raw_text}</pre>
+            )}
           </ScrollArea>
         ) : (
           <EmptyPanel icon={FileText} title="No raw source loaded" text="Raw extraction is unavailable for this version." compact />
@@ -1560,6 +1694,125 @@ function SourceViewer({
       </div>
     </aside>
   );
+}
+
+function MarkdownEvidence({ compact = false, markdown }: { compact?: boolean; markdown: string }) {
+  const blocks = markdownTableAwareBlocks(markdown);
+  return (
+    <div className={compact ? "space-y-2 text-xs leading-5" : "space-y-3 p-5 text-sm leading-6"}>
+      {blocks.map((block, index) => {
+        if (block.type === "table") {
+          return (
+            <pre className="overflow-auto rounded-lg border bg-muted/15 p-3 font-mono text-[11px] leading-5 text-muted-foreground" key={`table-${index}`}>
+              {block.lines.join("\n")}
+            </pre>
+          );
+        }
+        return <MarkdownLine compact={compact} key={`line-${index}`} line={block.lines[0] ?? ""} />;
+      })}
+    </div>
+  );
+}
+
+function MarkdownLine({ compact, line }: { compact: boolean; line: string }) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return <div className={compact ? "h-1" : "h-2"} />;
+  }
+  const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
+  if (heading) {
+    const level = heading[1].length;
+    const label = heading[2];
+    const className = level === 1
+      ? "border-b pb-2 text-lg font-semibold tracking-tight"
+      : level === 2
+        ? "pt-2 text-base font-semibold"
+        : "text-sm font-semibold";
+    return <div className={compact ? "text-sm font-semibold" : className}>{inlineMarkdown(label)}</div>;
+  }
+  if (trimmed.startsWith(">")) {
+    return <div className="rounded-lg border bg-muted/20 px-3 py-2 text-muted-foreground">{inlineMarkdown(trimmed.replace(/^>\s?/, ""))}</div>;
+  }
+  const bullet = line.match(/^(\s*)[-*+]\s+(.+)$/);
+  if (bullet) {
+    const indent = Math.min(Math.floor((bullet[1]?.length ?? 0) / 2), 4);
+    return (
+      <div className="flex gap-2 text-muted-foreground" style={{ paddingLeft: `${indent * 0.85}rem` }}>
+        <span className="mt-[0.65em] size-1.5 shrink-0 rounded-full bg-muted-foreground/50" />
+        <span>{inlineMarkdown(bullet[2])}</span>
+      </div>
+    );
+  }
+  const numbered = line.match(/^(\s*)(\d+(?:\.\d+)*\.?)\s+(.+)$/);
+  if (numbered) {
+    const indent = Math.min(Math.floor((numbered[1]?.length ?? 0) / 2), 4);
+    return (
+      <div className="flex gap-2 text-muted-foreground" style={{ paddingLeft: `${indent * 0.85}rem` }}>
+        <span className="shrink-0 font-medium text-foreground">{numbered[2]}</span>
+        <span>{inlineMarkdown(numbered[3])}</span>
+      </div>
+    );
+  }
+  return <p className="text-muted-foreground">{inlineMarkdown(trimmed)}</p>;
+}
+
+function markdownTableAwareBlocks(markdown: string) {
+  const blocks: Array<{ lines: string[]; type: "line" | "table" }> = [];
+  let tableLines: string[] = [];
+  for (const line of markdown.split(/\r?\n/)) {
+    if (line.trim().startsWith("|")) {
+      tableLines.push(line);
+      continue;
+    }
+    if (tableLines.length) {
+      blocks.push({ lines: tableLines, type: "table" });
+      tableLines = [];
+    }
+    blocks.push({ lines: [line], type: "line" });
+  }
+  if (tableLines.length) {
+    blocks.push({ lines: tableLines, type: "table" });
+  }
+  return blocks;
+}
+
+function inlineMarkdown(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong className="font-semibold text-foreground" key={`${part}-${index}`}>{part.slice(2, -2)}</strong>;
+    }
+    return <span key={`${part}-${index}`}>{part}</span>;
+  });
+}
+
+function formatRawEvidenceMarkdown(rawText: string) {
+  if (!rawText.trim()) {
+    return "";
+  }
+  return rawText
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+-\s+/g, "\n- ")
+    .replace(/[ \t]+\+\s+/g, "\n  - ")
+    .replace(/[ \t]+([@#%~]\s*[^:\n]{1,80}:)/g, "\n    - **$1**")
+    .replace(/[ \t]+((?:TH|B)\d+(?:\.\d+)*\.?\s*:?)/g, "\n- **$1**")
+    .replace(/[ \t]+((?:Yes|No|Có|Không|Cung cấp được|Không được|Trùng khớp|Không trùng khớp):)/gi, "\n  - **$1**")
+    .replace(/[ \t]+(\d+(?:\.\d+){1,4}\.?\s+)/g, "\n  - $1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function countMarkdownHeadings(markdown: string) {
+  return markdown.split(/\r?\n/).filter((line) => /^#{1,4}\s+/.test(line)).length;
+}
+
+function sourceEvidenceViewPayload(jobs: ExtractionJobSummary[]): SourceEvidenceViewPayload | null {
+  const output = jobs.flatMap((job) => job.outputs ?? []).find((artifact) => artifact.artifact_type === "source_evidence_view");
+  const payload = output?.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  return payload as SourceEvidenceViewPayload;
 }
 
 function HelpTooltip({ text }: { text: string }) {

@@ -11,6 +11,7 @@ from app.openrouter import (
     extract_workflow_units,
     extract_workflow_units_v2,
     finish_ai_breakdown_capture,
+    format_source_evidence_view,
     refine_extracted_units,
     start_ai_breakdown_capture,
     suggest_document_metadata,
@@ -135,6 +136,39 @@ def prepare_document_version(
                 semantic_refinement,
             )
         )
+
+    if raw_text.strip() and classification.document_type in AI_STRUCTURED_DOCUMENT_TYPES:
+        source_view_token = start_ai_breakdown_capture()
+        try:
+            source_view_payload, source_view_warnings, source_view_error = format_source_evidence_view(
+                filename=filename,
+                raw_text=raw_text,
+                document_type=classification.document_type,
+                source_type=classification.source_type,
+            )
+        finally:
+            source_view_breakdowns = finish_ai_breakdown_capture(source_view_token)
+        warnings.extend(source_view_warnings)
+        if source_view_payload:
+            pipeline_artifacts.append(
+                stage_artifact(
+                    "map",
+                    "source_evidence_view",
+                    source_view_payload,
+                    status="failed" if source_view_error else "completed",
+                    error=source_view_error,
+                )
+            )
+        if source_view_breakdowns:
+            pipeline_artifacts.append(
+                stage_artifact(
+                    "map",
+                    "source_evidence_ai_breakdown",
+                    ai_breakdown_payload(source_view_breakdowns, source_view_warnings, source_view_error),
+                    status="failed" if source_view_error else "completed",
+                    error=source_view_error,
+                )
+            )
 
     source_chunks: list[Any] = []
     ai_error = ""

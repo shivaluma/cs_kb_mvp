@@ -949,6 +949,128 @@ def normalize_rule_table_response_payload(parsed: Any) -> tuple[Any, list[str]]:
     return parsed, warnings
 
 
+def format_source_evidence_view(
+    filename: str,
+    raw_text: str,
+    document_type: str,
+    source_type: str,
+) -> tuple[dict[str, Any], list[str], str]:
+    if not enabled():
+        record_ai_breakdown({"filename": filename, "flow": "source_evidence_view", "status": "skipped", "skip_reason": "openrouter_disabled"})
+        return {}, ["openrouter_source_evidence_formatter_disabled"], "openrouter_disabled"
+    if not raw_text.strip():
+        record_ai_breakdown({"filename": filename, "flow": "source_evidence_view", "status": "skipped", "skip_reason": "raw_text_empty"})
+        return {}, ["source_evidence_formatter_empty_raw_text"], "raw_text_empty"
+
+    formatting_prompt = (
+        "Bạn đang format lại source evidence để CS đọc SOP trực tiếp trên web.\n"
+        "Nguồn CS đưa lên không có template cố định, có thể là Excel nhiều sheet, DOCX, PDF OCR, hoặc text rất lộn xộn.\n\n"
+        "Nhiệm vụ: chuyển raw extraction thành Markdown dễ đọc, có cấu trúc, nhưng vẫn là SOURCE EVIDENCE, không phải policy mới.\n\n"
+        "Quy tắc bắt buộc:\n"
+        "- Không thêm policy, điều kiện, exception, SLA, số điện thoại, macro, hoặc bước xử lý không có trong raw source.\n"
+        "- Không xoá thông tin nghiệp vụ quan trọng. Nếu đoạn quá rối, giữ lại trong mục tương ứng và ghi warning.\n"
+        "- Được phép đổi layout: heading, bullet, numbered list, bảng Markdown, callout Lưu ý, decision tree text.\n"
+        "- Giữ nguyên mã, kênh, SĐT, email, case reason, tên sheet, ngày hiệu lực, Yes/No, TH1/TH2, B1/B2, ký hiệu nghiệp vụ.\n"
+        "- Với Excel nhiều sheet, mỗi sheet nên thành một section. Sheet lịch sử/cũ/chưa áp dụng phải ghi rõ trong heading hoặc note nếu raw source thể hiện.\n"
+        "- Với dòng dạng label:value, render thành label rõ ràng. Với đoạn dài chứa nhiều điều kiện, tách thành list lồng nhau vừa đủ để scan.\n"
+        "- Nếu không chắc cấu trúc, giữ nguyên text trong blockquote hoặc bullet và thêm warning, không tự suy diễn.\n\n"
+        "Trả CHỈ JSON object shape:\n"
+        "{\"title\":\"\",\"markdown\":\"\",\"sections\":[],\"warnings\":[],\"coverage_report\":{}}.\n\n"
+        "markdown phải là Markdown thuần, không HTML. Dùng tiếng Việt tự nhiên, ngắn gọn, dễ đọc cho CS.\n"
+        "sections là danh sách ngắn {title, source_hint, confidence} để UI/debug scan.\n"
+        "coverage_report gồm raw_text_chars, formatted_chars, omitted_or_uncertain_areas, source_preservation_notes.\n\n"
+        f"Filename: {filename}\n"
+        f"Detected document_type: {document_type}\n"
+        f"Detected source_type: {source_type}\n\n"
+        f"Raw extraction:\n{raw_text[:60000]}"
+    )
+    payload = {
+        "model": settings.openrouter_refine_model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": formatting_prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.05,
+    }
+    breakdown = base_ai_breakdown(
+        filename=filename,
+        flow="source_evidence_view",
+        model=str(payload["model"]),
+        prompt=formatting_prompt,
+        raw_text=raw_text,
+        temperature=0.05,
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": settings.public_app_url,
+        "X-Title": "CS SOP Knowledge Base",
+    }
+    content = ""
+    parsed: Any = None
+    output_warnings: list[str] = []
+    error = ""
+    repaired = False
+    status = "failed"
+    try:
+        content = completion_content(payload, headers)
+        parsed, repaired = parse_json_with_repair(content, payload, headers)
+        if not isinstance(parsed, dict):
+            error = "source_evidence_formatter_not_object"
+            output_warnings = [error]
+            return {}, output_warnings, error
+        markdown = str(parsed.get("markdown") or "").strip()
+        if not markdown:
+            error = "source_evidence_formatter_empty_markdown"
+            output_warnings = [error]
+            return {}, output_warnings, error
+        model_warnings = [str(warning) for warning in parsed.get("warnings", []) if warning] if isinstance(parsed.get("warnings"), list) else []
+        coverage_report = parsed.get("coverage_report") if isinstance(parsed.get("coverage_report"), dict) else {}
+        sections = parsed.get("sections") if isinstance(parsed.get("sections"), list) else []
+        output = {
+            "title": str(parsed.get("title") or filename.rsplit(".", 1)[0])[:240],
+            "format": "markdown",
+            "formatter": "ai_source_evidence_view",
+            "model": settings.openrouter_refine_model,
+            "markdown": markdown[:120000],
+            "markdown_truncated": len(markdown) > 120000,
+            "raw_text_chars": len(raw_text),
+            "sections": sections[:80],
+            "warnings": model_warnings,
+            "coverage_report": {
+                **coverage_report,
+                "raw_text_chars": len(raw_text),
+                "formatted_chars": len(markdown),
+            },
+        }
+        output_warnings = ["openrouter_source_evidence_formatter_used", *[f"source_evidence_warning:{warning}" for warning in model_warnings[:10]]]
+        if repaired:
+            output_warnings.append("openrouter_json_repair_used")
+        status = "completed"
+        return output, output_warnings, ""
+    except json.JSONDecodeError as exc:
+        error = f"source_evidence_formatter_invalid_json:{exc.msg}:{exc.pos}"
+        output_warnings = [error]
+        return {}, output_warnings, error
+    except Exception as exc:
+        error = f"source_evidence_formatter_failed:{exc.__class__.__name__}"
+        output_warnings = [error]
+        return {}, output_warnings, error
+    finally:
+        record_ai_breakdown(
+            {
+                **breakdown,
+                "error": error,
+                "parsed_response": json_preview(parsed) if parsed is not None else None,
+                "raw_response": ai_response_preview(content),
+                "repairs": {"json_repair_used": repaired},
+                "status": status,
+                "warnings": output_warnings[:40],
+            }
+        )
+
+
 def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[str, Any]], list[str]]:
     if not enabled():
         record_ai_breakdown({"filename": filename, "flow": "rule_table", "status": "skipped", "skip_reason": "openrouter_disabled"})
