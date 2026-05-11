@@ -281,10 +281,40 @@ def try_ai_structuring(
             chunks = workflow_units_to_chunks(llm_units, raw_text, filename) if llm_units else []
             if not chunks:
                 return [], warnings, f"ai_workflow_structuring_failed:{','.join(llm_warnings)}"
+            quality_error = workflow_structuring_quality_error(chunks, llm_warnings)
+            if quality_error:
+                return [], warnings, f"ai_workflow_structuring_failed:{quality_error}"
             return mark_structured_chunks(chunks), warnings, ""
     except Exception as exc:
         return [], warnings, f"ai_structuring_exception:{sanitize_ai_error(exc)}"
     return [], warnings, ""
+
+
+def workflow_structuring_quality_error(chunks: list[Any], warnings: list[str]) -> str:
+    warning_set = set(warnings)
+    synthesized_required_layers = {
+        "full_sop_missing_from_model_synthesized_for_review",
+        "workflow_graph_missing_from_model_synthesized_for_review",
+    }
+    if warning_set & synthesized_required_layers:
+        return ",".join(sorted(warning_set & synthesized_required_layers))
+
+    unit_types = {str(chunk.metadata.get("unit_type") or chunk.section or "") for chunk in chunks}
+    if "full_sop" not in unit_types:
+        return "missing_full_sop"
+    if "workflow_graph" not in unit_types:
+        return "missing_workflow_graph"
+
+    atomic_count = sum(
+        1
+        for chunk in chunks
+        if str(chunk.metadata.get("retrieval_scope") or "") == "unit"
+        and str(chunk.metadata.get("unit_type") or chunk.section or "") not in {"full_sop", "workflow_graph"}
+    )
+    if atomic_count == 0:
+        return "missing_atomic_workflow_units"
+
+    return ""
 
 
 def build_degraded_draft(

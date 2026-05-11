@@ -185,6 +185,87 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertIsInstance(captured["visual_context"], dict)
         self.assertEqual(captured["visual_context"]["summary"]["shape_candidate_count"], 1)
 
+    def test_workflow_ai_missing_required_layers_is_not_structured_success(self) -> None:
+        def fake_workflow_extractor(_filename: str, _raw_text: str, page_images=None, visual_context=None):
+            return (
+                [
+                    {
+                        "unit_type": "full_sop",
+                        "title": "Quy trình cần review",
+                        "content": "Model không trả full_sop. Backend giữ bản nháp này để CS Ops review lại từ source.",
+                        "confidence": 0.45,
+                        "metadata": {"retrieval_scope": "document"},
+                    },
+                    {
+                        "unit_type": "workflow_graph",
+                        "title": "Quy trình cần review",
+                        "content": "Workflow graph tối thiểu.",
+                        "confidence": 0.25,
+                        "metadata": {"retrieval_scope": "graph", "workflow_graph": {"nodes": [], "edges": []}},
+                    },
+                ],
+                [
+                    "full_sop_missing_from_model_synthesized_for_review",
+                    "workflow_graph_missing_from_model_synthesized_for_review",
+                ],
+            )
+
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        ingestion.extract_workflow_units = fake_workflow_extractor
+        ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], [])
+
+        chunks, warnings, ai_error = ingestion.try_ai_structuring(
+            filename="workflow.pdf",
+            content_type="application/pdf",
+            data=b"%PDF-1.4",
+            raw_text="1. CS tiếp nhận yêu cầu\n2. Nếu đủ thông tin thì xử lý",
+            classification=classification,
+            visual_layout={},
+        )
+
+        self.assertEqual(chunks, [])
+        self.assertIn("full_sop_missing_from_model_synthesized_for_review", warnings)
+        self.assertIn("workflow_graph_missing_from_model_synthesized_for_review", ai_error)
+
+    def test_workflow_ai_without_atomic_units_is_not_structured_success(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+
+        def fake_workflow_extractor(_filename: str, _raw_text: str, page_images=None, visual_context=None):
+            return (
+                [
+                    {
+                        "unit_type": "full_sop",
+                        "title": "Quy trình",
+                        "content": "Nội dung tổng quan.",
+                        "confidence": 0.8,
+                        "metadata": {"retrieval_scope": "document"},
+                    },
+                    {
+                        "unit_type": "workflow_graph",
+                        "title": "Quy trình",
+                        "content": "Graph có node.",
+                        "confidence": 0.75,
+                        "metadata": {"retrieval_scope": "graph", "workflow_graph": {"nodes": [{"id": "start"}], "edges": []}},
+                    },
+                ],
+                [],
+            )
+
+        ingestion.extract_workflow_units = fake_workflow_extractor
+        ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], [])
+        chunks, warnings, ai_error = ingestion.try_ai_structuring(
+            filename="workflow.pdf",
+            content_type="application/pdf",
+            data=b"%PDF-1.4",
+            raw_text="1. CS tiếp nhận yêu cầu",
+            classification=classification,
+            visual_layout={},
+        )
+
+        self.assertEqual(chunks, [])
+        self.assertEqual(warnings, [])
+        self.assertIn("missing_atomic_workflow_units", ai_error)
+
     def test_successful_ai_extraction_creates_structured_draft(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: (
             [
