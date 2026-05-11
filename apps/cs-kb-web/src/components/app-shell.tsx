@@ -1,11 +1,34 @@
 import { Link } from "@tanstack/react-router";
-import { Bell, CircleHelp, Command, Search, ShieldCheck, X } from "lucide-react";
+import { Bell, CircleHelp, Command, Moon, Search, ShieldCheck, Sun, X } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { StatusMessage } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { navItems, type Workspace } from "@/constants";
+
+const themeStorageKey = "cs-kb-theme";
+
+function getInitialDarkMode() {
+	if (typeof window === "undefined") {
+		return false;
+	}
+
+	try {
+		const storedTheme = window.localStorage.getItem(themeStorageKey);
+		if (storedTheme === "dark") {
+			return true;
+		}
+		if (storedTheme === "light") {
+			return false;
+		}
+	} catch {
+		return false;
+	}
+
+	return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
 
 export function AppShell({
 	children,
@@ -38,10 +61,23 @@ export function AppShell({
 }) {
 	const current = navItems.find((item) => item.id === workspace) ?? navItems[0];
 	const [commandOpen, setCommandOpen] = useState(false);
+	const [darkMode, setDarkMode] = useState(getInitialDarkMode);
 	const quickQueries = useMemo(
 		() => ["gmai.com thì làm gì", "lỗi ZT email", "KH không nhận được email", "email sai định dạng khác"],
 		[],
 	);
+
+	useEffect(() => {
+		const root = document.documentElement;
+		root.classList.toggle("dark", darkMode);
+		root.style.colorScheme = darkMode ? "dark" : "light";
+
+		try {
+			window.localStorage.setItem(themeStorageKey, darkMode ? "dark" : "light");
+		} catch {
+			// Ignore storage failures so the switch still updates the current session.
+		}
+	}, [darkMode]);
 
 	useEffect(() => {
 		function onKeyDown(event: KeyboardEvent) {
@@ -125,6 +161,30 @@ export function AppShell({
 								<Badge variant="outline">{documentCount} docs</Badge>
 								<Badge variant="outline">{synonymCount} synonym groups</Badge>
 								<Badge variant="outline">retrieval {latency}</Badge>
+								<div className="flex h-9 items-center gap-2 rounded-full border bg-background px-2.5">
+									<Sun
+										aria-hidden="true"
+										className={
+											darkMode
+												? "size-3.5 text-muted-foreground"
+												: "size-3.5 text-foreground"
+										}
+									/>
+									<Switch
+										aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+										checked={darkMode}
+										onCheckedChange={setDarkMode}
+										size="sm"
+									/>
+									<Moon
+										aria-hidden="true"
+										className={
+											darkMode
+												? "size-3.5 text-foreground"
+												: "size-3.5 text-muted-foreground"
+										}
+									/>
+								</div>
 								<Button
 									onClick={() => setCommandOpen(true)}
 									type="button"
