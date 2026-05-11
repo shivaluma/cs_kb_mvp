@@ -161,6 +161,12 @@ class ExtractedUnitsPayload(BaseModel):
     units: list[ExtractedUnit] = Field(min_length=1)
 
 
+class ExtractionRefinementPayload(BaseModel):
+    units: list[ExtractedUnit] = Field(min_length=1)
+    refinement_report: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class WorkflowNode(BaseModel):
     id: str = Field(min_length=1, max_length=120)
     type: str = Field(min_length=1, max_length=60)

@@ -15,11 +15,13 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.original_rule_extractor = ingestion.extract_rule_table_units
         self.original_workflow_extractor = ingestion.extract_workflow_units
         self.original_renderer = ingestion.render_pdf_pages_as_data_urls
+        self.original_refiner = ingestion.refine_extracted_units
 
     def tearDown(self) -> None:
         ingestion.extract_rule_table_units = self.original_rule_extractor
         ingestion.extract_workflow_units = self.original_workflow_extractor
         ingestion.render_pdf_pages_as_data_urls = self.original_renderer
+        ingestion.refine_extracted_units = self.original_refiner
 
     def test_docx_policy_rule_openrouter_disabled_creates_degraded_units(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_disabled"])
@@ -124,6 +126,34 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         verification = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "verification_report")
         self.assertNotIn("missing_atomic_units", verification["payload"]["hard_blockers"])
         self.assertNotIn("degraded_units_require_manual_curation", verification["payload"]["hard_blockers"])
+
+    def test_llm_refine_can_enrich_structured_units_after_extraction(self) -> None:
+        ingestion.extract_rule_table_units = lambda _filename, _raw_text: self.fail("docx policy table should not call OpenRouter")
+
+        def fake_refiner(**kwargs):
+            refined = []
+            for unit in kwargs["units"]:
+                metadata = dict(unit.get("metadata") or {})
+                metadata["llm_refined"] = True
+                metadata["aliases"] = [*metadata.get("aliases", []), "refined lookup alias"]
+                refined.append({**unit, "metadata": metadata, "source_refs": unit.get("source_refs") or metadata.get("source_refs")})
+            return refined, {"llm_refine_status": "completed", "coverage": {"source": "fake"}}, ["openrouter_refine_used"]
+
+        ingestion.refine_extracted_units = fake_refiner
+
+        _raw, _digest, chunks, warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định làm tròn số tiền.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=docx_policy_table_bytes(),
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        self.assertIn("openrouter_refine_used", warnings)
+        self.assertTrue(all(chunk["metadata"].get("llm_refined") is True for chunk in chunks))
+        self.assertTrue(any("refined lookup alias" in chunk["metadata"].get("aliases", []) for chunk in chunks))
+        refinement = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "refinement_report")
+        self.assertEqual(refinement["payload"]["llm"]["llm_refine_status"], "completed")
+        self.assertIn("post_guard", refinement["payload"]["llm"])
 
     def test_workflow_ai_failure_does_not_create_confirmed_graph(self) -> None:
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()

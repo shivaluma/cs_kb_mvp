@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from app.embedding import embed_text
-from app.openrouter import extract_rule_table_units, extract_workflow_units, suggest_document_metadata
+from app.openrouter import extract_rule_table_units, extract_workflow_units, refine_extracted_units, suggest_document_metadata
 from app.schemas import DocumentMetadata
 from app.text_processing import (
     Chunk,
@@ -169,6 +169,24 @@ def prepare_document_version(
         classification.document_type,
     )
     source_chunks = normalize_units(source_chunks)
+
+    source_chunks, refinement_report, refinement_warnings, refinement_error = refine_units_for_delivery(
+        filename=filename,
+        raw_text=raw_text,
+        classification=classification,
+        blocks=blocks,
+        source_chunks=source_chunks,
+    )
+    warnings.extend(refinement_warnings)
+    pipeline_artifacts.append(
+        stage_artifact(
+            "refine",
+            "refinement_report",
+            refinement_report,
+            status="failed" if refinement_error else "completed",
+            error=refinement_error,
+        )
+    )
 
     extraction_status = "degraded" if any(chunk.metadata.get("extraction_status") == "degraded" for chunk in source_chunks) else "structured"
     lifecycle_status = "degraded_structured_draft" if extraction_status == "degraded" else "structured_draft"
@@ -1016,6 +1034,427 @@ def normalize_units(chunks: list[Any]) -> list[Any]:
         if str(chunk.content or "").strip()
     ]
     return attach_notes_to_nearest_parent(normalized)
+
+
+def refine_units_for_delivery(
+    *,
+    filename: str,
+    raw_text: str,
+    classification: Any,
+    blocks: list[dict[str, Any]],
+    source_chunks: list[Any],
+) -> tuple[list[Any], dict[str, Any], list[str], str]:
+    deterministic_chunks, deterministic_report = deterministic_refine_chunks(source_chunks, classification.document_type)
+    report: dict[str, Any] = {
+        "deterministic": deterministic_report,
+        "llm": {"llm_refine_status": "not_attempted"},
+    }
+    warnings: list[str] = []
+
+    if not should_attempt_llm_refine(classification.document_type, deterministic_chunks):
+        report["llm"] = {"llm_refine_status": "skipped", "reason": "document_type_or_degraded_status"}
+        return deterministic_chunks, report, warnings, ""
+
+    llm_units, llm_report, llm_warnings = refine_extracted_units(
+        filename=filename,
+        raw_text=raw_text,
+        document_type=classification.document_type,
+        source_type=classification.source_type,
+        units=chunks_to_refine_units(deterministic_chunks),
+        source_blocks=blocks,
+    )
+    report["llm"] = llm_report
+    user_visible_warnings = [warning for warning in llm_warnings if warning != "openrouter_refine_disabled"]
+    warnings.extend(user_visible_warnings)
+
+    if not llm_units:
+        return deterministic_chunks, report, warnings, "" if "openrouter_refine_disabled" in llm_warnings else ",".join(llm_warnings[:3])
+
+    llm_chunks = mark_structured_chunks(ai_units_to_chunks(llm_units, filename, classification.source_type, classification.document_type))
+    llm_chunks = normalize_units(llm_chunks)
+    validation_error = refined_chunks_validation_error(deterministic_chunks, llm_chunks, filename, classification.document_type)
+    if validation_error:
+        report["llm"] = {**report.get("llm", {}), "llm_refine_status": "rejected", "reject_reason": validation_error}
+        warnings.append(f"llm_refine_rejected:{validation_error}")
+        return deterministic_chunks, report, warnings, ""
+
+    merged_report = evaluate_refinement_report(llm_chunks, classification.document_type)
+    report["llm"] = {**report.get("llm", {}), "post_guard": merged_report}
+    return llm_chunks, report, warnings, ""
+
+
+def should_attempt_llm_refine(document_type: str, chunks: list[Any]) -> bool:
+    if document_type not in {"policy_rule", "policy_table"}:
+        return False
+    return not any(chunk.metadata.get("extraction_status") == "degraded" for chunk in chunks)
+
+
+def chunks_to_refine_units(chunks: list[Any]) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        units.append(
+            {
+                "unit_type": metadata.get("unit_type") or chunk.section,
+                "title": chunk.heading,
+                "content": chunk.content,
+                "confidence": metadata.get("confidence", 0.72),
+                "metadata": metadata,
+                "source_refs": metadata.get("source_refs") or source_refs_from_chunk(chunk),
+            }
+        )
+    return units
+
+
+def deterministic_refine_chunks(chunks: list[Any], document_type: str) -> tuple[list[Any], dict[str, Any]]:
+    output: list[Any] = []
+    seen: set[str] = set()
+    last_parent_index: int | None = None
+    report: dict[str, Any] = {
+        "status": "completed",
+        "filtered_noise_count": 0,
+        "deduped_count": 0,
+        "repaired_orphan_examples": 0,
+        "normalized_metadata_count": 0,
+        "groups": [],
+        "conflicts": [],
+        "coverage": {},
+    }
+
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        unit_type = str(metadata.get("unit_type") or chunk.section or "text_section")
+        examples = parse_examples_from_text(chunk.content)
+        if examples and is_example_only_chunk(chunk) and last_parent_index is not None:
+            parent = output[last_parent_index]
+            parent_metadata = dict(parent.metadata or {})
+            parent_examples = list(parent_metadata.get("examples") or [])
+            parent_metadata["examples"] = merge_examples(parent_examples, examples)
+            parent_metadata.setdefault("refinement_repairs", []).append("attached_orphan_examples")
+            output[last_parent_index] = replace_chunk_metadata(parent, parent_metadata)
+            report["filtered_noise_count"] += 1
+            report["repaired_orphan_examples"] += 1
+            continue
+
+        key = dedupe_chunk_key(chunk)
+        if key in seen and unit_type != "full_sop":
+            report["deduped_count"] += 1
+            continue
+        seen.add(key)
+
+        refined_metadata = refine_unit_metadata(chunk, metadata)
+        if refined_metadata != metadata:
+            report["normalized_metadata_count"] += 1
+        refined_chunk = replace_chunk_metadata(chunk, refined_metadata)
+        output.append(refined_chunk)
+        if unit_type not in {"full_sop", "candidate_warning", "warning", "operational_note", "security_note", "compliance_note"}:
+            last_parent_index = len(output) - 1
+
+    output, groups = group_related_rules(output)
+    conflicts = detect_refinement_conflicts(output)
+    coverage = evaluate_refinement_report(output, document_type)
+    report.update({"groups": groups, "conflicts": conflicts, "coverage": coverage})
+    output = attach_refinement_summary_to_document_layer(output, report)
+    return reindex_local_chunks(output), report
+
+
+def refine_unit_metadata(chunk: Any, metadata: dict[str, Any]) -> dict[str, Any]:
+    unit_type = str(metadata.get("unit_type") or chunk.section or "text_section")
+    refs = metadata.get("source_refs") or source_refs_from_chunk(chunk)
+    source_ref_quality = source_ref_quality_from_refs(refs)
+    tags = list(metadata.get("tags") or [])
+    aliases = list(metadata.get("aliases") or [])
+    text = " ".join([chunk.heading or "", chunk.content or "", json.dumps(metadata, ensure_ascii=False)])
+
+    if not tags:
+        tags = infer_tags_from_text(text, unit_type)
+    else:
+        tags = list(dict.fromkeys([*tags, *infer_tags_from_text(text, unit_type)]))
+    if not aliases:
+        aliases = infer_aliases_from_unit(chunk, metadata)
+
+    refined = {
+        **metadata,
+        "unit_type": unit_type,
+        "source_refs": refs,
+        "source_ref_quality": metadata.get("source_ref_quality") or source_ref_quality,
+        "source_ref_acknowledged": metadata.get("source_ref_acknowledged", source_ref_quality not in {"page_only", "none"}),
+        "tags": tags,
+        "aliases": aliases,
+    }
+    if metadata.get("structure_type") == "financial_threshold_matrix" or "rounding" in tags:
+        threshold = metadata.get("rounding_threshold") or parse_rounding_threshold(chunk.content)
+        if threshold:
+            refined["rounding_threshold"] = threshold
+            try:
+                refined.setdefault("rounding_directions", rounding_directions(chunk.content, int(threshold)))
+            except (TypeError, ValueError):
+                pass
+    return refined
+
+
+def infer_tags_from_text(text: str, unit_type: str) -> list[str]:
+    normalized = normalized_search_text(text)
+    tags: list[str] = []
+    if unit_type:
+        tags.append(unit_type)
+    if any(term in normalized for term in ["lam tron", "moc", "threshold"]):
+        tags.append("rounding")
+    if any(term in normalized for term in ["hoan", "refund", "boi hoan"]):
+        tags.append("refund")
+    if any(term in normalized for term in ["rut", "withdraw"]):
+        tags.append("withdraw")
+    if any(term in normalized for term in ["tien", "payment", "thanh toan", "pttt"]):
+        tags.append("financial_policy")
+    if "pm04" in normalized:
+        tags.append("pm04")
+    if any(term in normalized for term in ["khong ap dung", "exception", "ngoai le"]):
+        tags.append("no_rounding")
+    return list(dict.fromkeys(tag for tag in tags if tag))
+
+
+def infer_aliases_from_unit(chunk: Any, metadata: dict[str, Any]) -> list[str]:
+    aliases = []
+    service = str(metadata.get("service_label") or metadata.get("service") or "").strip()
+    case_name = str(metadata.get("case_name") or "").strip()
+    threshold = metadata.get("rounding_threshold")
+    title = str(chunk.heading or "").strip()
+    if title:
+        aliases.append(title)
+    if service or case_name:
+        aliases.append(" ".join(part for part in [service, case_name] if part))
+        aliases.append(" ".join(part for part in [service, case_name, "làm tròn"] if part))
+    if threshold:
+        aliases.append(f"mốc {threshold}đ")
+        aliases.append(f"{threshold}đ rounding")
+    if metadata.get("rounding_applies") is False:
+        aliases.append("không áp dụng làm tròn")
+    return [alias for alias in dict.fromkeys(aliases) if alias]
+
+
+def group_related_rules(chunks: list[Any]) -> tuple[list[Any], list[dict[str, Any]]]:
+    grouped: dict[str, list[int]] = {}
+    for index, chunk in enumerate(chunks):
+        metadata = chunk.metadata or {}
+        unit_type = str(metadata.get("unit_type") or chunk.section or "")
+        if unit_type == "full_sop":
+            continue
+        group_key = refinement_group_key(metadata)
+        if group_key:
+            grouped.setdefault(group_key, []).append(index)
+
+    groups: list[dict[str, Any]] = []
+    output = list(chunks)
+    for group_key, indexes in grouped.items():
+        if len(indexes) < 2:
+            continue
+        titles = [output[index].heading for index in indexes if output[index].heading]
+        group_id = f"group_{normalized_key(group_key)[:80] or len(groups) + 1}"
+        groups.append({"group_id": group_id, "group_label": group_key, "unit_count": len(indexes), "titles": titles})
+        for index in indexes:
+            chunk = output[index]
+            metadata = {
+                **chunk.metadata,
+                "rule_group_id": group_id,
+                "group_label": group_key,
+                "related_rule_titles": [title for title in titles if title != chunk.heading],
+            }
+            output[index] = replace_chunk_metadata(chunk, metadata)
+    return output, groups
+
+
+def refinement_group_key(metadata: dict[str, Any]) -> str:
+    if metadata.get("structure_type") == "financial_threshold_matrix":
+        return str(metadata.get("service_label") or metadata.get("service") or "financial_threshold_matrix")
+    if metadata.get("service_label") or metadata.get("service"):
+        return str(metadata.get("service_label") or metadata.get("service"))
+    section_path = metadata.get("section_path")
+    if isinstance(section_path, list) and section_path:
+        return str(section_path[0])
+    return ""
+
+
+def detect_refinement_conflicts(chunks: list[Any]) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    by_case: dict[str, list[Any]] = {}
+    for chunk in chunks:
+        metadata = chunk.metadata or {}
+        unit_type = str(metadata.get("unit_type") or chunk.section or "")
+        if unit_type not in {"policy_rule", "exception_rule", "threshold_rule"}:
+            continue
+        service = str(metadata.get("service") or metadata.get("service_label") or "")
+        case_type = str(metadata.get("case_type") or metadata.get("case_name") or chunk.heading)
+        key = normalized_key(f"{service} {case_type}")
+        by_case.setdefault(key, []).append(chunk)
+
+    for key, items in by_case.items():
+        applies_values = {item.metadata.get("rounding_applies") for item in items if "rounding_applies" in item.metadata}
+        thresholds = {item.metadata.get("rounding_threshold") for item in items if item.metadata.get("rounding_threshold")}
+        if True in applies_values and False in applies_values:
+            conflicts.append({"type": "rounding_apply_conflict", "case_key": key, "titles": [item.heading for item in items]})
+        if len(thresholds) > 1:
+            conflicts.append({"type": "threshold_conflict", "case_key": key, "thresholds": sorted(thresholds), "titles": [item.heading for item in items]})
+    return conflicts
+
+
+def evaluate_refinement_report(chunks: list[Any], document_type: str) -> dict[str, Any]:
+    metadata_items = [chunk.metadata or {} for chunk in chunks]
+    atomic_units = [
+        metadata for metadata in metadata_items
+        if str(metadata.get("retrieval_scope") or "") != "document"
+        and str(metadata.get("unit_type") or "") != "full_sop"
+        and not str(metadata.get("unit_type") or "").startswith("candidate_")
+    ]
+    missing_fields: list[str] = []
+    if not any(metadata.get("unit_type") == "full_sop" for metadata in metadata_items):
+        missing_fields.append("full_sop")
+    if document_type in {"policy_rule", "policy_table", "workflow_diagram"} and not atomic_units:
+        missing_fields.append("atomic_units")
+    if any(metadata.get("unit_type") == "policy_rule" and not metadata.get("source_refs") for metadata in metadata_items):
+        missing_fields.append("policy_rule_source_refs")
+    if any(metadata.get("unit_type") == "policy_rule" and metadata.get("structure_type") == "financial_threshold_matrix" and not metadata.get("rounding_threshold") for metadata in metadata_items):
+        missing_fields.append("rounding_threshold")
+
+    hard_blockers = policy_table_verification_blockers(metadata_items, document_type)
+    quality = aggregate_source_ref_quality(chunks)
+    score = max(0, 100 - len(missing_fields) * 15 - len(hard_blockers) * 20)
+    return {
+        "coverage_score": score,
+        "unit_count": len(chunks),
+        "atomic_unit_count": len(atomic_units),
+        "full_sop_count": sum(1 for metadata in metadata_items if metadata.get("unit_type") == "full_sop"),
+        "policy_rule_count": sum(1 for metadata in metadata_items if metadata.get("unit_type") == "policy_rule"),
+        "exception_rule_count": sum(1 for metadata in metadata_items if metadata.get("unit_type") == "exception_rule"),
+        "source_ref_quality": quality,
+        "missing_fields": list(dict.fromkeys(missing_fields)),
+        "semantic_blockers": hard_blockers,
+    }
+
+
+def refined_chunks_validation_error(original_chunks: list[Any], refined_chunks: list[Any], filename: str, document_type: str) -> str:
+    if not refined_chunks:
+        return "empty_refined_units"
+    original_metadata = [chunk.metadata or {} for chunk in original_chunks]
+    refined_metadata = [chunk.metadata or {} for chunk in refined_chunks]
+    if not any(metadata.get("unit_type") == "full_sop" for metadata in refined_metadata):
+        return "missing_full_sop"
+    original_atomic = [
+        metadata for metadata in original_metadata
+        if metadata.get("unit_type") != "full_sop"
+        and str(metadata.get("retrieval_scope") or "") != "document"
+        and not str(metadata.get("unit_type") or "").startswith("candidate_")
+    ]
+    refined_atomic = [
+        metadata for metadata in refined_metadata
+        if metadata.get("unit_type") != "full_sop"
+        and str(metadata.get("retrieval_scope") or "") != "document"
+        and not str(metadata.get("unit_type") or "").startswith("candidate_")
+    ]
+    if original_atomic and len(refined_atomic) < max(1, len(original_atomic) - duplicate_source_ref_count(original_metadata)):
+        return "atomic_units_dropped"
+    if missing_source_ref_units(refined_chunks, filename):
+        return "missing_source_refs"
+    semantic_blockers = policy_table_verification_blockers(refined_metadata, document_type)
+    blocking = [blocker for blocker in semantic_blockers if blocker in {"missing_policy_rules", "missing_exception_rules", "missing_threshold_metadata", "weak_table_source_refs", "orphan_examples"}]
+    if blocking:
+        return ",".join(blocking)
+    return ""
+
+
+def duplicate_source_ref_count(metadata_items: list[dict[str, Any]]) -> int:
+    seen: set[str] = set()
+    duplicates = 0
+    for metadata in metadata_items:
+        refs = json.dumps(metadata.get("source_refs") or [], sort_keys=True, ensure_ascii=False)
+        if not refs:
+            continue
+        if refs in seen:
+            duplicates += 1
+        seen.add(refs)
+    return duplicates
+
+
+def missing_source_ref_units(chunks: list[Any], filename: str) -> list[str]:
+    missing: list[str] = []
+    lower = filename.lower()
+    for chunk in chunks:
+        metadata = chunk.metadata or {}
+        refs = metadata.get("source_refs") or source_refs_from_chunk(chunk)
+        if not refs:
+            missing.append(chunk.heading)
+            continue
+        if lower.endswith(".docx") and not any(ref.get("paragraph_index") is not None or ref.get("heading_path") or (ref.get("table_index") is not None and ref.get("row_index") is not None) for ref in refs if isinstance(ref, dict)):
+            missing.append(chunk.heading)
+    return missing
+
+
+def attach_refinement_summary_to_document_layer(chunks: list[Any], report: dict[str, Any]) -> list[Any]:
+    output = []
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        if metadata.get("unit_type") == "full_sop" or metadata.get("retrieval_scope") == "document":
+            metadata["refinement_summary"] = {
+                "coverage": report.get("coverage", {}),
+                "group_count": len(report.get("groups", [])),
+                "conflict_count": len(report.get("conflicts", [])),
+                "filtered_noise_count": report.get("filtered_noise_count", 0),
+                "deduped_count": report.get("deduped_count", 0),
+            }
+        output.append(replace_chunk_metadata(chunk, metadata))
+    return output
+
+
+def reindex_local_chunks(chunks: list[Any]) -> list[Any]:
+    return [
+        Chunk(
+            chunk_index=index,
+            section=chunk.section,
+            heading=chunk.heading,
+            content=chunk.content,
+            token_count=chunk.token_count,
+            metadata=chunk.metadata,
+        )
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def dedupe_chunk_key(chunk: Any) -> str:
+    metadata = chunk.metadata or {}
+    source_refs = json.dumps(metadata.get("source_refs") or [], sort_keys=True, ensure_ascii=False)
+    if source_refs and metadata.get("unit_type") != "full_sop":
+        return f"{metadata.get('unit_type')}:{source_refs}"
+    return normalized_key(f"{metadata.get('unit_type') or chunk.section} {chunk.heading} {chunk.content}")[:240]
+
+
+def is_example_only_chunk(chunk: Any) -> bool:
+    text = str(chunk.content or "").strip()
+    if not text:
+        return False
+    examples = parse_examples_from_text(text)
+    if not examples:
+        return False
+    stripped = re.sub(r"(?i)\b(ví dụ|vi du|vd)\s*:?", "", normalized_search_text(text)).strip()
+    number_tokens = re.findall(r"\d[\d,.]*", stripped)
+    word_tokens = [token for token in stripped.split() if not re.match(r"^\d", token) and token not in {"d", "hoac"}]
+    return bool(number_tokens) and len(word_tokens) <= 4
+
+
+def parse_examples_from_text(text: str) -> list[dict[str, str]]:
+    examples: list[dict[str, str]] = []
+    for line in str(text or "").splitlines():
+        examples.extend(parse_example_line(line.strip()))
+    return examples
+
+
+def merge_examples(existing: list[Any], incoming: list[dict[str, str]]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = [item for item in existing if isinstance(item, dict)]
+    seen = {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in output}
+    for item in incoming:
+        key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+        if key not in seen:
+            output.append(item)
+            seen.add(key)
+    return output
 
 
 def attach_notes_to_nearest_parent(chunks: list[Any]) -> list[Any]:

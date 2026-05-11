@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.schemas import (
+    ExtractionRefinementPayload,
     ExtractedUnitsPayload,
     GroundedAnswerPayload,
     RetrievalResponse,
@@ -506,6 +507,94 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         return [], [f"openrouter_rule_table_validation_failed:{validation_summary(exc)}"]
     except Exception as exc:
         return [], [f"openrouter_rule_table_extraction_failed:{exc.__class__.__name__}"]
+
+
+def refine_extracted_units(
+    *,
+    filename: str,
+    raw_text: str,
+    document_type: str,
+    source_type: str,
+    units: list[dict[str, Any]],
+    source_blocks: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    if not enabled():
+        return [], {"llm_refine_status": "skipped", "reason": "openrouter_disabled"}, ["openrouter_refine_disabled"]
+    if not units:
+        return [], {"llm_refine_status": "skipped", "reason": "no_units"}, ["openrouter_refine_no_units"]
+
+    payload = {
+        "model": settings.openrouter_extraction_model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "Bạn là bước refinement cuối cho extraction pipeline SOP CS. "
+                    "Nhiệm vụ là làm sạch bản nháp đã trích xuất, KHÔNG trích xuất lại từ đầu và KHÔNG bịa policy ngoài source.\n\n"
+                    "Trả JSON shape {\"units\":[ExtractedUnit...],\"refinement_report\":{},\"warnings\":[]}.\n\n"
+                    "Việc cần làm:\n"
+                    "- filter noise: bỏ unit trùng lặp rõ ràng hoặc ví dụ đứng riêng nếu đã attach được vào rule cha.\n"
+                    "- normalize: title ngắn, content rõ, tiền tệ/ký hiệu giữ nguyên nghĩa nguồn.\n"
+                    "- dedupe: chỉ gộp duplicate thật sự, không gộp các dòng bảng khác nhau.\n"
+                    "- detect conflict: ghi vào refinement_report.conflicts, không tự chọn rule thắng nếu source không nói.\n"
+                    "- group related rules: thêm metadata.rule_group_id/group_label/related_rule_titles cho các rule cùng nhóm.\n"
+                    "- infer metadata: tags, aliases, service, case_type, risk_level, threshold/direction nếu có căn cứ.\n"
+                    "- repair noisy extraction: ví dụ phải nằm trong metadata.examples/content của rule cha; không tạo standalone example unit.\n"
+                    "- evaluate coverage: refinement_report.coverage gồm full_sop, atomic_units, policy_rules, exception_rules, source_ref_quality, missing_fields.\n\n"
+                    "Guardrails bắt buộc:\n"
+                    "- Mọi unit phải có source_refs hợp lệ. Ưu tiên giữ nguyên source_refs input.\n"
+                    "- Không xoá full_sop.\n"
+                    "- Không xoá atomic unit có source_ref dòng bảng riêng, trừ khi duplicate source_ref thật sự.\n"
+                    "- Nếu nghi conflict/noisy nhưng chưa chắc, giữ unit và ghi warning/conflict.\n"
+                    "- review_status luôn needs_review trừ khi input đã approved/reviewed.\n"
+                    "- extraction_status/publish_blocked trong metadata nếu có thì giữ nguyên, không tự chuyển degraded thành structured.\n\n"
+                    f"Filename: {filename}\n"
+                    f"Document type: {document_type}\n"
+                    f"Source type: {source_type}\n\n"
+                    f"Source blocks preview:\n{json.dumps((source_blocks or [])[:80], ensure_ascii=False)[:22000]}\n\n"
+                    f"Current draft units:\n{json.dumps(units[:120], ensure_ascii=False)[:42000]}\n\n"
+                    f"Raw text preview:\n{raw_text[:12000]}"
+                ),
+            },
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.05,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": settings.public_app_url,
+        "X-Title": "CS SOP Knowledge Base",
+    }
+
+    try:
+        content = completion_content(payload, headers)
+        parsed, repaired = parse_json_with_repair(content, payload, headers)
+        if isinstance(parsed, dict) and "units" not in parsed:
+            for key in ("refined_units", "draft_units", "extracted_units"):
+                if isinstance(parsed.get(key), list):
+                    parsed["units"] = parsed[key]
+                    break
+        payload_model = ExtractionRefinementPayload.model_validate(parsed)
+        normalized = [normalize_unit(unit.model_dump()) for unit in payload_model.units]
+        usable = [unit for unit in normalized if unit["content"]]
+        if not any(unit["unit_type"] == "full_sop" for unit in usable):
+            return [], {"llm_refine_status": "rejected", "reason": "missing_full_sop"}, ["openrouter_refine_missing_full_sop"]
+        missing_refs = source_ref_validation_errors(usable, filename)
+        if missing_refs:
+            return [], {"llm_refine_status": "rejected", "reason": "missing_source_refs", "errors": missing_refs}, missing_refs
+        report = {"llm_refine_status": "completed", **payload_model.refinement_report}
+        warnings = ["openrouter_refine_used", *payload_model.warnings]
+        if repaired:
+            warnings.append("openrouter_refine_json_repair_used")
+        return usable, report, warnings
+    except json.JSONDecodeError as exc:
+        return [], {"llm_refine_status": "failed", "reason": "invalid_json"}, [f"openrouter_refine_invalid_json:{exc.msg}:{exc.pos}"]
+    except ValidationError as exc:
+        return [], {"llm_refine_status": "failed", "reason": "validation_failed"}, [f"openrouter_refine_validation_failed:{validation_summary(exc)}"]
+    except Exception as exc:
+        return [], {"llm_refine_status": "failed", "reason": exc.__class__.__name__}, [f"openrouter_refine_failed:{exc.__class__.__name__}"]
 
 
 def generate_grounded_answer(
