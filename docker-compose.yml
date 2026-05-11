@@ -38,6 +38,7 @@ services:
       QDRANT_API_KEY: ${QDRANT_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/auto}
+      OPENROUTER_REFINE_MODEL: ${OPENROUTER_REFINE_MODEL:-google/gemini-3-flash-preview}
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
     ports:
       - "${AI_PORT:-8090}:8090"

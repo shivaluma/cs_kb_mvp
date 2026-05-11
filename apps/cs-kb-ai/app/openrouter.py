@@ -524,7 +524,7 @@ def refine_extracted_units(
         return [], {"llm_refine_status": "skipped", "reason": "no_units"}, ["openrouter_refine_no_units"]
 
     payload = {
-        "model": settings.openrouter_extraction_model,
+        "model": settings.openrouter_refine_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {

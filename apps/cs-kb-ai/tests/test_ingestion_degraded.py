@@ -7,7 +7,7 @@ from docx import Document
 from openpyxl import Workbook
 
 from app import ingestion
-from app.schemas import DocumentMetadata
+from app.schemas import DocumentMetadata, ExtractedUnitsPayload
 
 
 class IngestionDegradedDraftTest(unittest.TestCase):
@@ -86,6 +86,47 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(current["metadata"]["source_refs"][0]["row_start"], 2)
         self.assertEqual(current["metadata"]["source_refs"][0]["column_names"], ["Case", "Action"])
         self.assertTrue(any(artifact["artifact_type"] == "structuring_plan" for artifact in enrichment["pipeline_artifacts"]))
+
+    def test_degraded_policy_text_does_not_duplicate_warning_clone_content(self) -> None:
+        ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
+
+        _raw, _digest, chunks, _warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định xác minh địa chỉ email.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=docx_email_verification_bytes(),
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        self.assertEqual(enrichment["extraction_status"], "degraded")
+        atomic_contents = [
+            ingestion.content_fingerprint(chunk["content"])
+            for chunk in chunks
+            if chunk["metadata"].get("unit_type") != "full_sop"
+        ]
+        self.assertEqual(len(atomic_contents), len(set(atomic_contents)))
+        duplicated_title_units = [
+            chunk for chunk in chunks
+            if chunk["heading"] == "Quy định xác minh địa chỉ email"
+            and chunk["metadata"].get("unit_type") in {"candidate_rule", "candidate_warning"}
+        ]
+        self.assertLessEqual(len(duplicated_title_units), 1)
+
+    def test_unknown_llm_unit_type_is_normalized_before_validation(self) -> None:
+        payload = ExtractedUnitsPayload.model_validate(
+            {
+                "units": [
+                    {
+                        "unit_type": "procedure_step",
+                        "title": "Kiểm tra email",
+                        "content": "CS kiểm tra email trên hệ thống.",
+                        "source_refs": [{"source_type": "docx", "source_file": "email.docx", "paragraph_index": 1}],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(payload.units[0].unit_type, "operational_instruction")
+        self.assertEqual(payload.units[0].metadata["original_unit_type"], "procedure_step")
 
     def test_docx_policy_table_creates_table_aware_atomic_units(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: self.fail("docx policy table should not call OpenRouter")
@@ -415,6 +456,24 @@ def docx_policy_table_bytes() -> bytes:
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
+
+
+def docx_email_verification_bytes() -> bytes:
+    return docx_bytes(
+        [
+            "Quy định xác minh địa chỉ email",
+            "1.Đối với các email có định dạng: gmai.com, gmal.com, gmil.com.com, gmail.con, gamil.com, gmall.com, gmaol.com, outlook.con, @hotmail.con, @yahoo.con, @gmaik.",
+            "CS chủ động sửa thành định dạng mail đúng và phản hồi cho khách hàng/tài xế, không cần liên hệ xác minh địa chỉ mail. Trường hợp không sửa mail nhưng vẫn gửi mail phản hồi => lỗi ZT",
+            "2. Đối với các email có định dạng sai khác",
+            "Lấy SĐT/user ID ở mục contact information kiểm tra trên hệ thống Bizops",
+            "Có mail đúng định dạng: soạn nội dung và gửi đến địa chỉ mail trên hệ thống Admin",
+            "Không có mail đúng định dạng: gửi phản hồi đến email đang có => Resolve case.",
+            "Trường hợp KH/TX liên hệ lại khiếu nại không nhận được email, CS check case liên quan nếu thấy đã gửi mail cho KH/TX, báo KH/TX be đã gửi mail vào [địa chỉ mail KH/TX đã đăng kí trên app], nếu KH/TX báo mail đó lỗi, CS cung cấp kết quả theo mail đã gửi và hướng dẫn KH tự thay đổi email trên app",
+            "Nếu là TX thì CS thông tin cho TX việc mail trên hệ thống đang không chính xác => thực hiện quy trình đổi mail cho TX",
+            "Lưu ý:",
+            "Không gửi mail theo quy trình: lỗi ZT",
+        ]
+    )
 
 
 def workbook_bytes(sheets: dict[str, list[list[str]]]) -> bytes:

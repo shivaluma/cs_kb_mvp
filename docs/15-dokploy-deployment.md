@@ -56,6 +56,7 @@ DATABASE_URL=postgres://...
 OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=google/gemini-2.5-flash-lite
 OPENROUTER_EXTRACTION_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_REFINE_MODEL=google/gemini-3-flash-preview
 OPENROUTER_VISION_MODEL=google/gemini-2.5-flash-lite
 OPENROUTER_METADATA_MODEL=google/gemini-2.5-flash-lite
 OPENROUTER_CHAT_SIMPLE_MODEL=google/gemini-2.5-flash-lite

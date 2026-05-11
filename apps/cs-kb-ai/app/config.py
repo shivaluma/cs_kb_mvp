@@ -43,6 +43,10 @@ class Settings:
             "OPENROUTER_CHAT_FALLBACK_MODEL",
             os.getenv("OPENROUTER_CHAT_MODEL_FALLBACK", "moonshotai/kimi-k2.6"),
         ).strip()
+        self.openrouter_refine_model = os.getenv(
+            "OPENROUTER_REFINE_MODEL",
+            "google/gemini-3-flash-preview",
+        ).strip()
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()

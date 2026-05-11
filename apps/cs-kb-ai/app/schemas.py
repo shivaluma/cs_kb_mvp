@@ -156,6 +156,22 @@ class ExtractedUnit(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_refs: list[SourceRef] = Field(min_length=1)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_unit_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+        raw_unit_type = str(value.get("unit_type") or metadata.get("unit_type") or "").strip()
+        normalized_unit_type = normalize_extraction_unit_type(raw_unit_type, value)
+        if normalized_unit_type != raw_unit_type:
+            metadata = {**metadata, "original_unit_type": raw_unit_type or None}
+            value = {**value, "metadata": metadata}
+        value["unit_type"] = normalized_unit_type
+        if not value.get("source_refs") and isinstance(metadata.get("source_refs"), list):
+            value["source_refs"] = metadata["source_refs"]
+        return value
+
 
 class ExtractedUnitsPayload(BaseModel):
     units: list[ExtractedUnit] = Field(min_length=1)
@@ -165,6 +181,64 @@ class ExtractionRefinementPayload(BaseModel):
     units: list[ExtractedUnit] = Field(min_length=1)
     refinement_report: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+
+
+ALLOWED_EXTRACTION_UNIT_TYPES = set(ExtractionUnitType.__args__)
+
+
+def normalize_extraction_unit_type(value: str, payload: dict[str, Any]) -> str:
+    normalized = normalize_schema_key(value)
+    if normalized in ALLOWED_EXTRACTION_UNIT_TYPES:
+        return normalized
+
+    text = normalize_schema_text(" ".join([
+        value,
+        str(payload.get("title") or ""),
+        str(payload.get("content") or ""),
+        str(payload.get("metadata") or ""),
+    ]))
+    mapping = {
+        "policy": "policy_rule",
+        "rule": "policy_rule",
+        "business_rule": "policy_rule",
+        "rounding_rule": "policy_rule",
+        "email_rule": "policy_rule",
+        "procedure": "operational_instruction",
+        "procedure_step": "operational_instruction",
+        "instruction": "operational_instruction",
+        "process_step": "workflow_step",
+        "step": "workflow_step",
+        "note": "operational_note",
+        "risk_note": "warning",
+        "warning_note": "warning",
+        "alert": "warning",
+        "exception": "exception_rule",
+        "no_apply": "exception_rule",
+        "threshold": "threshold_rule",
+        "metadata": "text_section",
+        "section": "text_section",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    if "khong ap dung" in text or "exception" in text:
+        return "exception_rule"
+    if "moc" in text or "threshold" in text:
+        return "threshold_rule"
+    if any(signal in text for signal in ["luu y", "zt", "loi", "warning", "risk"]):
+        return "warning"
+    if any(signal in text for signal in ["neu", "doi voi", "truong hop", "quy dinh", "policy", "rule"]):
+        return "policy_rule"
+    return "operational_instruction"
+
+
+def normalize_schema_key(value: str) -> str:
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", normalize_schema_text(value))).strip("_")
+
+
+def normalize_schema_text(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", str(value or ""))
+    stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", stripped.replace("đ", "d").replace("Đ", "D").lower()).strip()
 
 
 class WorkflowNode(BaseModel):

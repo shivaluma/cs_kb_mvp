@@ -753,7 +753,9 @@ def build_degraded_policy_text_draft(filename: str, content_type: str, raw_text:
         unit_type = "candidate_section"
         has_warning = contains_signal(text, WARNING_SIGNALS)
         has_rule = contains_signal(text, CONDITION_ACTION_SIGNALS)
-        if has_rule:
+        if starts_warning_block(text):
+            unit_type = "candidate_warning"
+        elif has_rule:
             unit_type = "candidate_rule"
         elif has_warning:
             unit_type = "candidate_warning"
@@ -767,28 +769,13 @@ def build_degraded_policy_text_draft(filename: str, content_type: str, raw_text:
                 {
                     "unit_type": unit_type,
                     "retrieval_scope": "unit",
+                    "inline_warning": has_warning and unit_type != "candidate_warning",
                     "source_refs": [source_ref_for_text_block(filename, content_type, blocks, group[0]["index"], group[-1]["index"], text)],
                 },
                 classification,
                 ai_error,
             )
         )
-        if has_warning and unit_type != "candidate_warning":
-            chunks.append(
-                degraded_chunk(
-                    len(chunks),
-                    "candidate_warning",
-                    candidate_heading(text, "candidate_warning", group_index),
-                    text,
-                    {
-                        "unit_type": "candidate_warning",
-                        "retrieval_scope": "unit",
-                        "source_refs": [source_ref_for_text_block(filename, content_type, blocks, group[0]["index"], group[-1]["index"], text)],
-                    },
-                    classification,
-                    ai_error,
-                )
-            )
     return chunks
 
 
@@ -1045,6 +1032,7 @@ def refine_units_for_delivery(
     source_chunks: list[Any],
 ) -> tuple[list[Any], dict[str, Any], list[str], str]:
     deterministic_chunks, deterministic_report = deterministic_refine_chunks(source_chunks, classification.document_type)
+    original_degraded = any(chunk.metadata.get("extraction_status") == "degraded" for chunk in deterministic_chunks)
     report: dict[str, Any] = {
         "deterministic": deterministic_report,
         "llm": {"llm_refine_status": "not_attempted"},
@@ -1070,7 +1058,8 @@ def refine_units_for_delivery(
     if not llm_units:
         return deterministic_chunks, report, warnings, "" if "openrouter_refine_disabled" in llm_warnings else ",".join(llm_warnings[:3])
 
-    llm_chunks = mark_structured_chunks(ai_units_to_chunks(llm_units, filename, classification.source_type, classification.document_type))
+    llm_chunks = ai_units_to_chunks(llm_units, filename, classification.source_type, classification.document_type)
+    llm_chunks = mark_refined_degraded_chunks(llm_chunks, deterministic_chunks) if original_degraded else mark_structured_chunks(llm_chunks)
     llm_chunks = normalize_units(llm_chunks)
     validation_error = refined_chunks_validation_error(deterministic_chunks, llm_chunks, filename, classification.document_type)
     if validation_error:
@@ -1084,9 +1073,34 @@ def refine_units_for_delivery(
 
 
 def should_attempt_llm_refine(document_type: str, chunks: list[Any]) -> bool:
-    if document_type not in {"policy_rule", "policy_table"}:
-        return False
-    return not any(chunk.metadata.get("extraction_status") == "degraded" for chunk in chunks)
+    return document_type in {"policy_rule", "policy_table"}
+
+
+def mark_refined_degraded_chunks(chunks: list[Any], original_chunks: list[Any]) -> list[Any]:
+    publish_blocked_reason = next(
+        (
+            str(chunk.metadata.get("publish_blocked_reason"))
+            for chunk in original_chunks
+            if chunk.metadata.get("publish_blocked_reason")
+        ),
+        "ai_structuring_failed_requires_manual_curation",
+    )
+    return [
+        replace_chunk_metadata(
+            chunk,
+            {
+                **chunk.metadata,
+                "extraction_status": "degraded",
+                "extraction_lifecycle_status": "degraded_refined_draft",
+                "publish_blocked": True,
+                "publish_blocked_reason": publish_blocked_reason,
+                "requires_human_review": True,
+                "source_evidence_only": True,
+                "refined_from_degraded_draft": True,
+            },
+        )
+        for chunk in chunks
+    ]
 
 
 def chunks_to_refine_units(chunks: list[Any]) -> list[dict[str, Any]]:
@@ -1109,6 +1123,7 @@ def chunks_to_refine_units(chunks: list[Any]) -> list[dict[str, Any]]:
 def deterministic_refine_chunks(chunks: list[Any], document_type: str) -> tuple[list[Any], dict[str, Any]]:
     output: list[Any] = []
     seen: set[str] = set()
+    seen_content: dict[str, int] = {}
     last_parent_index: int | None = None
     report: dict[str, Any] = {
         "status": "completed",
@@ -1136,6 +1151,13 @@ def deterministic_refine_chunks(chunks: list[Any], document_type: str) -> tuple[
             report["repaired_orphan_examples"] += 1
             continue
 
+        content_key = content_fingerprint(chunk.content)
+        if unit_type != "full_sop" and content_key and content_key in seen_content:
+            existing_index = seen_content[content_key]
+            output[existing_index] = merge_duplicate_chunks(output[existing_index], chunk)
+            report["deduped_count"] += 1
+            continue
+
         key = dedupe_chunk_key(chunk)
         if key in seen and unit_type != "full_sop":
             report["deduped_count"] += 1
@@ -1147,6 +1169,8 @@ def deterministic_refine_chunks(chunks: list[Any], document_type: str) -> tuple[
             report["normalized_metadata_count"] += 1
         refined_chunk = replace_chunk_metadata(chunk, refined_metadata)
         output.append(refined_chunk)
+        if unit_type != "full_sop" and content_key:
+            seen_content[content_key] = len(output) - 1
         if unit_type not in {"full_sop", "candidate_warning", "warning", "operational_note", "security_note", "compliance_note"}:
             last_parent_index = len(output) - 1
 
@@ -1418,12 +1442,70 @@ def reindex_local_chunks(chunks: list[Any]) -> list[Any]:
     ]
 
 
+def merge_duplicate_chunks(existing: Any, duplicate: Any) -> Any:
+    existing_metadata = dict(existing.metadata or {})
+    duplicate_metadata = dict(duplicate.metadata or {})
+    existing_type = str(existing_metadata.get("unit_type") or existing.section or "")
+    duplicate_type = str(duplicate_metadata.get("unit_type") or duplicate.section or "")
+    merged_type = stronger_unit_type(existing_type, duplicate_type)
+    merged_metadata = {
+        **existing_metadata,
+        "unit_type": merged_type,
+        "source_refs": merge_source_refs(existing_metadata.get("source_refs"), duplicate_metadata.get("source_refs")),
+        "tags": list(dict.fromkeys([*(existing_metadata.get("tags") or []), *(duplicate_metadata.get("tags") or [])])),
+        "aliases": list(dict.fromkeys([*(existing_metadata.get("aliases") or []), *(duplicate_metadata.get("aliases") or [])])),
+        "merged_duplicate_unit_types": list(dict.fromkeys([*(existing_metadata.get("merged_duplicate_unit_types") or []), existing_type, duplicate_type])),
+        "merged_duplicate_titles": list(dict.fromkeys([*(existing_metadata.get("merged_duplicate_titles") or []), existing.heading, duplicate.heading])),
+    }
+    if duplicate_type in {"candidate_warning", "warning", "security_note", "compliance_note"} or duplicate_metadata.get("inline_warning"):
+        merged_metadata["inline_warning"] = True
+    return replace_chunk_metadata(existing, merged_metadata)
+
+
+def stronger_unit_type(left: str, right: str) -> str:
+    priority = {
+        "policy_rule": 90,
+        "exception_rule": 88,
+        "threshold_rule": 86,
+        "candidate_rule": 70,
+        "handling_rule": 68,
+        "operational_instruction": 66,
+        "candidate_warning": 45,
+        "warning": 44,
+        "operational_note": 35,
+        "candidate_section": 20,
+        "text_section": 10,
+    }
+    return left if priority.get(left, 0) >= priority.get(right, 0) else right
+
+
+def merge_source_refs(left: Any, right: Any) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for refs in (left, right):
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            key = json.dumps(ref, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            output.append(ref)
+            seen.add(key)
+    return output
+
+
 def dedupe_chunk_key(chunk: Any) -> str:
     metadata = chunk.metadata or {}
     source_refs = json.dumps(metadata.get("source_refs") or [], sort_keys=True, ensure_ascii=False)
     if source_refs and metadata.get("unit_type") != "full_sop":
         return f"{metadata.get('unit_type')}:{source_refs}"
     return normalized_key(f"{metadata.get('unit_type') or chunk.section} {chunk.heading} {chunk.content}")[:240]
+
+
+def content_fingerprint(value: str) -> str:
+    return normalized_key(value)[:600]
 
 
 def is_example_only_chunk(chunk: Any) -> bool:
@@ -1591,7 +1673,7 @@ def paragraph_groups_from_blocks(blocks: list[dict[str, Any]], max_chars: int = 
         if not text:
             continue
         item = {**block, "index": int(block.get("index") if block.get("index") is not None else index)}
-        starts_new = is_heading_like_text(text) or current_len + len(text) > max_chars
+        starts_new = is_heading_like_text(text) or (current and starts_warning_block(text)) or current_len + len(text) > max_chars
         if current and starts_new:
             groups.append(current)
             current = []
@@ -1611,6 +1693,11 @@ def is_heading_like_text(text: str) -> bool:
         re.match(r"^(\d+(?:\.\d+)*[.)]?\s+|[IVX]+[.)]\s+|[A-ZĐ][^.!?]{4,}:$)", stripped)
         or (len(stripped.split()) <= 10 and not stripped.endswith((".", ";", ",")))
     )
+
+
+def starts_warning_block(text: str) -> bool:
+    normalized = normalize_for_signal(text)
+    return normalized.startswith(("lưu ý", "luu y", "note", "warning", "cảnh báo", "canh bao")) or normalized.startswith("không gửi mail")
 
 
 def contains_signal(text: str, signals: list[str]) -> bool:
