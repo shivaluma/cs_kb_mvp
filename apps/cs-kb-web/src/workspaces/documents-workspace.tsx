@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EmptyPanel, Field, StatusBadge } from "@/components/common";
 import { ExtractionReviewEditor } from "@/components/extraction-review-editor";
 import { API_BASE_URL } from "@/config";
@@ -32,6 +33,7 @@ type WorkflowGraphMetadata = {
 type WorkflowEdgeMetadata = NonNullable<WorkflowGraphMetadata["edges"]>[number];
 type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
 type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
+type DocumentStep = "gate" | "workflow" | "sop" | "publish" | "review" | "chunks";
 type ReviewFilter = "needs_review" | "reviewed" | "approved" | "atomic" | "all";
 type RequiredWorkflowUnit = {
   key: string;
@@ -126,6 +128,7 @@ export function DocumentsWorkspace({
   const [rawTextStats, setRawTextStats] = useState({ bytes: 0, chars: 0, lines: 0 });
   const [sourceFilter, setSourceFilter] = useState<"active" | "archived" | "all">("active");
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("needs_review");
+  const [documentStep, setDocumentStep] = useState<DocumentStep>("review");
   const [requiredUnitFocus, setRequiredUnitFocus] = useState<RequiredWorkflowUnit | null>(null);
   const activeDocuments = documents.filter((document) => document.status === "active");
   const archivedDocuments = documents.filter((document) => document.status === "archived");
@@ -312,6 +315,7 @@ export function DocumentsWorkspace({
   function focusReviewRequirement(requirement: RequiredWorkflowUnit) {
     setRequiredUnitFocus(requirement);
     setReviewFilter("needs_review");
+    setDocumentStep("review");
     window.setTimeout(() => {
       reviewSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 50);
@@ -698,266 +702,44 @@ export function DocumentsWorkspace({
           </CardContent>
         </Card>
 
-        <Card className="rounded-xl">
-          <CardHeader className="border-b pb-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <CardTitle>Publish readiness</CardTitle>
-                <CardDescription>
-                  {selectedIsArchived
-                    ? "Archived sources are preserved for audit and cannot be published."
-                    : "Operational gate before locking a version and syncing retrieval indexes."}
-                </CardDescription>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={readinessPassed ? "secondary" : "outline"}>
-                  {selectedIsArchived ? "audit only" : `${readinessChecks.filter((check) => check.passed).length}/${readinessChecks.length} ready`}
-                </Badge>
-                {selectedVersionCanBulkReviewAtomic && selectedVersion ? (
-                  <Button
-                    className="h-8 px-3"
-                    disabled={busyKey === "bulk-review"}
-                    onClick={() => onBulkReviewVersion(selectedVersion.version_id, "atomic")}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    {busyKey === "bulk-review" ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <ShieldCheck data-icon="inline-start" className="size-3.5" />}
-                    Approve all atomic units
-                  </Button>
+        <Tabs className="space-y-4" onValueChange={(value) => setDocumentStep(value as DocumentStep)} value={documentStep}>
+          <div className="sticky top-4 z-20 rounded-xl border bg-background/95 p-2 shadow-sm backdrop-blur">
+            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-3 xl:grid-cols-6">
+              <TabsTrigger className="gap-2" value="review">
+                1. Review
+                {pendingReviewCount ? (
+                  <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    {pendingReviewCount}
+                  </span>
                 ) : null}
-                {selectedVersion && canEditSelectedVersion ? (
-                  <Button
-                    className="h-8 px-3"
-                    disabled={busyKey === "bulk-review" || extractionUnits.length === 0}
-                    onClick={() => onBulkReviewVersion(selectedVersion.version_id, "all", "approved", true)}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    {busyKey === "bulk-review" ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <CheckCircle2 data-icon="inline-start" className="size-3.5" />}
-                    Approve all
-                  </Button>
+              </TabsTrigger>
+              <TabsTrigger className="gap-2" value="workflow">
+                2. Workflow
+                {workflowGraphIssueCount || missingWorkflowUnits.length ? (
+                  <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    {workflowGraphIssueCount + missingWorkflowUnits.length}
+                  </span>
                 ) : null}
-                {selectedVersionCanBulkReview && selectedVersion ? (
-                  <Button
-                    className="h-8 px-3"
-                    disabled={busyKey === "bulk-review"}
-                    onClick={() => onBulkReviewVersion(selectedVersion.version_id, "all")}
-                    size="sm"
-                    type="button"
-                    variant="ghost"
-                  >
-                    Mark all reviewed
-                  </Button>
-                ) : null}
-                {canEditSelectedVersion && pendingReviewCount > 0 && bulkReviewBlocked ? (
-                  <Badge variant="outline">bulk review blocked</Badge>
-                ) : null}
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="grid gap-2 pt-4 md:grid-cols-2 xl:grid-cols-5">
-            {readinessChecks.map((check) => (
-              <ReadinessCheck detail={check.detail} key={check.label} label={check.label} passed={check.passed} />
-            ))}
-          </CardContent>
-        </Card>
+              </TabsTrigger>
+              <TabsTrigger value="sop">3. SOP page</TabsTrigger>
+              <TabsTrigger className="gap-2" value="gate">
+                4. Verify
+                <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {readinessChecks.filter((check) => check.passed).length}/{readinessChecks.length}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger value="publish">5. Publish</TabsTrigger>
+              <TabsTrigger value="chunks">6. Debug</TabsTrigger>
+            </TabsList>
+          </div>
 
-        <PublishTaskList tasks={publishTasks} ready={readinessPassed && !selectedIsArchived} />
-
-        <ExtractionPipelineTrace jobs={extractionPipeline} loading={extractionPipelineLoading} />
-
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-          <SopQualityAuditPanel audit={sopQualityAudit} />
-          <DraftRetrievalPreview
-            selectedDocument={selectedDocument}
-            units={[fullSopUnit, ...atomicUnits].filter(Boolean) as ExtractionUnit[]}
-          />
-        </div>
-
-        {requiredWorkflowUnits.length ? (
-          <WorkflowRequirementsPanel
-            busy={busyKey === "create-unit"}
-            canEdit={canEditSelectedVersion}
-            defaultEffectiveFrom={defaultEffectiveFrom}
-            onCreate={(requirement) => {
-              if (!selectedVersion) {
-                return;
-              }
-              onCreateExtractionUnit(selectedVersion.version_id, buildWorkflowRequirementStub(requirement, selectedDocument, selectedVersion, defaultEffectiveFrom));
-              focusReviewRequirement(requirement);
-            }}
-            onConvertCandidate={(unit, requirement) => {
-              onUpdateExtractionUnit(unit, buildWorkflowRequirementConversion(unit, requirement, defaultEffectiveFrom));
-              focusReviewRequirement(requirement);
-            }}
-            onReviewExisting={focusReviewRequirement}
-            requirements={workflowRequirementStatuses}
-          />
-        ) : null}
-
-        {workflowRequiresGraph ? (
-          <WorkflowGraphPanel
-            canEdit={canEditSelectedVersion}
-            graph={workflowGraph}
-            graphUnit={workflowGraphUnit}
-            confidence={workflowGraphConfidence}
-            onAcknowledge={(unit, reason) => onUpdateExtractionUnit(unit, buildWorkflowGraphAcknowledgement(unit, reason))}
-            onReviewEdge={(unit, edge, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowEdgeReviewUpdate(unit, edge, status, reason))}
-            saving={savingUnitId === workflowGraphUnit?.unit_id}
-          />
-        ) : null}
-
-        <Card className="rounded-xl" ref={reviewSectionRef}>
-          <CardHeader className="border-b pb-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <CardTitle>Full SOP page</CardTitle>
-                <CardDescription>Document-level layer for reading, training, and audit. Atomic units remain below for retrieval.</CardDescription>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Badge variant="secondary">document layer</Badge>
-                <Badge variant="outline">{atomicUnits.length} atomic units</Badge>
-                {validationRuleCount ? <Badge variant="outline">{validationRuleCount} validation rules</Badge> : null}
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="pt-4">
-            {!selectedDocument ? (
-              <EmptyPanel icon={BookOpen} title="Select a document" text="Choose a source document to preview the composed SOP page." compact />
-            ) : extractionUnitsLoading ? (
-              <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" />
-                Loading SOP page
-              </div>
-            ) : fullSopUnit ? (
-              <article className="rounded-xl border bg-muted/20 p-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="secondary">{fullSopUnit.unit_type}</Badge>
-                  <StatusBadge status={fullSopUnit.review_status} />
-                </div>
-                <h3 className="mt-3 text-base font-semibold">{fullSopUnit.title}</h3>
-                <p className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-sm leading-7 text-muted-foreground">{fullSopUnit.content}</p>
-              </article>
-            ) : (
-              <EmptyPanel icon={Layers3} title="No full SOP layer" text="This version only has atomic retrieval units. Re-extract to create a document-level page." compact />
-            )}
-          </CardContent>
-        </Card>
-
-        <div className="grid gap-4">
-          <Card className="rounded-xl">
-            <CardHeader className="border-b pb-4">
-              <CardTitle>Versions</CardTitle>
-              <CardDescription>Publish locks a curated version and syncs indexes.</CardDescription>
-            </CardHeader>
-            <CardContent className="pt-4">
-              {versions.length === 0 ? (
-                <EmptyPanel icon={History} title="No versions loaded" text="Select a document to inspect immutable versions." compact />
-              ) : (
-                <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-                  {versions.map((version) => {
-                    const isInspectedVersion = selectedChunkVersionId === version.version_id;
-                    const publishBlocked = selectedIsArchived || !isInspectedVersion || !readinessPassed;
-                    return (
-                    <div className={cn("rounded-lg border p-3", selectedChunkVersionId === version.version_id ? "bg-muted/35" : "bg-card")} key={version.version_id}>
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant="secondary">v{version.version_number}</Badge>
-                            <StatusBadge status={version.status} />
-                            <Badge variant="outline">{version.review_status ?? "needs_review"}</Badge>
-                          </div>
-                          <p className="mt-2 text-sm font-medium">{version.change_summary || "No change summary"}</p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {version.chunk_count} chunks, confidence {Math.round((version.extraction_confidence ?? 0) * 100)}%, {formatDate(version.created_at)}
-                          </p>
-                        </div>
-                        {version.status !== "published" ? (
-                          <Button
-                            data-testid={`version-${version.version_id}-publish`}
-                            disabled={busyKey === "publishing" || publishBlocked}
-                            onClick={() => {
-                              if (confirmingPublishVersionId !== version.version_id) {
-                                setConfirmingPublishVersionId(version.version_id);
-                                return;
-                              }
-                              setConfirmingPublishVersionId("");
-                              onPublishVersion(version.version_id);
-                            }}
-                            size="sm"
-                            type="button"
-                          >
-                            {selectedIsArchived
-                              ? "Archived"
-                              : !isInspectedVersion
-                                ? "Inspect first"
-                              : !readinessPassed
-                                ? "Not ready"
-                              : busyKey === "publishing"
-                              ? "Publishing"
-                              : confirmingPublishVersionId === version.version_id
-                                ? "Confirm publish"
-                                : "Publish"}
-                          </Button>
-                        ) : (
-                          <Badge variant="secondary">indexed</Badge>
-                        )}
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <Button
-                          onClick={() => onInspectVersion(version.version_id)}
-                          size="sm"
-                          type="button"
-                          variant={selectedChunkVersionId === version.version_id ? "secondary" : "outline"}
-                        >
-                          Inspect version
-                        </Button>
-                        {version.status === "published" ? (
-                          <>
-                            <Button asChild size="sm" type="button" variant="outline">
-                              <a href={`${workspacePaths.lookup}?q=${encodeURIComponent(selectedDocumentTitle)}`}>
-                                <Search data-icon="inline-start" className="size-3.5" />
-                                Test lookup
-                              </a>
-                            </Button>
-                            <Button asChild size="sm" type="button" variant="ghost">
-                              <a href={`${workspacePaths.chat}?q=${encodeURIComponent(`Dựa trên ${selectedDocumentTitle}, CS cần làm gì?`)}`}>
-                                <MessageSquareText data-icon="inline-start" className="size-3.5" />
-                                Ask chat
-                              </a>
-                            </Button>
-                          </>
-                        ) : null}
-                      </div>
-                      {version.status === "published" ? (
-                        <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                          This version is live. Test it from the same Lookup and SOP Chat surfaces agents will use.
-                        </p>
-                      ) : null}
-                      {confirmingPublishVersionId === version.version_id ? (
-                        <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                          {selectedIsArchived
-                            ? "Archived sources cannot be republished from this audit view."
-                            : !readinessPassed
-                              ? "Publishing is blocked until the readiness checklist passes."
-                            : "Confirming will lock this version, archive the previous published version, and sync search indexes."}
-                        </p>
-                      ) : null}
-                    </div>
-                  )})}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-xl">
+          <TabsContent className="mt-0 space-y-4" value="review">
+          <Card className="rounded-xl" ref={reviewSectionRef}>
             <CardHeader className="border-b pb-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <CardTitle>Extraction review</CardTitle>
-                  <CardDescription>Default view shows only units that still need review. Use bulk approve for test runs.</CardDescription>
+                  <CardDescription>Start here: compare source evidence with extracted units, then approve or edit before publish.</CardDescription>
                 </div>
                 {reviewStats.total ? (
                   <div className="flex flex-wrap gap-2">
@@ -1093,7 +875,272 @@ export function DocumentsWorkspace({
               )}
             </CardContent>
           </Card>
-        </div>
+          </TabsContent>
+
+          <TabsContent className="mt-0 space-y-4" value="workflow">
+            {requiredWorkflowUnits.length ? (
+              <WorkflowRequirementsPanel
+                busy={busyKey === "create-unit"}
+                canEdit={canEditSelectedVersion}
+                defaultEffectiveFrom={defaultEffectiveFrom}
+                onCreate={(requirement) => {
+                  if (!selectedVersion) {
+                    return;
+                  }
+                  onCreateExtractionUnit(selectedVersion.version_id, buildWorkflowRequirementStub(requirement, selectedDocument, selectedVersion, defaultEffectiveFrom));
+                  focusReviewRequirement(requirement);
+                }}
+                onConvertCandidate={(unit, requirement) => {
+                  onUpdateExtractionUnit(unit, buildWorkflowRequirementConversion(unit, requirement, defaultEffectiveFrom));
+                  focusReviewRequirement(requirement);
+                }}
+                onReviewExisting={focusReviewRequirement}
+                requirements={workflowRequirementStatuses}
+              />
+            ) : null}
+
+            {workflowRequiresGraph ? (
+              <WorkflowGraphPanel
+                canEdit={canEditSelectedVersion}
+                graph={workflowGraph}
+                graphUnit={workflowGraphUnit}
+                confidence={workflowGraphConfidence}
+                onAcknowledge={(unit, reason) => onUpdateExtractionUnit(unit, buildWorkflowGraphAcknowledgement(unit, reason))}
+                onReviewEdge={(unit, edge, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowEdgeReviewUpdate(unit, edge, status, reason))}
+                saving={savingUnitId === workflowGraphUnit?.unit_id}
+              />
+            ) : null}
+
+            {!requiredWorkflowUnits.length && !workflowRequiresGraph ? (
+              <EmptyPanel icon={Network} title="No workflow review required" text="This document type does not require workflow graph or required workflow unit review." compact />
+            ) : null}
+          </TabsContent>
+
+          <TabsContent className="mt-0 space-y-4" value="sop">
+            <Card className="rounded-xl">
+              <CardHeader className="border-b pb-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <CardTitle>Full SOP page</CardTitle>
+                    <CardDescription>Document-level layer for reading, training, and audit. Atomic units remain below for retrieval.</CardDescription>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant="secondary">document layer</Badge>
+                    <Badge variant="outline">{atomicUnits.length} atomic units</Badge>
+                    {validationRuleCount ? <Badge variant="outline">{validationRuleCount} validation rules</Badge> : null}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="pt-4">
+                {!selectedDocument ? (
+                  <EmptyPanel icon={BookOpen} title="Select a document" text="Choose a source document to preview the composed SOP page." compact />
+                ) : extractionUnitsLoading ? (
+                  <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" />
+                    Loading SOP page
+                  </div>
+                ) : fullSopUnit ? (
+                  <article className="rounded-xl border bg-muted/20 p-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="secondary">{fullSopUnit.unit_type}</Badge>
+                      <StatusBadge status={fullSopUnit.review_status} />
+                    </div>
+                    <h3 className="mt-3 text-base font-semibold">{fullSopUnit.title}</h3>
+                    <p className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-sm leading-7 text-muted-foreground">{fullSopUnit.content}</p>
+                  </article>
+                ) : (
+                  <EmptyPanel icon={Layers3} title="No full SOP layer" text="This version only has atomic retrieval units. Re-extract to create a document-level page." compact />
+                )}
+              </CardContent>
+            </Card>
+
+            <DraftRetrievalPreview
+              selectedDocument={selectedDocument}
+              units={[fullSopUnit, ...atomicUnits].filter(Boolean) as ExtractionUnit[]}
+            />
+          </TabsContent>
+
+          <TabsContent className="mt-0 space-y-4" value="gate">
+            <Card className="rounded-xl">
+              <CardHeader className="border-b pb-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <CardTitle>Publish readiness</CardTitle>
+                    <CardDescription>
+                      {selectedIsArchived
+                        ? "Archived sources are preserved for audit and cannot be published."
+                        : "Operational gate before locking a version and syncing retrieval indexes."}
+                    </CardDescription>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={readinessPassed ? "secondary" : "outline"}>
+                      {selectedIsArchived ? "audit only" : `${readinessChecks.filter((check) => check.passed).length}/${readinessChecks.length} ready`}
+                    </Badge>
+                    {selectedVersionCanBulkReviewAtomic && selectedVersion ? (
+                      <Button
+                        className="h-8 px-3"
+                        disabled={busyKey === "bulk-review"}
+                        onClick={() => onBulkReviewVersion(selectedVersion.version_id, "atomic")}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        {busyKey === "bulk-review" ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <ShieldCheck data-icon="inline-start" className="size-3.5" />}
+                        Approve all atomic units
+                      </Button>
+                    ) : null}
+                    {selectedVersion && canEditSelectedVersion ? (
+                      <Button
+                        className="h-8 px-3"
+                        disabled={busyKey === "bulk-review" || extractionUnits.length === 0}
+                        onClick={() => onBulkReviewVersion(selectedVersion.version_id, "all", "approved", true)}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        {busyKey === "bulk-review" ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <CheckCircle2 data-icon="inline-start" className="size-3.5" />}
+                        Approve all
+                      </Button>
+                    ) : null}
+                    {selectedVersionCanBulkReview && selectedVersion ? (
+                      <Button
+                        className="h-8 px-3"
+                        disabled={busyKey === "bulk-review"}
+                        onClick={() => onBulkReviewVersion(selectedVersion.version_id, "all")}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                      >
+                        Mark all reviewed
+                      </Button>
+                    ) : null}
+                    {canEditSelectedVersion && pendingReviewCount > 0 && bulkReviewBlocked ? (
+                      <Badge variant="outline">bulk review blocked</Badge>
+                    ) : null}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="grid gap-2 pt-4 md:grid-cols-2 xl:grid-cols-5">
+                {readinessChecks.map((check) => (
+                  <ReadinessCheck detail={check.detail} key={check.label} label={check.label} passed={check.passed} />
+                ))}
+              </CardContent>
+            </Card>
+
+            <PublishTaskList tasks={publishTasks} ready={readinessPassed && !selectedIsArchived} />
+
+            <SopQualityAuditPanel audit={sopQualityAudit} />
+          </TabsContent>
+
+          <TabsContent className="mt-0 space-y-4" value="publish">
+          <Card className="rounded-xl">
+            <CardHeader className="border-b pb-4">
+              <CardTitle>Versions</CardTitle>
+              <CardDescription>Publish locks a curated version and syncs indexes.</CardDescription>
+            </CardHeader>
+            <CardContent className="pt-4">
+              {versions.length === 0 ? (
+                <EmptyPanel icon={History} title="No versions loaded" text="Select a document to inspect immutable versions." compact />
+              ) : (
+                <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+                  {versions.map((version) => {
+                    const isInspectedVersion = selectedChunkVersionId === version.version_id;
+                    const publishBlocked = selectedIsArchived || !isInspectedVersion || !readinessPassed;
+                    return (
+                    <div className={cn("rounded-lg border p-3", selectedChunkVersionId === version.version_id ? "bg-muted/35" : "bg-card")} key={version.version_id}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="secondary">v{version.version_number}</Badge>
+                            <StatusBadge status={version.status} />
+                            <Badge variant="outline">{version.review_status ?? "needs_review"}</Badge>
+                          </div>
+                          <p className="mt-2 text-sm font-medium">{version.change_summary || "No change summary"}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {version.chunk_count} chunks, confidence {Math.round((version.extraction_confidence ?? 0) * 100)}%, {formatDate(version.created_at)}
+                          </p>
+                        </div>
+                        {version.status !== "published" ? (
+                          <Button
+                            data-testid={`version-${version.version_id}-publish`}
+                            disabled={busyKey === "publishing" || publishBlocked}
+                            onClick={() => {
+                              if (confirmingPublishVersionId !== version.version_id) {
+                                setConfirmingPublishVersionId(version.version_id);
+                                return;
+                              }
+                              setConfirmingPublishVersionId("");
+                              onPublishVersion(version.version_id);
+                            }}
+                            size="sm"
+                            type="button"
+                          >
+                            {selectedIsArchived
+                              ? "Archived"
+                              : !isInspectedVersion
+                                ? "Inspect first"
+                              : !readinessPassed
+                                ? "Not ready"
+                              : busyKey === "publishing"
+                              ? "Publishing"
+                              : confirmingPublishVersionId === version.version_id
+                                ? "Confirm publish"
+                                : "Publish"}
+                          </Button>
+                        ) : (
+                          <Badge variant="secondary">indexed</Badge>
+                        )}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button
+                          onClick={() => onInspectVersion(version.version_id)}
+                          size="sm"
+                          type="button"
+                          variant={selectedChunkVersionId === version.version_id ? "secondary" : "outline"}
+                        >
+                          Inspect version
+                        </Button>
+                        {version.status === "published" ? (
+                          <>
+                            <Button asChild size="sm" type="button" variant="outline">
+                              <a href={`${workspacePaths.lookup}?q=${encodeURIComponent(selectedDocumentTitle)}`}>
+                                <Search data-icon="inline-start" className="size-3.5" />
+                                Test lookup
+                              </a>
+                            </Button>
+                            <Button asChild size="sm" type="button" variant="ghost">
+                              <a href={`${workspacePaths.chat}?q=${encodeURIComponent(`Dựa trên ${selectedDocumentTitle}, CS cần làm gì?`)}`}>
+                                <MessageSquareText data-icon="inline-start" className="size-3.5" />
+                                Ask chat
+                              </a>
+                            </Button>
+                          </>
+                        ) : null}
+                      </div>
+                      {version.status === "published" ? (
+                        <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                          This version is live. Test it from the same Lookup and SOP Chat surfaces agents will use.
+                        </p>
+                      ) : null}
+                      {confirmingPublishVersionId === version.version_id ? (
+                        <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                          {selectedIsArchived
+                            ? "Archived sources cannot be republished from this audit view."
+                            : !readinessPassed
+                              ? "Publishing is blocked until the readiness checklist passes."
+                            : "Confirming will lock this version, archive the previous published version, and sync search indexes."}
+                        </p>
+                      ) : null}
+                    </div>
+                  )})}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+          </TabsContent>
+
+          <TabsContent className="mt-0 space-y-4" value="chunks">
+            <ExtractionPipelineTrace jobs={extractionPipeline} loading={extractionPipelineLoading} />
 
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
@@ -1138,6 +1185,8 @@ export function DocumentsWorkspace({
             )}
           </CardContent>
         </Card>
+          </TabsContent>
+        </Tabs>
       </section>
     </div>
   );
