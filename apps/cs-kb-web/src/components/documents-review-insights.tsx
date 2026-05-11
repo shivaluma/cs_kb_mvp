@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, GitBranch, Loader2, Search, TriangleAlert } from "lucide-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
@@ -728,22 +728,33 @@ export function SopQualityAuditPanel({ audit }: { audit: SopQualityAudit }) {
 }
 
 export function DraftRetrievalPreview({
-  query,
   selectedDocument,
-  setQuery,
   units,
 }: {
-  query: string;
   selectedDocument: DocumentSummary | null;
-  setQuery: Dispatch<SetStateAction<string>>;
   units: ExtractionUnit[];
 }) {
-  const queries = query.split(/\n|;/).map((item) => item.trim()).filter(Boolean).slice(0, 10);
-  const queryGroups = queries.map((item) => ({
-    query: item,
-    results: rankDraftPreviewUnits(item, units),
-  }));
-  const matchCount = queryGroups.reduce((sum, item) => sum + item.results.length, 0);
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const isPreviewUpdating = query.trim() !== debouncedQuery.trim();
+  const queries = useMemo(
+    () => debouncedQuery.split(/\n|;/).map((item) => item.trim()).filter(Boolean).slice(0, 10),
+    [debouncedQuery],
+  );
+  const queryGroups = useMemo(
+    () => queries.map((item) => ({
+      query: item,
+      results: rankDraftPreviewUnits(item, units),
+    })),
+    [queries, units],
+  );
+  const matchCount = useMemo(() => queryGroups.reduce((sum, item) => sum + item.results.length, 0), [queryGroups]);
+
+  useEffect(() => {
+    const debounceTimer = window.setTimeout(() => setDebouncedQuery(query), 300);
+    return () => window.clearTimeout(debounceTimer);
+  }, [query]);
+
   return (
     <Card className="rounded-xl">
       <CardHeader className="border-b pb-4">
@@ -752,7 +763,7 @@ export function DraftRetrievalPreview({
             <CardTitle>Draft retrieval preview</CardTitle>
             <CardDescription>Test 5-10 real CS queries before this SOP reaches production search.</CardDescription>
           </div>
-          <Badge variant="outline">{matchCount ? `${matchCount} matches` : "preview only"}</Badge>
+          <Badge variant="outline">{isPreviewUpdating ? "updating..." : matchCount ? `${matchCount} matches` : "preview only"}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4 pt-4">
@@ -773,6 +784,8 @@ export function DraftRetrievalPreview({
           <EmptyPanel icon={Search} title="Select a document" text="Pick a source document to preview retrieval against its draft units." compact />
         ) : !query.trim() ? (
           <EmptyPanel icon={Search} title="Enter test queries" text="Use one real CS phrase per line, including typos, case reasons, and policy keywords." compact />
+        ) : isPreviewUpdating && !debouncedQuery.trim() ? (
+          <EmptyPanel icon={Search} title="Waiting for input pause" text="Preview runs after typing pauses to keep the review page responsive." compact />
         ) : matchCount ? (
           <div className="grid gap-3">
             {queryGroups.map((group) => (

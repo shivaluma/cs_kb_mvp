@@ -127,7 +127,6 @@ export function DocumentsWorkspace({
   const [sourceFilter, setSourceFilter] = useState<"active" | "archived" | "all">("active");
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("needs_review");
   const [requiredUnitFocus, setRequiredUnitFocus] = useState<RequiredWorkflowUnit | null>(null);
-  const [draftPreviewQuery, setDraftPreviewQuery] = useState("");
   const activeDocuments = documents.filter((document) => document.status === "active");
   const archivedDocuments = documents.filter((document) => document.status === "archived");
   const visibleDocuments = documents.filter((document) => {
@@ -769,9 +768,7 @@ export function DocumentsWorkspace({
         <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <SopQualityAuditPanel audit={sopQualityAudit} />
           <DraftRetrievalPreview
-            query={draftPreviewQuery}
             selectedDocument={selectedDocument}
-            setQuery={setDraftPreviewQuery}
             units={[fullSopUnit, ...atomicUnits].filter(Boolean) as ExtractionUnit[]}
           />
         </div>
