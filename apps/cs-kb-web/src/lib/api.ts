@@ -42,6 +42,7 @@ export async function apiPost<T = unknown>(
 export async function apiPatch<T = unknown>(
   path: string,
   payload: unknown,
+  timeoutMs = 15000,
 ): Promise<T> {
   const response = await withTimeout((signal) =>
     fetch(`${API_BASE_URL}${path}`, {
@@ -50,9 +51,11 @@ export async function apiPatch<T = unknown>(
       body: JSON.stringify(payload),
       signal,
     }),
+    timeoutMs,
   );
   if (!response.ok) {
-    throw new Error(`PATCH ${path} failed`);
+    const detail = await response.text();
+    throw new Error(`PATCH ${path} failed (${response.status})${detail ? `: ${detail}` : ""}`);
   }
   return response.json() as Promise<T>;
 }

@@ -9,13 +9,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EmptyPanel, Field, StatusBadge } from "@/components/common";
 import { ExtractionReviewEditor } from "@/components/extraction-review-editor";
 import { API_BASE_URL } from "@/config";
 import { workspacePaths } from "@/constants";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, UploadState, VersionRawText, VersionSummary } from "@/types";
+import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, PublishReadiness, UploadState, VersionRawText, VersionSummary } from "@/types";
 
 type WorkflowGraphMetadata = {
   workflow_id?: string;
@@ -68,6 +69,8 @@ export function DocumentsWorkspace({
   onUpdateExtractionUnit,
   onUpload,
   metadataPreview,
+  publishReadiness,
+  publishReadinessLoading,
   selectedDocument,
   selectedChunkVersionId,
   savingUnitId,
@@ -97,6 +100,8 @@ export function DocumentsWorkspace({
   onSelectDocument: (documentId: string) => void;
   onUpload: () => void;
   metadataPreview: DocumentMetadataPreview | null;
+  publishReadiness: PublishReadiness | null;
+  publishReadinessLoading: boolean;
   selectedDocument: DocumentSummary | null;
   selectedChunkVersionId: string;
   setSelectedDocument: (document: DocumentSummary) => void;
@@ -146,16 +151,6 @@ export function DocumentsWorkspace({
   const workflowGraphValidationErrors = workflowGraph?.validation_errors ?? workflowGraphUnit?.metadata.graph_validation_errors ?? [];
   const workflowGraphUncertainEdges = workflowGraph?.uncertain_edges ?? workflowGraphUnit?.metadata.uncertain_edges ?? [];
   const workflowEdgeReviewSummary = buildWorkflowEdgeReviewSummary(workflowGraph, workflowGraphUnit);
-  const workflowGraphWarningIssueCount =
-    (Array.isArray(workflowGraphValidationErrors) ? workflowGraphValidationErrors.length : 0) +
-    (Array.isArray(workflowGraphUncertainEdges) ? workflowGraphUncertainEdges.length : 0) +
-    Number(workflowGraphUnit?.metadata.uncertain_edges_count ?? 0);
-  const workflowGraphAcknowledgementReason = String(workflowGraphUnit?.metadata.graph_validation_acknowledged_reason ?? "").trim();
-  const workflowGraphWarningsAcknowledged =
-    workflowGraphWarningIssueCount === 0 ||
-    (workflowGraphUnit?.metadata.graph_validation_acknowledged === true && workflowGraphAcknowledgementReason.length > 0);
-  const workflowGraphIssueCount = (workflowGraphWarningsAcknowledged ? 0 : workflowGraphWarningIssueCount) + workflowEdgeReviewSummary.blockingCount;
-  const workflowGraphIssuesAcknowledged = workflowGraphIssueCount === 0;
   const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && unit.unit_type !== "workflow_graph" && !unit.metadata.workflow_graph);
   const selectedIsArchived = selectedDocument?.status === "archived";
   const pendingReviewCount = extractionUnits.filter((unit) => unit.review_status === "needs_review").length;
@@ -168,6 +163,17 @@ export function DocumentsWorkspace({
   const workflowRequiresGraph = selectedDocument?.latest_document_type === "workflow_diagram";
   const selectedExtractionIssue = extractionIssue(selectedDocument);
   const workflowGraphConfidence = Number(workflowGraphUnit?.metadata.graph_confidence ?? workflowGraph?.graph_confidence ?? workflowGraphUnit?.confidence ?? 0);
+  const workflowGraphLowConfidence = workflowRequiresGraph && Boolean(workflowGraphUnit) && workflowGraphConfidence > 0 && workflowGraphConfidence < 0.7;
+  const workflowGraphWarningIssueCount =
+    (Array.isArray(workflowGraphValidationErrors) ? workflowGraphValidationErrors.length : 0) +
+    Math.max(Array.isArray(workflowGraphUncertainEdges) ? workflowGraphUncertainEdges.length : 0, Number(workflowGraphUnit?.metadata.uncertain_edges_count ?? 0)) +
+    (workflowGraphLowConfidence ? 1 : 0);
+  const workflowGraphAcknowledgementReason = String(workflowGraphUnit?.metadata.graph_validation_acknowledged_reason ?? "").trim();
+  const workflowGraphWarningsAcknowledged =
+    workflowGraphWarningIssueCount === 0 ||
+    (workflowGraphUnit?.metadata.graph_validation_acknowledged === true && workflowGraphAcknowledgementReason.length > 0);
+  const workflowGraphIssueCount = (workflowGraphWarningsAcknowledged ? 0 : workflowGraphWarningIssueCount) + workflowEdgeReviewSummary.blockingCount;
+  const workflowGraphIssuesAcknowledged = workflowGraphIssueCount === 0;
   const pageOnlySourceRefUnacknowledged = extractionUnits.filter(
     (unit) => unit.metadata.source_ref_quality === "page_only" && unit.metadata.source_ref_acknowledged !== true,
   ).length;
@@ -222,11 +228,11 @@ export function DocumentsWorkspace({
     {
       detail: workflowGraphUnit
         ? workflowGraphIssuesAcknowledged
-          ? `${workflowGraph?.nodes?.length ?? 0} nodes, ${workflowEdgeReviewSummary.reviewed}/${workflowEdgeReviewSummary.total} decision edges reviewed, ${Math.round(workflowGraphConfidence * 100)}% confidence`
+          ? `${workflowGraph?.nodes?.length ?? 0} nodes, ${workflowEdgeReviewSummary.reviewed}/${workflowEdgeReviewSummary.total} decision edges reviewed, ${Math.round(workflowGraphConfidence * 100)}% confidence${workflowGraphLowConfidence ? " accepted by reviewer" : ""}`
           : `${workflowGraphIssueCount} topology or decision edge issue(s) need review`
         : "Workflow graph missing",
       label: "Workflow graph reviewed",
-      passed: !workflowRequiresGraph || Boolean(workflowGraphUnit && workflowGraphUnit.review_status !== "needs_review" && workflowGraphConfidence >= 0.7 && (workflowGraph?.edges?.length ?? 0) > 0 && workflowGraphIssuesAcknowledged && workflowEdgeReviewSummary.blockingCount === 0),
+      passed: !workflowRequiresGraph || Boolean(workflowGraphUnit && workflowGraphUnit.review_status !== "needs_review" && (workflowGraph?.edges?.length ?? 0) > 0 && workflowGraphIssuesAcknowledged && workflowEdgeReviewSummary.blockingCount === 0),
     },
     {
       detail: pageOnlySourceRefUnacknowledged
@@ -312,7 +318,9 @@ export function DocumentsWorkspace({
     ? filteredAtomicUnits.filter((unit) => requiredUnitFocus.types.includes(unit.unit_type))
     : [];
   const filteredUnitsCount = (filteredDocumentLayer ? 1 : 0) + filteredAtomicUnits.length;
-  const canBulkApproveVisible = Boolean(selectedVersion) && canEditSelectedVersion && filteredUnitsCount > 0;
+  const canBulkApproveVisible = Boolean(selectedVersion) && canEditSelectedVersion && filteredUnitsCount > 0 && !bulkReviewBlocked;
+  const bulkApproveScope: "all" | "atomic" = reviewFilter === "atomic" ? "atomic" : "all";
+  const bulkApproveLabel = bulkApproveScope === "atomic" ? "Approve all atomic units" : "Approve all units";
 
   function focusReviewRequirement(requirement: RequiredWorkflowUnit) {
     setRequiredUnitFocus(requirement);
@@ -784,14 +792,16 @@ export function DocumentsWorkspace({
                           <Badge variant="outline">{selectedIsArchived ? "audit only" : selectedVersion?.status === "published" ? "locked" : "editable draft"}</Badge>
                           <Button
                             disabled={!canBulkApproveVisible || busyKey === "bulk-review"}
-                            onClick={() => selectedVersion && onBulkReviewVersion(selectedVersion.version_id, reviewFilter === "atomic" ? "atomic" : "all", "approved", true)}
+                            onClick={() => selectedVersion && onBulkReviewVersion(selectedVersion.version_id, bulkApproveScope, "approved")}
                             size="sm"
+                            title={bulkReviewBlocked ? "Bulk approve is disabled for workflow, high-risk, or low-confidence drafts. Review units explicitly." : "Approve all units in this API scope after source review."}
                             type="button"
                             variant="secondary"
                           >
                             {busyKey === "bulk-review" ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <CheckCircle2 data-icon="inline-start" className="size-4" />}
-                            Approve visible
+                            {bulkApproveLabel}
                           </Button>
+                          {bulkReviewBlocked ? <Badge variant="outline">manual review required</Badge> : null}
                         </div>
                       </div>
                       <div className="mt-3 flex flex-wrap gap-1 rounded-lg border bg-muted/15 p-1">
@@ -1015,6 +1025,46 @@ export function DocumentsWorkspace({
               <CardHeader className="border-b pb-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
+                    <CardTitle>Backend publish gate</CardTitle>
+                    <CardDescription>Exact dry-run result from the publish API, kept separate from frontend heuristics.</CardDescription>
+                  </div>
+                  <Badge variant={publishReadiness?.ready ? "secondary" : "destructive"}>
+                    {publishReadinessLoading ? "checking" : publishReadiness?.ready ? "api ready" : `${publishReadiness?.failure_count ?? 0} API blocker(s)`}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="pt-4">
+                {publishReadinessLoading ? (
+                  <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" />
+                    Checking backend publish readiness
+                  </div>
+                ) : !publishReadiness ? (
+                  <EmptyPanel icon={ShieldCheck} title="No backend gate result" text="Select a draft version to run the publish dry-run." compact />
+                ) : publishReadiness.ready ? (
+                  <div className="rounded-lg border bg-secondary/30 p-3 text-sm">
+                    Backend publish validation has no open blockers for this version.
+                  </div>
+                ) : (
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {publishReadiness.failures.slice(0, 12).map((failure) => (
+                      <div className="rounded-lg border bg-muted/10 p-3" key={failure}>
+                        <div className="flex items-center gap-2">
+                          <TriangleAlert className="size-4 text-destructive" />
+                          <p className="text-sm font-semibold">{readablePublishFailure(failure)}</p>
+                        </div>
+                        <p className="mt-1 font-mono text-[11px] text-muted-foreground">{failure}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-xl">
+              <CardHeader className="border-b pb-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
                     <CardTitle>Publish readiness</CardTitle>
                     <CardDescription>
                       {selectedIsArchived
@@ -1039,11 +1089,11 @@ export function DocumentsWorkspace({
                         Approve all atomic units
                       </Button>
                     ) : null}
-                    {selectedVersion && canEditSelectedVersion ? (
+                    {selectedVersionCanBulkReview && selectedVersion ? (
                       <Button
                         className="h-8 px-3"
                         disabled={busyKey === "bulk-review" || extractionUnits.length === 0}
-                        onClick={() => onBulkReviewVersion(selectedVersion.version_id, "all", "approved", true)}
+                        onClick={() => onBulkReviewVersion(selectedVersion.version_id, "all", "approved")}
                         size="sm"
                         type="button"
                         variant="outline"
@@ -1096,6 +1146,13 @@ export function DocumentsWorkspace({
                   {versions.map((version) => {
                     const isInspectedVersion = selectedChunkVersionId === version.version_id;
                     const publishBlocked = selectedIsArchived || !isInspectedVersion || !readinessPassed;
+                    const publishBlockReason = selectedIsArchived
+                      ? "Archived sources cannot be republished from this audit view."
+                      : !isInspectedVersion
+                        ? "Inspect this version before publishing it."
+                        : !readinessPassed
+                          ? "Publishing is blocked until the Verify checklist passes."
+                          : "";
                     return (
                     <div className={cn("rounded-lg border p-3", selectedChunkVersionId === version.version_id ? "bg-muted/35" : "bg-card")} key={version.version_id}>
                       <div className="flex items-start justify-between gap-3">
@@ -1171,14 +1228,20 @@ export function DocumentsWorkspace({
                         <p className="mt-2 text-xs leading-5 text-muted-foreground">
                           This version is live. Test it from the same Lookup and SOP Chat surfaces agents will use.
                         </p>
+                      ) : publishBlocked ? (
+                        <div className="mt-3 rounded-lg border bg-muted/15 p-3">
+                          <p className="text-xs leading-5 text-muted-foreground">{publishBlockReason}</p>
+                          {isInspectedVersion && !readinessPassed ? (
+                            <Button className="mt-2 h-8 px-3" onClick={() => setDocumentStep("gate")} size="sm" type="button" variant="secondary">
+                              <ShieldCheck data-icon="inline-start" className="size-3.5" />
+                              Open Verify checklist
+                            </Button>
+                          ) : null}
+                        </div>
                       ) : null}
                       {confirmingPublishVersionId === version.version_id ? (
                         <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                          {selectedIsArchived
-                            ? "Archived sources cannot be republished from this audit view."
-                            : !readinessPassed
-                              ? "Publishing is blocked until the readiness checklist passes."
-                            : "Confirming will lock this version, archive the previous published version, and sync search indexes."}
+                          Confirming will lock this version, archive the previous published version, and sync search indexes.
                         </p>
                       ) : null}
                     </div>
@@ -1501,15 +1564,20 @@ function SourceViewer({
 
 function HelpTooltip({ text }: { text: string }) {
   return (
-    <span
-      aria-label={text}
-      className="inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
-      role="img"
-      tabIndex={0}
-      title={text}
-    >
-      <CircleHelp className="size-3.5" />
-    </span>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label="Explain this workflow review item"
+          className="inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+          type="button"
+        >
+          <CircleHelp className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72 items-start text-left leading-5" side="top">
+        {text}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -1536,10 +1604,10 @@ function WorkflowGraphPanel({
   const validationErrors = graph?.validation_errors ?? graphUnit?.metadata.graph_validation_errors ?? [];
   const uncertainEdges = graph?.uncertain_edges ?? graphUnit?.metadata.uncertain_edges ?? [];
   const annotations = graph?.annotations ?? graphUnit?.metadata.annotations ?? [];
+  const lowConfidenceTopologyIssue = confidence > 0 && confidence < 0.7;
   const uncertainEdgeCount =
-    (Array.isArray(uncertainEdges) ? uncertainEdges.length : 0) +
-    Number(graphUnit?.metadata.uncertain_edges_count ?? 0);
-  const issueCount = (Array.isArray(validationErrors) ? validationErrors.length : 0) + uncertainEdgeCount;
+    Math.max(Array.isArray(uncertainEdges) ? uncertainEdges.length : 0, Number(graphUnit?.metadata.uncertain_edges_count ?? 0));
+  const issueCount = (Array.isArray(validationErrors) ? validationErrors.length : 0) + uncertainEdgeCount + (lowConfidenceTopologyIssue ? 1 : 0);
   const savedAcknowledgementReason = String(graphUnit?.metadata.graph_validation_acknowledged_reason ?? "").trim();
   const acknowledged = issueCount === 0 || (graphUnit?.metadata.graph_validation_acknowledged === true && savedAcknowledgementReason.length > 0);
   const acknowledgementInputValid = acknowledgementReason.trim().length >= 8;
@@ -1658,7 +1726,10 @@ function WorkflowGraphPanel({
               <div className={cn("rounded-xl border p-4", acknowledged ? "bg-secondary/30" : "border-destructive/30 bg-destructive/5")}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <p className={cn("text-sm font-semibold", acknowledged ? "text-foreground" : "text-destructive")}>Topology validation blockers</p>
+                    <p className={cn("inline-flex items-center gap-1 text-sm font-semibold", acknowledged ? "text-foreground" : "text-destructive")}>
+                      Topology validation blockers
+                      <HelpTooltip text="Các blocker này đến từ validator của workflow graph: topology còn mơ hồ, thiếu review nhánh quyết định, hoặc confidence thấp. Reviewer phải kiểm tra source diagram rồi acknowledge với lý do rõ ràng." />
+                    </p>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
                       {acknowledged
                         ? "Human reviewer acknowledged these topology warnings. Backend publish gate will accept this graph if other checks pass."
@@ -1670,13 +1741,13 @@ function WorkflowGraphPanel({
                     {acknowledged ? <Badge variant="outline">acknowledged</Badge> : null}
                     {graphUnit && !acknowledged ? (
                       <div className="flex flex-col gap-2 sm:min-w-80">
-                      <textarea
-                        className="min-h-16 rounded-md border bg-background px-3 py-2 text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                        onChange={(event) => setAcknowledgementReason(event.target.value)}
-                        placeholder="Required: why this graph warning is acceptable after checking the source."
-                        title="Reason này lưu ở graph-level acknowledgement. Sau đó có thể dùng lại để acknowledge các branch còn mơ hồ."
-                        value={acknowledgementReason}
-                      />
+                        <textarea
+                          className="min-h-16 rounded-md border bg-background px-3 py-2 text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                          onChange={(event) => setAcknowledgementReason(event.target.value)}
+                          placeholder="Required: why this graph warning is acceptable after checking the source."
+                          title="Reason này lưu ở graph-level acknowledgement. Sau đó có thể dùng lại để acknowledge các branch còn mơ hồ."
+                          value={acknowledgementReason}
+                        />
                         <Button
                           disabled={Boolean(acknowledgementDisabledReason)}
                           onClick={() => onAcknowledge(graphUnit, acknowledgementReason.trim())}
@@ -1703,11 +1774,16 @@ function WorkflowGraphPanel({
                 {Array.isArray(validationErrors) && validationErrors.length ? (
                   <div className="mt-3 grid gap-2">
                     {validationErrors.slice(0, 8).map((error, index) => (
-                    <p className="rounded-lg border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground" key={`${error}-${index}`}>
-                      {String(error)}
-                    </p>
+                      <p className="rounded-lg border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground" key={`${error}-${index}`}>
+                        {String(error)}
+                      </p>
                     ))}
                   </div>
+                ) : null}
+                {lowConfidenceTopologyIssue ? (
+                  <p className="mt-3 rounded-lg border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
+                    Graph confidence is {Math.round(confidence * 100)}%, below the 70% auto-pass threshold. A human reviewer can clear this by checking the source diagram and acknowledging the topology warning with a reason.
+                  </p>
                 ) : null}
               </div>
             ) : null}
@@ -1746,7 +1822,15 @@ function WorkflowGraphPanel({
             </div>
             <div className="grid gap-4 2xl:grid-cols-2">
               <WorkflowAnnotationsPanel annotations={Array.isArray(annotations) ? annotations : []} />
-              <WorkflowUncertainEdgesPanel edges={Array.isArray(uncertainEdges) ? uncertainEdges : []} graph={graph} />
+              <WorkflowUncertainEdgesPanel
+                canEdit={canEdit}
+                edges={Array.isArray(uncertainEdges) ? uncertainEdges : []}
+                graph={graph}
+                graphUnit={graphUnit}
+                onAcknowledge={onAcknowledge}
+                saving={saving}
+                topologyAcknowledged={acknowledged}
+              />
             </div>
           </div>
         ) : (
@@ -1787,34 +1871,101 @@ function WorkflowAnnotationsPanel({ annotations }: { annotations: NonNullable<Wo
 }
 
 function WorkflowUncertainEdgesPanel({
+  canEdit,
   edges,
   graph,
+  graphUnit,
+  onAcknowledge,
+  saving,
+  topologyAcknowledged,
 }: {
+  canEdit: boolean;
   edges: NonNullable<WorkflowGraphMetadata["uncertain_edges"]>;
   graph: WorkflowGraphMetadata;
+  graphUnit?: ExtractionUnit;
+  onAcknowledge: (unit: ExtractionUnit, reason: string) => void;
+  saving: boolean;
+  topologyAcknowledged: boolean;
 }) {
   const resolver = useMemo(() => buildWorkflowNodeResolver(graph), [graph]);
+  const [acknowledgementReason, setAcknowledgementReason] = useState("");
+  const savedReason = String(graphUnit?.metadata.graph_validation_acknowledged_reason ?? "").trim();
+  const acknowledgementDisabledReason = !graphUnit
+    ? "Graph unit is missing."
+    : !canEdit
+      ? "Inspect an editable draft version first."
+      : saving
+        ? "Saving acknowledgement..."
+        : acknowledgementReason.trim().length < 8
+          ? "Enter at least 8 characters after checking the source diagram."
+          : "";
   return (
     <div className="rounded-xl border bg-background">
-      <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-        <p className="text-xs font-semibold text-muted-foreground">Uncertain edges needing review</p>
-        <Badge variant={edges.length ? "destructive" : "outline"}>{edges.length}</Badge>
+      <div className="flex flex-wrap items-start justify-between gap-2 border-b px-3 py-2">
+        <div>
+          <p className="inline-flex items-center gap-1 text-xs font-semibold text-muted-foreground">
+            Uncertain edges needing review
+            <HelpTooltip text="Đây là topology-level warning từ visual detector. Confirm/Ack branch trong bảng decision không xoá warning này; reviewer cần acknowledge uncertain topology sau khi đối chiếu source diagram." />
+          </p>
+          {topologyAcknowledged && savedReason ? (
+            <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">Acknowledged: {savedReason}</p>
+          ) : edges.length ? (
+            <p className="mt-1 text-[11px] leading-4 text-muted-foreground">Check these arrows against the source diagram, then acknowledge the topology warning here.</p>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Badge variant={edges.length && !topologyAcknowledged ? "destructive" : "outline"}>{edges.length}</Badge>
+          {edges.length && topologyAcknowledged ? <Badge variant="secondary">acknowledged</Badge> : null}
+        </div>
       </div>
       {edges.length ? (
-        <ScrollArea className="h-64">
-          <div className="divide-y">
-            {edges.slice(0, 40).map((edge, index) => (
-              <div className="grid gap-2 p-3 text-sm" key={`${edge.from_node}-${edge.to_node}-${index}`}>
-                <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)] items-start gap-2">
-                  <NodeSummary node={resolver.resolve(edge.from_node)} fallback={edge.from_node} />
-                  <Badge className="justify-center" variant="outline">{edge.condition || "unclear"}</Badge>
-                  <NodeSummary node={resolver.resolve(edge.to_node)} fallback={edge.to_node} />
-                </div>
-                <p className="text-xs leading-5 text-muted-foreground">{edge.reason}</p>
+        <div>
+          {!topologyAcknowledged ? (
+            <div className="grid gap-2 border-b bg-muted/10 p-3">
+              <textarea
+                className="min-h-16 rounded-md border bg-background px-3 py-2 text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                disabled={!graphUnit || !canEdit || saving}
+                onChange={(event) => setAcknowledgementReason(event.target.value)}
+                placeholder="Why are these uncertain edges acceptable after source review?"
+                value={acknowledgementReason}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  className="h-8"
+                  disabled={Boolean(acknowledgementDisabledReason)}
+                  onClick={() => graphUnit ? onAcknowledge(graphUnit, acknowledgementReason.trim()) : undefined}
+                  size="sm"
+                  type="button"
+                  variant="secondary"
+                >
+                  {saving ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <ShieldCheck data-icon="inline-start" className="size-3.5" />}
+                  Acknowledge uncertain edges
+                </Button>
+                {acknowledgementDisabledReason ? (
+                  <p className="text-[11px] leading-4 text-muted-foreground">{acknowledgementDisabledReason}</p>
+                ) : null}
               </div>
-            ))}
-          </div>
-        </ScrollArea>
+            </div>
+          ) : null}
+          <ScrollArea className="h-64">
+            <div className="divide-y">
+              {edges.slice(0, 40).map((edge, index) => (
+                <div className="grid gap-2 p-3 text-sm" key={`${edge.from_node}-${edge.to_node}-${index}`}>
+                  <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)] items-start gap-2">
+                    <NodeSummary node={resolver.resolve(edge.from_node)} fallback={edge.from_node} />
+                    <Badge className="justify-center" variant="outline">{edge.condition || "unclear"}</Badge>
+                    <NodeSummary node={resolver.resolve(edge.to_node)} fallback={edge.to_node} />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {typeof edge.confidence === "number" ? <Badge variant="outline">{Math.round(edge.confidence * 100)}% confidence</Badge> : null}
+                    {topologyAcknowledged ? <Badge variant="secondary">covered by acknowledgement</Badge> : <Badge variant="destructive">needs topology ack</Badge>}
+                  </div>
+                  <p className="text-xs leading-5 text-muted-foreground">{edge.reason || "Detector could not fully confirm this edge direction or condition."}</p>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        </div>
       ) : (
         <p className="p-3 text-xs leading-5 text-muted-foreground">No uncertain edges. Decision branches still require graph review before publishing workflow diagrams.</p>
       )}
@@ -2411,6 +2562,41 @@ function sourceReference(unit: ExtractionUnit) {
     return `page ${unit.source_page}`;
   }
   return "";
+}
+
+function readablePublishFailure(failure: string) {
+  if (/^\d+_units_need_review$/.test(failure)) {
+    return "Units still need review";
+  }
+  if (/^\d+_page_only_source_refs_need_ack$/.test(failure)) {
+    return "Page-only source refs need acknowledgement";
+  }
+  if (/^\d+_units_missing_source_refs$/.test(failure)) {
+    return "Units are missing source refs";
+  }
+  if (/^\d+_degraded_units_need_manual_curation$/.test(failure)) {
+    return "Degraded units need manual curation";
+  }
+  if (failure.startsWith("workflow_graph_has_") && failure.includes("decision_edges_need_review")) {
+    return "Decision branches need review";
+  }
+  const known: Record<string, string> = {
+    archived_version: "Archived version cannot publish",
+    extraction_failed_validation: "Extraction failed validation",
+    historical_sheets_without_current_effective_date: "Historical source needs current effective date",
+    missing_effective_from: "Effective date is missing",
+    missing_full_sop_layer: "Full SOP layer is missing",
+    missing_owner_team: "Owner team is missing",
+    missing_production_atomic_units: "Production atomic units are missing",
+    missing_workflow_graph: "Workflow graph is missing",
+    no_extraction_units: "No extraction units",
+    workflow_graph_acknowledgement_reason_missing: "Graph acknowledgement needs a reason",
+    workflow_graph_decision_edges_missing: "Decision edges are missing",
+    workflow_graph_low_confidence: "Workflow graph confidence needs acknowledgement",
+    workflow_graph_missing_edges: "Workflow graph has no edges",
+    workflow_graph_needs_review: "Workflow graph unit needs review",
+  };
+  return known[failure] ?? failure.replace(/_/g, " ");
 }
 
 function requiredUnitTypesFromExtraction(...units: Array<ExtractionUnit | undefined>) {

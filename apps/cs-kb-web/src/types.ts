@@ -239,6 +239,12 @@ export type VersionSummary = {
   created_at: string;
 };
 
+export type PublishReadiness = {
+  ready: boolean;
+  failure_count: number;
+  failures: string[];
+};
+
 export type ExtractionUnit = {
   unit_id: string;
   document_id: string;

@@ -11,6 +11,7 @@ export const queryKeys = {
     ["ai-extraction-units", documentId, versionId] as const,
   extractionPipeline: (versionId: string) => ["ai-extraction-pipeline", versionId] as const,
   extractionPipelineInspection: (versionId: string) => ["ai-extraction-pipeline-inspection", versionId] as const,
+  publishReadiness: (versionId: string) => ["ai-publish-readiness", versionId] as const,
   versionRaw: (versionId: string) => ["ai-version-raw", versionId] as const,
   synonyms: (status: string) => ["search-synonyms", status] as const,
   suggestions: ["search-synonym-suggestions"] as const,

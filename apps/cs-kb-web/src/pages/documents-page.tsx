@@ -13,6 +13,7 @@ import {
   useExtractionPipeline,
   useExtractionPipelineInspection,
   useExtractionUnits,
+  usePublishReadiness,
   usePublishVersion,
   useUpdateExtractionUnit,
   useUploadDocument,
@@ -56,6 +57,7 @@ export function DocumentsPage() {
   const extractionUnitsQuery = useExtractionUnits(selectedDocument?.document_id, effectiveVersionId);
   const extractionPipelineQuery = useExtractionPipeline(effectiveVersionId);
   const extractionPipelineInspectionQuery = useExtractionPipelineInspection(effectiveVersionId);
+  const publishReadinessQuery = usePublishReadiness(effectiveVersionId);
   const versionRawQuery = useVersionRawText(effectiveVersionId);
   const uploadMutation = useUploadDocument();
   const uploadAsyncMutation = useUploadDocumentAsync();
@@ -312,7 +314,9 @@ export function DocumentsPage() {
         onSelectDocument={selectDocument}
         onUpdateExtractionUnit={updateExtractionUnit}
         onUpload={handleUpload}
-        savingUnitId={updateExtractionUnitMutation.variables?.unitId ?? ""}
+        publishReadiness={publishReadinessQuery.data ?? null}
+        publishReadinessLoading={publishReadinessQuery.isFetching}
+        savingUnitId={updateExtractionUnitMutation.isPending ? updateExtractionUnitMutation.variables?.unitId ?? "" : ""}
         selectedChunkVersionId={effectiveVersionId}
         selectedDocument={selectedDocument}
         setSelectedDocument={(document) => selectDocument(document.document_id)}

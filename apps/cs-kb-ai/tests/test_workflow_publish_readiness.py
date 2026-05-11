@@ -45,6 +45,22 @@ class WorkflowPublishReadinessTest(unittest.TestCase):
 
         self.assertEqual(failures, [])
 
+    def test_low_confidence_graph_requires_human_acknowledgement(self) -> None:
+        failures = workflow_graph_quality_failures({"graph_confidence": 0.6})
+
+        self.assertEqual(failures, ["workflow_graph_low_confidence"])
+
+    def test_low_confidence_graph_is_allowed_after_human_acknowledgement_with_reason(self) -> None:
+        failures = workflow_graph_quality_failures(
+            {
+                "graph_confidence": 0.6,
+                "graph_validation_acknowledged": True,
+                "graph_validation_acknowledged_reason": "Compared graph against source page and accepted low confidence visual extraction.",
+            }
+        )
+
+        self.assertEqual(failures, [])
+
     def test_decision_edges_require_edge_level_review(self) -> None:
         graph = {
             "workflow_graph": {

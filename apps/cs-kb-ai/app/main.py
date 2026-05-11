@@ -757,6 +757,16 @@ def publish_version(version_id: str, payload: dict[str, str] | None = None) -> d
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.get("/ai/v1/versions/{version_id}/publish-readiness")
+def get_publish_readiness(version_id: str) -> dict[str, Any]:
+    try:
+        return repository.publish_readiness(version_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/ai/v1/versions/{version_id}/bulk-review")
 def bulk_review_version(version_id: str, payload: BulkReviewVersionRequest | None = None) -> dict[str, Any]:
     try:

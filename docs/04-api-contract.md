@@ -63,6 +63,7 @@ Example request:
 | `GET` | `/ai/documents/{id}/versions` | Proxy document version history |
 | `POST` | `/ai/documents/{id}/archive` | Proxy document archive |
 | `POST` | `/ai/versions/{id}/publish` | Proxy version publish |
+| `GET` | `/ai/versions/{id}/publish-readiness` | Proxy backend publish dry-run blockers |
 | `POST` | `/ai/retrieve` | Proxy hybrid retrieval |
 
 AI service internal base path: `/ai/v1`
@@ -78,6 +79,7 @@ AI service internal base path: `/ai/v1`
 | `GET` | `/versions/{id}/extraction-pipeline/inspection.md` | Return the same inspection report as plain text for terminal/debug use |
 | `PATCH` | `/extraction-units/{id}` | Update a draft extraction unit title, content, unit type, confidence, review status, metadata, and regenerated embedding |
 | `POST` | `/documents/{id}/archive` | Archive document and hide from retrieval |
+| `GET` | `/versions/{id}/publish-readiness` | Dry-run publish validation and return exact blockers without mutating the version |
 | `POST` | `/versions/{id}/publish` | Publish version and archive previous published version |
 | `POST` | `/retrieve` | Hybrid retrieval using lexical + pgvector + RRF + workflow-aware reranking |
 | `GET` | `/search/taxonomy/intents` | List controlled search intents |

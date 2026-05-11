@@ -901,6 +901,31 @@ def publish_version(version_id: str, actor: str) -> dict[str, Any]:
             return dict(row)
 
 
+def publish_readiness(version_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        try:
+            validate_publish_readiness_tx(conn, version_id)
+        except ValueError as exc:
+            detail = str(exc)
+            if not detail.startswith("publish_readiness_failed:"):
+                raise
+            failures = [
+                failure
+                for failure in detail.removeprefix("publish_readiness_failed:").split(",")
+                if failure
+            ]
+            return {
+                "ready": False,
+                "failure_count": len(failures),
+                "failures": failures,
+            }
+        return {
+            "ready": True,
+            "failure_count": 0,
+            "failures": [],
+        }
+
+
 def has_required_source_ref(document_type: str, metadata: dict[str, Any]) -> bool:
     refs = metadata.get("source_refs")
     if not isinstance(refs, list):
@@ -990,10 +1015,15 @@ def workflow_graph_quality_failures(metadata: dict[str, Any]) -> list[str]:
     graph_errors = metadata.get("graph_validation_errors")
     uncertain_edges = metadata.get("uncertain_edges")
     uncertain_edges_count = int(metadata.get("uncertain_edges_count") or 0)
+    try:
+        graph_confidence = float(metadata.get("graph_confidence") or metadata.get("confidence") or 1)
+    except (TypeError, ValueError):
+        graph_confidence = 0
     has_quality_issue = (
         (isinstance(graph_errors, list) and bool(graph_errors))
         or (isinstance(uncertain_edges, list) and bool(uncertain_edges))
         or uncertain_edges_count > 0
+        or graph_confidence < 0.7
     )
     if metadata.get("graph_validation_acknowledged") is True:
         if has_quality_issue and not str(metadata.get("graph_validation_acknowledged_reason") or "").strip():
@@ -1005,6 +1035,8 @@ def workflow_graph_quality_failures(metadata: dict[str, Any]) -> list[str]:
         failures.append(f"workflow_graph_has_{len(uncertain_edges)}_uncertain_edges")
     if uncertain_edges_count > 0:
         failures.append(f"workflow_graph_has_{uncertain_edges_count}_uncertain_edges")
+    if graph_confidence < 0.7:
+        failures.append("workflow_graph_low_confidence")
     return list(dict.fromkeys(failures))
 
 
@@ -1271,8 +1303,6 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
             failures.append("missing_workflow_graph")
         if not workflow_graph_reviewed:
             failures.append("workflow_graph_needs_review")
-        if workflow_graph_confidence < 0.7:
-            failures.append("workflow_graph_low_confidence")
         if has_workflow_graph and workflow_graph_edges == 0:
             failures.append("workflow_graph_missing_edges")
         failures.extend(workflow_graph_quality_errors)

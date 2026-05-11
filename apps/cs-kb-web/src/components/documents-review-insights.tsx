@@ -975,7 +975,7 @@ function readinessActionForCheck(label: string) {
     "Required workflow units": "Complete required workflow units from the dedicated workflow panel.",
     "Selected version": "Inspect the draft version that should be published.",
     "Source refs acknowledged": "Verify page-only source refs in the source viewer and acknowledge them.",
-    "Workflow graph reviewed": "Review graph branches, resolve or acknowledge topology warnings, then approve the graph unit.",
+    "Workflow graph reviewed": "Open Workflow graph, use Decision branch review for Yes/No edges, use Uncertain edges to acknowledge topology warnings, then approve the graph unit.",
   };
   return actions[label] ?? "Resolve this readiness check before publishing.";
 }

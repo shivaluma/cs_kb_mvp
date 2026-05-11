@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiGet, apiPost, apiUpload } from "@/lib/api";
+import { apiGet, apiPatch, apiPost, apiUpload } from "@/lib/api";
 import type {
   DocumentChunk,
   ExtractionPipelineInspection,
@@ -10,6 +10,7 @@ import type {
   ExtractionUnit,
   ExtractionUnitCreate,
   ExtractionUnitUpdate,
+  PublishReadiness,
   VersionRawText,
   VersionSummary,
 } from "@/types";
@@ -72,6 +73,14 @@ export function useExtractionPipelineInspection(versionId?: string) {
   });
 }
 
+export function usePublishReadiness(versionId?: string) {
+  return useQuery({
+    enabled: Boolean(versionId),
+    queryKey: queryKeys.publishReadiness(versionId ?? ""),
+    queryFn: () => apiGet<PublishReadiness>(`/api/v1/ai/versions/${versionId}/publish-readiness`),
+  });
+}
+
 export function useExtractionUnits(documentId?: string, versionId?: string) {
   return useQuery({
     enabled: Boolean(documentId),
@@ -130,6 +139,7 @@ export function usePublishVersion() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.documents });
       queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-publish-readiness"] });
     },
   });
 }
@@ -149,6 +159,7 @@ export function useBulkReviewVersion() {
       queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
       queryClient.invalidateQueries({ queryKey: ["ai-document-chunks"] });
       queryClient.invalidateQueries({ queryKey: ["ai-extraction-units"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-publish-readiness"] });
     },
   });
 }
@@ -157,7 +168,7 @@ export function useUpdateExtractionUnit() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: { unitId: string; update: ExtractionUnitUpdate }) =>
-      apiPost<ExtractionUnit>(`/api/v1/ai/extraction-units/${payload.unitId}`, payload.update),
+      apiPatch<ExtractionUnit>(`/api/v1/ai/extraction-units/${payload.unitId}`, payload.update),
     onMutate: async (payload) => {
       await queryClient.cancelQueries({ queryKey: ["ai-extraction-units"] });
       await queryClient.cancelQueries({ queryKey: ["ai-document-chunks"] });
@@ -219,6 +230,7 @@ export function useUpdateExtractionUnit() {
       });
     },
     onSuccess: (unit) => {
+      queryClient.invalidateQueries({ queryKey: ["ai-publish-readiness"] });
       queryClient.setQueriesData<ExtractionUnit[]>(
         { queryKey: ["ai-extraction-units"] },
         (current) => current?.map((item) => (item.unit_id === unit.unit_id ? unit : item)) ?? current,
@@ -248,6 +260,7 @@ export function useCreateExtractionUnit() {
     mutationFn: (payload: { versionId: string; unit: ExtractionUnitCreate }) =>
       apiPost<ExtractionUnit>(`/api/v1/ai/versions/${payload.versionId}/extraction-units`, payload.unit),
     onSuccess: (unit) => {
+      queryClient.invalidateQueries({ queryKey: ["ai-publish-readiness"] });
       queryClient.setQueriesData<ExtractionUnit[]>(
         { queryKey: ["ai-extraction-units"] },
         (current) => (current ? [...current, unit].sort((left, right) => left.unit_index - right.unit_index) : [unit]),
