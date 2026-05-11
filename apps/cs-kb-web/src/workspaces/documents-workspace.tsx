@@ -130,6 +130,13 @@ export function DocumentsWorkspace({
   const fullSopUnit = extractionUnits.find((unit) => isDocumentLayer(unit));
   const workflowGraphUnit = extractionUnits.find((unit) => unit.unit_type === "workflow_graph" || Boolean(unit.metadata.workflow_graph));
   const workflowGraph = workflowGraphUnit?.metadata.workflow_graph as WorkflowGraphMetadata | undefined;
+  const workflowGraphValidationErrors = workflowGraph?.validation_errors ?? workflowGraphUnit?.metadata.graph_validation_errors ?? [];
+  const workflowGraphUncertainEdges = workflowGraph?.uncertain_edges ?? workflowGraphUnit?.metadata.uncertain_edges ?? [];
+  const workflowGraphIssueCount =
+    (Array.isArray(workflowGraphValidationErrors) ? workflowGraphValidationErrors.length : 0) +
+    (Array.isArray(workflowGraphUncertainEdges) ? workflowGraphUncertainEdges.length : 0) +
+    Number(workflowGraphUnit?.metadata.uncertain_edges_count ?? 0);
+  const workflowGraphIssuesAcknowledged = workflowGraphIssueCount === 0 || workflowGraphUnit?.metadata.graph_validation_acknowledged === true;
   const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && unit.unit_type !== "workflow_graph" && !unit.metadata.workflow_graph);
   const selectedIsArchived = selectedDocument?.status === "archived";
   const pendingReviewCount = extractionUnits.filter((unit) => unit.review_status === "needs_review").length;
@@ -195,10 +202,12 @@ export function DocumentsWorkspace({
     },
     {
       detail: workflowGraphUnit
-        ? `${workflowGraph?.nodes?.length ?? 0} nodes, ${workflowGraph?.edges?.length ?? 0} edges, ${Math.round(workflowGraphConfidence * 100)}% confidence`
+        ? workflowGraphIssuesAcknowledged
+          ? `${workflowGraph?.nodes?.length ?? 0} nodes, ${workflowGraph?.edges?.length ?? 0} edges, ${Math.round(workflowGraphConfidence * 100)}% confidence`
+          : `${workflowGraphIssueCount} topology issue(s) need acknowledgement`
         : "Workflow graph missing",
       label: "Workflow graph reviewed",
-      passed: !workflowRequiresGraph || Boolean(workflowGraphUnit && workflowGraphUnit.review_status !== "needs_review" && workflowGraphConfidence >= 0.7 && (workflowGraph?.edges?.length ?? 0) > 0),
+      passed: !workflowRequiresGraph || Boolean(workflowGraphUnit && workflowGraphUnit.review_status !== "needs_review" && workflowGraphConfidence >= 0.7 && (workflowGraph?.edges?.length ?? 0) > 0 && workflowGraphIssuesAcknowledged),
     },
     {
       detail: pageOnlySourceRefUnacknowledged
@@ -736,9 +745,12 @@ export function DocumentsWorkspace({
 
         {workflowRequiresGraph ? (
           <WorkflowGraphPanel
+            canEdit={canEditSelectedVersion}
             graph={workflowGraph}
             graphUnit={workflowGraphUnit}
             confidence={workflowGraphConfidence}
+            onAcknowledge={(unit) => onUpdateExtractionUnit(unit, buildWorkflowGraphAcknowledgement(unit))}
+            saving={savingUnitId === workflowGraphUnit?.unit_id}
           />
         ) : null}
 
@@ -1310,17 +1322,28 @@ function SourceViewer({
 }
 
 function WorkflowGraphPanel({
+  canEdit,
   confidence,
   graph,
   graphUnit,
+  onAcknowledge,
+  saving,
 }: {
+  canEdit: boolean;
   confidence: number;
   graph?: WorkflowGraphMetadata;
   graphUnit?: ExtractionUnit;
+  onAcknowledge: (unit: ExtractionUnit) => void;
+  saving: boolean;
 }) {
   const validationErrors = graph?.validation_errors ?? graphUnit?.metadata.graph_validation_errors ?? [];
   const uncertainEdges = graph?.uncertain_edges ?? graphUnit?.metadata.uncertain_edges ?? [];
   const annotations = graph?.annotations ?? graphUnit?.metadata.annotations ?? [];
+  const uncertainEdgeCount =
+    (Array.isArray(uncertainEdges) ? uncertainEdges.length : 0) +
+    Number(graphUnit?.metadata.uncertain_edges_count ?? 0);
+  const issueCount = (Array.isArray(validationErrors) ? validationErrors.length : 0) + uncertainEdgeCount;
+  const acknowledged = issueCount === 0 || graphUnit?.metadata.graph_validation_acknowledged === true;
   return (
     <Card className="rounded-xl">
       <CardHeader className="border-b pb-4">
@@ -1351,19 +1374,43 @@ function WorkflowGraphPanel({
                 {String(graph.review_reason ?? graphUnit.metadata.review_reason ?? "Review graph branches and arrow direction before publish.")}
               </p>
             </div>
-            {Array.isArray(validationErrors) && validationErrors.length ? (
-              <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-destructive">Topology validation blockers</p>
-                  <Badge variant="destructive">{validationErrors.length} issues</Badge>
+            {issueCount ? (
+              <div className={cn("rounded-xl border p-4", acknowledged ? "bg-secondary/30" : "border-destructive/30 bg-destructive/5")}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className={cn("text-sm font-semibold", acknowledged ? "text-foreground" : "text-destructive")}>Topology validation blockers</p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {acknowledged
+                        ? "Human reviewer acknowledged these topology warnings. Backend publish gate will accept this graph if other checks pass."
+                        : "Backend publish is blocked until these graph warnings are acknowledged after source review."}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={acknowledged ? "secondary" : "destructive"}>{issueCount} issues</Badge>
+                    {acknowledged ? <Badge variant="outline">acknowledged</Badge> : null}
+                    {graphUnit && !acknowledged ? (
+                      <Button
+                        disabled={!canEdit || saving}
+                        onClick={() => onAcknowledge(graphUnit)}
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                      >
+                        {saving ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <ShieldCheck data-icon="inline-start" className="size-4" />}
+                        Acknowledge after review
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
-                <div className="mt-3 grid gap-2">
-                  {validationErrors.slice(0, 8).map((error, index) => (
+                {Array.isArray(validationErrors) && validationErrors.length ? (
+                  <div className="mt-3 grid gap-2">
+                    {validationErrors.slice(0, 8).map((error, index) => (
                     <p className="rounded-lg border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground" key={`${error}-${index}`}>
                       {String(error)}
                     </p>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             ) : null}
             <div className="grid gap-4 2xl:grid-cols-[minmax(22rem,0.85fr)_minmax(0,1.35fr)]">
@@ -1978,6 +2025,27 @@ function buildWorkflowRequirementStub(
       source_ref_acknowledged: false,
       source_ref_quality: isWorkflow ? "page_only" : "none",
       unit_type: requirement.key,
+    },
+  };
+}
+
+function buildWorkflowGraphAcknowledgement(unit: ExtractionUnit): ExtractionUnitUpdate {
+  const reviewStatus = unit.review_status === "approved" ? "approved" : "reviewed";
+  return {
+    title: unit.title,
+    content: unit.content,
+    unit_type: unit.unit_type,
+    confidence: unit.confidence,
+    review_status: reviewStatus,
+    actor: "cs-lead-ui",
+    metadata: {
+      ...unit.metadata,
+      graph_validation_acknowledged: true,
+      graph_validation_acknowledged_at: new Date().toISOString(),
+      graph_validation_acknowledged_by: "cs-lead-ui",
+      review_status: reviewStatus,
+      source_ref_acknowledged: unit.metadata.source_ref_quality === "page_only" ? true : unit.metadata.source_ref_acknowledged,
+      unit_type: unit.unit_type,
     },
   };
 }

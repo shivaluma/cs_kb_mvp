@@ -651,6 +651,8 @@ def workflow_graph_edge_count(metadata: dict[str, Any]) -> int:
 
 def workflow_graph_quality_failures(metadata: dict[str, Any]) -> list[str]:
     failures: list[str] = []
+    if metadata.get("graph_validation_acknowledged") is True:
+        return failures
     graph_errors = metadata.get("graph_validation_errors")
     if isinstance(graph_errors, list) and graph_errors:
         failures.append(f"workflow_graph_has_{len(graph_errors)}_validation_errors")
