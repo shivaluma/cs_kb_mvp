@@ -250,12 +250,17 @@ def normalize_schema_text(value: str) -> str:
 class WorkflowNode(BaseModel):
     id: str = Field(min_length=1, max_length=120)
     type: str = Field(min_length=1, max_length=60)
+    semantic_node_type: str = ""
     actor: str = ""
     phase: str = ""
     title: str = Field(min_length=1, max_length=240)
     content: str = ""
     question: str = ""
     source_refs: list[SourceRef] = Field(default_factory=list)
+    bbox: list[float] = Field(default_factory=list)
+    page: int | None = None
+    attached_annotations: list[str] = Field(default_factory=list)
+    dedupe_status: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -263,7 +268,7 @@ class WorkflowNode(BaseModel):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
-        for key in ("id", "type", "actor", "phase", "title", "content", "question"):
+        for key in ("id", "type", "semantic_node_type", "actor", "phase", "title", "content", "question", "dedupe_status"):
             raw = normalized.get(key)
             normalized[key] = "" if raw in (None, "null") else str(raw)
         title = normalized.get("title") or normalized.get("question") or normalized.get("content") or normalized.get("id") or "Workflow node"
@@ -279,6 +284,10 @@ class WorkflowEdge(BaseModel):
     from_node: str = Field(min_length=1, max_length=120)
     to_node: str = Field(min_length=1, max_length=120)
     condition: str = ""
+    confidence: float | None = None
+    review_status: str = ""
+    review_reason: str = ""
+    source_refs: list[SourceRef] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -289,6 +298,8 @@ class WorkflowEdge(BaseModel):
         normalized["from_node"] = str(normalized.get("from_node") or normalized.get("from") or normalized.get("source") or "")
         normalized["to_node"] = str(normalized.get("to_node") or normalized.get("to") or normalized.get("target") or "")
         normalized["condition"] = str(normalized.get("condition") or "next")
+        normalized["review_status"] = str(normalized.get("review_status") or "")
+        normalized["review_reason"] = str(normalized.get("review_reason") or normalized.get("reason") or "")
         return normalized
 
 

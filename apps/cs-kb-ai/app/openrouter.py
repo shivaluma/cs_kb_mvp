@@ -972,7 +972,8 @@ def workflow_graph_summary(graph: dict[str, Any]) -> str:
     nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
     edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
     node_lines = [
-        f"- {node.get('id')}: {node.get('title') or node.get('question')} ({node.get('actor', '')}, {node.get('phase', '')})"
+        f"- {node.get('id')}: {node.get('question') or node.get('title') or node.get('content')} ({node.get('actor', '')}, {node.get('phase', '')})"
+        + (f" — {node.get('content')}" if node.get("content") and node.get("content") not in {node.get("title"), node.get("question")} else "")
         for node in nodes[:40]
         if isinstance(node, dict)
     ]

@@ -25,7 +25,7 @@ type WorkflowGraphMetadata = {
   graph_confidence?: number;
   requires_human_review?: boolean;
   review_reason?: string;
-  nodes?: Array<{ id?: string; type?: string; actor?: string; phase?: string; title?: string; question?: string }>;
+  nodes?: Array<{ id?: string; type?: string; semantic_node_type?: string; actor?: string; phase?: string; title?: string; content?: string; question?: string }>;
   edges?: Array<{ from_node?: string; to_node?: string; condition?: string; review_reason?: string; review_status?: string }>;
   annotations?: Array<{ id?: string; type?: string; attached_to?: string; title?: string; content?: string; risk_level?: string }>;
   uncertain_edges?: Array<{ from_node?: string; to_node?: string; condition?: string; reason?: string; confidence?: number }>;
@@ -2102,10 +2102,17 @@ function WorkflowBranchTable({
 }
 
 function NodeSummary({ fallback, node }: { fallback?: string; node?: WorkflowNodeMetadata }) {
+  const primary = node?.type === "decision"
+    ? node?.question || node?.title || fallback || "Unknown step"
+    : node?.title || node?.question || fallback || "Unknown step";
+  const detailCandidates = [node?.content, node?.question, node?.title].filter(Boolean).map((value) => String(value));
+  const detail = detailCandidates.find((value) => normalizeWorkflowKey(value) !== normalizeWorkflowKey(primary));
   return (
     <div className="min-w-0">
-      <p className="line-clamp-2 font-medium leading-5">{node?.title || node?.question || fallback || "Unknown step"}</p>
+      <p className="line-clamp-2 font-medium leading-5">{primary}</p>
+      {detail ? <p className="mt-1 line-clamp-4 text-xs leading-5 text-muted-foreground">{detail}</p> : null}
       <div className="mt-1 flex flex-wrap gap-1">
+        {node?.semantic_node_type && node.semantic_node_type !== node.type ? <Badge variant="secondary">{node.semantic_node_type}</Badge> : null}
         {node?.type ? <Badge variant="outline">{node.type}</Badge> : null}
         {node?.phase ? <Badge variant="outline">{node.phase}</Badge> : null}
         {node?.actor ? <Badge variant="outline">{node.actor}</Badge> : null}
@@ -2343,7 +2350,7 @@ function buildWorkflowNodeResolver(graph: WorkflowGraphMetadata) {
   };
 
   nodes.forEach((node, index) => {
-    [node.id, node.title, node.question].filter(Boolean).forEach((value) => {
+    [node.id, node.title, node.question, node.content].filter(Boolean).forEach((value) => {
       exact.set(String(value), node);
       normalized.set(normalizeWorkflowKey(String(value)), node);
     });
@@ -2378,7 +2385,7 @@ function buildWorkflowNodeResolver(graph: WorkflowGraphMetadata) {
 
   function label(value?: string) {
     const node = resolve(value);
-    const main = node?.title || node?.question || readableWorkflowEndpoint(value);
+    const main = node?.question || node?.title || node?.content || readableWorkflowEndpoint(value);
     const meta = [node?.actor, node?.phase].filter(Boolean).join(" / ");
     return meta ? `${main} (${meta})` : main;
   }
@@ -2460,12 +2467,12 @@ function isDecisionWorkflowEdge(edge: WorkflowEdgeMetadata, graph?: WorkflowGrap
 }
 
 function isDecisionWorkflowNode(node: WorkflowNodeMetadata) {
-  const haystack = normalizeWorkflowKey(`${node.id ?? ""} ${node.type ?? ""} ${node.title ?? ""} ${node.question ?? ""}`);
+  const haystack = normalizeWorkflowKey(`${node.id ?? ""} ${node.type ?? ""} ${node.semantic_node_type ?? ""} ${node.title ?? ""} ${node.question ?? ""} ${node.content ?? ""}`);
   return haystack.includes("decision") || haystack.includes("quyet dinh") || Boolean(node.question) || haystack.includes("?");
 }
 
 function classifyWorkflowNode(node: WorkflowNodeMetadata, index: number, nodeCount: number) {
-  const raw = normalizeWorkflowKey(`${node.id || ""} ${node.type || ""} ${node.title || ""} ${node.question || ""}`);
+  const raw = normalizeWorkflowKey(`${node.id || ""} ${node.type || ""} ${node.semantic_node_type || ""} ${node.title || ""} ${node.question || ""} ${node.content || ""}`);
   const kinds: WorkflowNodeKind[] = [];
   if (raw.includes("start") || raw.includes("bat dau") || index === 0) {
     kinds.push("start");

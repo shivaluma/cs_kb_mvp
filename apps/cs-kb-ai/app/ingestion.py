@@ -332,6 +332,9 @@ def try_ai_structuring(
                 warnings.append("visual_graph_context_supplied_to_llm")
             llm_units, llm_warnings = extract_workflow_units(filename, raw_text, page_images=page_images, visual_context=visual_context)
             warnings.extend(llm_warnings)
+            semantic_refinement = raw_context.get("workflow_semantic_refinement") if isinstance(raw_context.get("workflow_semantic_refinement"), dict) else {}
+            if semantic_refinement:
+                llm_units = enrich_workflow_units_with_semantic_refinement(llm_units, semantic_refinement)
             chunks = workflow_units_to_chunks(llm_units, raw_text, filename) if llm_units else []
             if not chunks:
                 return [], warnings, f"ai_workflow_structuring_failed:{','.join(llm_warnings)}"
@@ -726,6 +729,168 @@ def workflow_structuring_quality_error(chunks: list[Any], warnings: list[str]) -
     return ""
 
 
+def enrich_workflow_units_with_semantic_refinement(units: list[dict[str, Any]], semantic_refinement: dict[str, Any]) -> list[dict[str, Any]]:
+    semantic_nodes = semantic_nodes_for_enrichment(semantic_refinement)
+    if not semantic_nodes:
+        return units
+    output: list[dict[str, Any]] = []
+    for unit in units:
+        if not isinstance(unit, dict):
+            output.append(unit)
+            continue
+        metadata = dict(unit.get("metadata") or {})
+        unit_type = str(unit.get("unit_type") or metadata.get("unit_type") or "")
+        graph = metadata.get("workflow_graph") if isinstance(metadata.get("workflow_graph"), dict) else None
+        if unit_type != "workflow_graph" or not graph:
+            output.append(unit)
+            continue
+        enriched_graph, enriched_count = enrich_workflow_graph_nodes(graph, semantic_nodes)
+        if enriched_count:
+            metadata = {
+                **metadata,
+                "workflow_graph": enriched_graph,
+                "semantic_refinement_enriched_node_count": enriched_count,
+            }
+            output.append(
+                {
+                    **unit,
+                    "content": semantic_workflow_graph_summary(enriched_graph),
+                    "metadata": metadata,
+                }
+            )
+        else:
+            output.append(unit)
+    return output
+
+
+def semantic_nodes_for_enrichment(semantic_refinement: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    graph_candidate = semantic_refinement.get("workflow_graph_candidate") if isinstance(semantic_refinement.get("workflow_graph_candidate"), dict) else {}
+    for node in graph_candidate.get("nodes", []) if isinstance(graph_candidate.get("nodes"), list) else []:
+        if isinstance(node, dict):
+            nodes.append(node)
+    for page in semantic_refinement.get("pages", []) if isinstance(semantic_refinement.get("pages"), list) else []:
+        if not isinstance(page, dict):
+            continue
+        for node in page.get("semantic_nodes", []) if isinstance(page.get("semantic_nodes"), list) else []:
+            if isinstance(node, dict):
+                nodes.append(node)
+    deduped: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        key = node_id or semantic_text_key(str(node.get("content") or node.get("question") or node.get("title") or ""))
+        if not key:
+            continue
+        existing = deduped.get(key)
+        if not existing or len(str(node.get("content") or "")) > len(str(existing.get("content") or "")):
+            deduped[key] = node
+    return list(deduped.values())
+
+
+def enrich_workflow_graph_nodes(graph: dict[str, Any], semantic_nodes: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    if not nodes:
+        return graph, 0
+    enriched_nodes: list[dict[str, Any]] = []
+    used_semantic_ids: set[str] = set()
+    enriched_count = 0
+    for node in nodes:
+        if not isinstance(node, dict):
+            enriched_nodes.append(node)
+            continue
+        semantic_node = match_semantic_node_for_graph_node(node, semantic_nodes, used_semantic_ids)
+        if semantic_node:
+            used_semantic_ids.add(str(semantic_node.get("id") or ""))
+            merged = merge_graph_node_with_semantic_node(node, semantic_node)
+            enriched_count += int(merged != node)
+            enriched_nodes.append(merged)
+        else:
+            enriched_nodes.append(node)
+    return {**graph, "nodes": enriched_nodes}, enriched_count
+
+
+def match_semantic_node_for_graph_node(node: dict[str, Any], semantic_nodes: list[dict[str, Any]], used_ids: set[str]) -> dict[str, Any] | None:
+    node_id = str(node.get("id") or "").strip()
+    if node_id:
+        direct = next((item for item in semantic_nodes if str(item.get("id") or "") == node_id), None)
+        if direct:
+            return direct
+    node_text = " ".join(str(node.get(key) or "") for key in ("id", "title", "question", "content"))
+    node_code = workflow_step_code(node_text)
+    node_type = str(node.get("semantic_node_type") or node.get("type") or "")
+    if node_code:
+        candidates = [
+            item for item in semantic_nodes
+            if workflow_step_code(str(item.get("content") or item.get("question") or item.get("title") or "")) == node_code
+        ]
+        if candidates:
+            candidates.sort(
+                key=lambda item: (
+                    str(item.get("id") or "") in used_ids,
+                    not compatible_graph_semantic_type(node_type, str(item.get("semantic_node_type") or item.get("type") or "")),
+                    -len(str(item.get("content") or "")),
+                )
+            )
+            return candidates[0]
+    node_key = semantic_text_key(node_text)
+    if not node_key:
+        return None
+    best: tuple[float, dict[str, Any]] | None = None
+    for item in semantic_nodes:
+        item_text = str(item.get("content") or item.get("question") or item.get("title") or "")
+        item_key = semantic_text_key(item_text)
+        if not item_key:
+            continue
+        score = max(SequenceMatcher(None, node_key, item_key).ratio(), token_containment(node_key, item_key))
+        if score < 0.72:
+            continue
+        if not best or score > best[0]:
+            best = (score, item)
+    return best[1] if best else None
+
+
+def workflow_step_code(text: str) -> str:
+    match = re.search(r"\b(\d+(?:\.\d+)*)[.)]?\s+", str(text or ""))
+    return match.group(1) if match else ""
+
+
+def compatible_graph_semantic_type(graph_type: str, semantic_type: str) -> bool:
+    if not graph_type or not semantic_type:
+        return True
+    if graph_type == semantic_type:
+        return True
+    if graph_type == "action" and semantic_type in GRAPH_SEMANTIC_NODE_TYPES - {"decision", "start", "end"}:
+        return True
+    return graph_type == "decision" and semantic_type == "decision"
+
+
+def merge_graph_node_with_semantic_node(node: dict[str, Any], semantic_node: dict[str, Any]) -> dict[str, Any]:
+    semantic_content = str(semantic_node.get("content") or semantic_node.get("question") or semantic_node.get("title") or "").strip()
+    node_content = str(node.get("content") or "").strip()
+    content = semantic_content if len(semantic_content) > len(node_content) else node_content
+    semantic_type = str(semantic_node.get("semantic_node_type") or node.get("semantic_node_type") or "")
+    graph_type = graph_node_type_for_semantic(semantic_type) if semantic_type else str(node.get("type") or "action")
+    question = normalize_decision_question(content) if graph_type == "decision" else str(node.get("question") or "").strip()
+    title = str(node.get("title") or "").strip()
+    if not title or len(semantic_title(content)) > len(title):
+        title = semantic_title(content)
+    source_refs = node.get("source_refs") if isinstance(node.get("source_refs"), list) and node.get("source_refs") else semantic_node.get("source_refs", [])
+    return {
+        **node,
+        "type": graph_type,
+        "semantic_node_type": semantic_type or node.get("semantic_node_type", ""),
+        "title": title[:240] or semantic_title(content),
+        "content": content,
+        "question": question,
+        "actor": node.get("actor") or semantic_node.get("actor") or infer_workflow_actor(content),
+        "source_refs": source_refs,
+        "bbox": node.get("bbox") or semantic_node.get("bbox", []),
+        "page": node.get("page") or semantic_node.get("page"),
+        "dedupe_status": node.get("dedupe_status") or semantic_node.get("dedupe_status", "unique"),
+        "attached_annotations": node.get("attached_annotations") or semantic_node.get("attached_annotations", []),
+    }
+
+
 def build_degraded_draft(
     *,
     filename: str,
@@ -896,6 +1061,7 @@ def build_workflow_semantic_refinement(
         page_number = int(page.get("page") or 1)
         graph = page.get("graph_candidate") if isinstance(page.get("graph_candidate"), dict) else {}
         raw_nodes = semantic_nodes_from_visual_page(filename, page, graph)
+        raw_nodes.extend(semantic_nodes_from_visual_text_blocks(filename, page, raw_nodes))
         raw_nodes.extend(semantic_annotations_from_visual_text_blocks(filename, page, raw_nodes))
         raw_node_count += len(raw_nodes)
 
@@ -1015,6 +1181,125 @@ def semantic_nodes_from_visual_page(filename: str, page: dict[str, Any], graph: 
     return output
 
 
+def semantic_nodes_from_visual_text_blocks(filename: str, page: dict[str, Any], existing_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    page_number = int(page.get("page") or 1)
+    existing_keys = {node.get("text_key") for node in existing_nodes}
+    for group in workflow_text_groups_from_visual_blocks(page.get("text_blocks", [])):
+        text = str(group.get("text") or "").strip()
+        if not text:
+            continue
+        key = semantic_text_key(text)
+        if key in existing_keys:
+            continue
+        semantic_type = classify_semantic_node_type(text, "decision" if is_decision_text(text) else "action")
+        if semantic_type in ANNOTATION_SEMANTIC_NODE_TYPES:
+            continue
+        bbox = normalize_bbox_list(group.get("bbox"))
+        semantic_id = f"sem_{group.get('id') or f'p{page_number}_text_node_{len(output) + 1}'}"
+        output.append(
+            {
+                "id": semantic_id,
+                "page": page_number,
+                "title": semantic_title(text),
+                "content": text,
+                "text_key": key,
+                "semantic_node_type": semantic_type,
+                "graph_node_type": graph_node_type_for_semantic(semantic_type),
+                "actor": infer_workflow_actor(text),
+                "bbox": bbox,
+                "confidence": 0.56,
+                "source_refs": [{"source_type": "pdf_diagram", "source_file": filename, "page": page_number, "bbox": bbox}],
+                "source_node_ids": list(group.get("source_text_ids") or [str(group.get("id") or semantic_id)]),
+                "visual_node_type": "text_block_backfill",
+                "dedupe_status": "unique",
+                "attached_annotations": [],
+            }
+        )
+    return output
+
+
+def workflow_text_groups_from_visual_blocks(text_blocks: Any) -> list[dict[str, Any]]:
+    if not isinstance(text_blocks, list):
+        return []
+    blocks = [
+        block for block in text_blocks
+        if isinstance(block, dict)
+        and str(block.get("text") or "").strip()
+        and len(normalize_bbox_list(block.get("bbox"))) == 4
+    ]
+    blocks.sort(key=lambda block: (normalize_bbox_list(block.get("bbox"))[1], normalize_bbox_list(block.get("bbox"))[0]))
+    groups: list[dict[str, Any]] = []
+    for block in blocks:
+        start_text = str(block.get("text") or "").strip()
+        if not is_numbered_workflow_step(start_text):
+            continue
+        start_bbox = normalize_bbox_list(block.get("bbox"))
+        group_blocks = [block]
+        group_bbox = start_bbox
+        last_bottom = start_bbox[3]
+        for candidate in blocks:
+            if candidate is block:
+                continue
+            candidate_bbox = normalize_bbox_list(candidate.get("bbox"))
+            candidate_text = str(candidate.get("text") or "").strip()
+            if candidate_bbox[1] < start_bbox[1] - 2:
+                continue
+            if candidate_bbox[1] > start_bbox[1] + 220:
+                break
+            if candidate_bbox[1] <= start_bbox[1] + 2 and candidate_bbox[0] <= start_bbox[0]:
+                continue
+            if is_visual_workflow_noise(candidate_text):
+                continue
+            vertical_gap = candidate_bbox[1] - last_bottom
+            if vertical_gap > 38 and len(group_blocks) > 1:
+                break
+            if is_numbered_workflow_step(candidate_text):
+                if horizontally_related_text_block(group_bbox, candidate_bbox) and candidate_bbox[1] > start_bbox[1] + 8:
+                    break
+                continue
+            if not horizontally_related_text_block(group_bbox, candidate_bbox):
+                continue
+            if vertical_gap > 46:
+                continue
+            group_blocks.append(candidate)
+            group_bbox = union_bboxes([group_bbox, candidate_bbox])
+            last_bottom = max(last_bottom, candidate_bbox[3])
+        text = "\n".join(str(item.get("text") or "").strip() for item in group_blocks if str(item.get("text") or "").strip())
+        groups.append(
+            {
+                "id": f"{block.get('id') or 'text'}_group",
+                "page": block.get("page"),
+                "text": text,
+                "bbox": group_bbox,
+                "source_text_ids": [str(item.get("id") or "") for item in group_blocks if item.get("id")],
+            }
+        )
+    return groups
+
+
+def is_visual_workflow_noise(text: str) -> bool:
+    normalized = normalized_search_text(text)
+    line_keys = {normalized_search_text(line) for line in str(text or "").splitlines() if line.strip()}
+    stripped = text.strip().lower()
+    if not normalized:
+        return True
+    if normalized in {"yes", "no", "co", "khong", "khach hang", "cs a", "cs b", "cs l2", "cs layer2", "msc", "end"}:
+        return True
+    if line_keys & {"yes", "no", "co", "khong"}:
+        return True
+    return bool(re.match(r"^\([a-z]\)$", stripped))
+
+
+def horizontally_related_text_block(group_bbox: list[float], block_bbox: list[float]) -> bool:
+    if len(group_bbox) != 4 or len(block_bbox) != 4:
+        return False
+    overlap = max(0.0, min(group_bbox[2], block_bbox[2]) - max(group_bbox[0], block_bbox[0]))
+    min_width = max(1.0, min(group_bbox[2] - group_bbox[0], block_bbox[2] - block_bbox[0]))
+    center_distance = abs(((group_bbox[0] + group_bbox[2]) / 2) - ((block_bbox[0] + block_bbox[2]) / 2))
+    return overlap / min_width > 0.35 or center_distance < max(120.0, (group_bbox[2] - group_bbox[0]) * 0.75)
+
+
 def semantic_annotations_from_visual_text_blocks(filename: str, page: dict[str, Any], existing_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     page_number = int(page.get("page") or 1)
@@ -1059,7 +1344,7 @@ def classify_semantic_node_type(text: str, visual_type: str) -> str:
     normalized = normalized_search_text(text)
     stripped = text.strip()
     visual_type = visual_type.lower()
-    if visual_type == "decision" or stripped.endswith("?") or "?" in stripped:
+    if visual_type == "decision" or is_decision_text(stripped):
         return "decision"
     if normalized == "end":
         return "end"
@@ -1067,6 +1352,11 @@ def classify_semantic_node_type(text: str, visual_type: str) -> str:
         return "start"
     if visual_type == "end" and not is_numbered_workflow_step(stripped):
         return "end"
+    if is_numbered_workflow_step(stripped):
+        if is_queue_text(normalized):
+            return "queue_rule"
+        if is_sla_text(normalized):
+            return "sla_rule"
     if is_audit_text(normalized):
         return "audit_rule"
     if is_warning_text(normalized):
@@ -1082,6 +1372,11 @@ def classify_semantic_node_type(text: str, visual_type: str) -> str:
     return "action"
 
 
+def is_decision_text(text: str) -> bool:
+    normalized = normalized_search_text(text)
+    return "?" in text or " hay khong" in normalized
+
+
 def is_numbered_workflow_step(text: str) -> bool:
     return bool(re.match(r"^\s*\d+(?:\.\d+)*[.)]?\s+", text))
 
@@ -1095,7 +1390,7 @@ def is_annotation_like_text(text: str) -> bool:
         or "quy dinh note" in normalized
         or "quy dinh audit" in normalized
         or "zt" in normalized
-        or "script" in normalized
+        or bool(re.search(r"\bscript\b", normalized))
     )
 
 
@@ -1209,12 +1504,18 @@ def should_merge_semantic_nodes(left: dict[str, Any], right: dict[str, Any]) -> 
     right_text = str(right.get("text_key") or "")
     if not left_text or not right_text:
         return False
+    left_code = workflow_step_code(str(left.get("content") or left.get("title") or ""))
+    right_code = workflow_step_code(str(right.get("content") or right.get("title") or ""))
+    if left_code and right_code and left_code != right_code:
+        return False
     text_similarity = max(SequenceMatcher(None, left_text, right_text).ratio(), token_jaccard(left_text, right_text))
     text_containment = token_containment(left_text, right_text)
     left_bbox = left.get("bbox") if isinstance(left.get("bbox"), list) else []
     right_bbox = right.get("bbox") if isinstance(right.get("bbox"), list) else []
     overlap = bbox_overlap_strength(left_bbox, right_bbox)
     distance = bbox_distance(left_bbox, right_bbox) if len(left_bbox) == 4 and len(right_bbox) == 4 else 99999.0
+    if left_code and left_code == right_code and text_containment > 0.62 and distance < 450:
+        return True
     if overlap > 0.25 and text_containment > 0.72:
         return True
     if (left_text.startswith(right_text) or right_text.startswith(left_text)) and overlap > 0.2:
@@ -1510,7 +1811,7 @@ def workflow_graph_node_payload(node: dict[str, Any]) -> dict[str, Any]:
         "actor": node.get("actor", ""),
         "phase": "",
         "title": (question or title)[:240] if graph_type == "decision" else title[:240],
-        "content": "" if graph_type == "decision" else content,
+        "content": content,
         "question": question,
         "source_refs": node.get("source_refs", []),
         "attached_annotations": node.get("attached_annotations", []),
@@ -1531,7 +1832,7 @@ def normalize_decision_question(text: str) -> str:
                 break
         lines = lines[start_index:question_index + 1]
     lines = [line for line in lines if normalized_search_text(line) not in {"yes", "no"}]
-    cleaned = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", " ".join(lines)).strip()
+    cleaned = re.sub(r"\s+([?!.])", r"\1", re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", " ".join(lines)).strip())
     if cleaned and not cleaned.endswith("?"):
         cleaned += "?"
     return cleaned or "Điểm quyết định cần review?"
@@ -1797,6 +2098,12 @@ def semantic_workflow_graph_summary(graph: dict[str, Any]) -> str:
     edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
     uncertain_edges = graph.get("uncertain_edges") if isinstance(graph.get("uncertain_edges"), list) else []
     annotations = graph.get("annotations") if isinstance(graph.get("annotations"), list) else []
+    node_lines = [
+        f"- {node.get('id')}: {node.get('question') or node.get('title') or node.get('content')} ({node.get('semantic_node_type') or node.get('type') or ''})"
+        + (f" — {node.get('content')}" if node.get("content") and node.get("content") not in {node.get("title"), node.get("question")} else "")
+        for node in nodes[:40]
+        if isinstance(node, dict)
+    ]
     return "\n".join(
         [
             f"Workflow graph: {graph.get('title') or 'Workflow graph'}",
@@ -1804,6 +2111,8 @@ def semantic_workflow_graph_summary(graph: dict[str, Any]) -> str:
             f"Confirmed edges: {len(edges)}",
             f"Uncertain edges requiring review: {len(uncertain_edges)}",
             f"Annotations: {len(annotations)}",
+            "Node text:",
+            *node_lines,
             str(graph.get("review_reason") or "Manual topology review required before publish."),
         ]
     )

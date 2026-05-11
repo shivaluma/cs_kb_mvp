@@ -294,6 +294,40 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         ]
         self.assertEqual(outgoing_from_annotations, [])
 
+    def test_workflow_semantic_refine_backfills_full_decision_text_from_bboxes(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        layout = workflow_visual_layout_fixture()
+        layout["pages"][0]["text_blocks"].extend(
+            [
+                {"id": "p1_text_2a", "page": 1, "text": "2. Thời gian hết hạn", "bbox": [280, 260, 430, 284]},
+                {"id": "p1_text_2b", "page": 1, "text": "gửi hình của KH", "bbox": [292, 286, 420, 310]},
+                {"id": "p1_text_2c", "page": 1, "text": "trước thời gian hết ca làm", "bbox": [260, 312, 450, 336]},
+                {"id": "p1_text_2d", "page": 1, "text": "việc của CS_A ?", "bbox": [292, 338, 420, 362]},
+            ]
+        )
+        refinement = ingestion.build_workflow_semantic_refinement(
+            filename="workflow.pdf",
+            visual_layout=layout,
+            source_blocks=[],
+            classification=classification,
+        )
+
+        graph_nodes = refinement["workflow_graph_candidate"]["nodes"]
+        decision = next(node for node in graph_nodes if "Thời gian hết hạn" in node.get("content", ""))
+        self.assertEqual(decision["semantic_node_type"], "decision")
+        self.assertIn("gửi hình của KH", decision["content"])
+        self.assertEqual(decision["question"], "Thời gian hết hạn gửi hình của KH trước thời gian hết ca làm việc của CS_A?")
+        self.assertEqual(refinement["workflow_graph_candidate"]["topology_source"], "visual_connector_candidates_only")
+
+    def test_workflow_semantic_refine_does_not_treat_description_as_script(self) -> None:
+        self.assertEqual(
+            ingestion.classify_semantic_node_type(
+                '3.2. Chuyển case vào\nqueue "Food Order Issue" & note thêm\nthông tin tại mục\ndescription theo quy định',
+                "action",
+            ),
+            "queue_rule",
+        )
+
     def test_workflow_semantic_refine_does_not_infer_edges_from_text_order(self) -> None:
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
         layout = workflow_visual_layout_fixture()
@@ -358,6 +392,54 @@ class IngestionDegradedDraftTest(unittest.TestCase):
             ingestion.normalize_decision_question("Yes\nNo\n6. KH/TX cung cấp thông tin\nNo\nYes\n9. KH/TX\nđồng ý với\nkết quả?"),
             "KH/TX đồng ý với kết quả?",
         )
+
+    def test_workflow_ai_graph_is_enriched_with_semantic_node_content(self) -> None:
+        semantic_refinement = {
+            "workflow_graph_candidate": {
+                "nodes": [
+                    {
+                        "id": "sem_p1_text_2a",
+                        "type": "decision",
+                        "semantic_node_type": "decision",
+                        "title": "2. Thời gian hết hạn",
+                        "content": "2. Thời gian hết hạn\ngửi hình của KH\ntrước thời gian hết ca làm\nviệc của CS_A ?",
+                        "question": "Thời gian hết hạn gửi hình của KH trước thời gian hết ca làm việc của CS_A?",
+                        "actor": "CS_A",
+                        "bbox": [280, 260, 450, 362],
+                        "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [280, 260, 450, 362]}],
+                    }
+                ]
+            }
+        }
+        units = [
+            {
+                "unit_type": "workflow_graph",
+                "title": "Graph",
+                "content": "Graph summary",
+                "metadata": {
+                    "workflow_graph": {
+                        "workflow_id": "wf",
+                        "title": "Graph",
+                        "nodes": [
+                            {
+                                "id": "decision_2",
+                                "type": "decision",
+                                "title": "2. Thời gian hết hạn",
+                                "question": "Thời gian hết hạn?",
+                                "content": "",
+                            }
+                        ],
+                        "edges": [],
+                    }
+                },
+            }
+        ]
+
+        enriched = ingestion.enrich_workflow_units_with_semantic_refinement(units, semantic_refinement)
+        node = enriched[0]["metadata"]["workflow_graph"]["nodes"][0]
+        self.assertIn("trước thời gian hết ca làm", node["content"])
+        self.assertEqual(node["semantic_node_type"], "decision")
+        self.assertEqual(node["bbox"], [280, 260, 450, 362])
 
     def test_workflow_semantic_validation_flags_orphan_annotations(self) -> None:
         graph = {
