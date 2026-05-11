@@ -329,15 +329,35 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         )
 
         sections = [chunk.section for chunk in chunks]
+        self.assertIn("workflow_graph", sections)
         self.assertIn("candidate_action", sections)
         self.assertIn("candidate_decision", sections)
         self.assertIn("candidate_annotation", sections)
         self.assertIn("candidate_sla", sections)
         self.assertIn("candidate_audit_rule", sections)
         self.assertNotIn("candidate_step", sections)
+        graph_chunk = next(chunk for chunk in chunks if chunk.section == "workflow_graph")
+        self.assertIn("workflow_graph", graph_chunk.metadata)
+        self.assertGreater(len(graph_chunk.metadata["workflow_graph"]["nodes"]), 0)
+        self.assertGreaterEqual(graph_chunk.metadata["uncertain_edges_count"], 1)
+        self.assertTrue(graph_chunk.metadata["topology_review_required"])
         semantic_candidate = next(chunk for chunk in chunks if chunk.section == "candidate_decision")
         self.assertEqual(semantic_candidate.metadata["source_ref_quality"], "bbox")
         self.assertTrue(semantic_candidate.metadata["topology_review_required"])
+
+    def test_workflow_semantic_refine_does_not_treat_numbered_oval_as_start(self) -> None:
+        self.assertEqual(
+            ingestion.classify_semantic_node_type("10. Tạo case lưu trữ trên hệ thống", "start"),
+            "action",
+        )
+        self.assertEqual(
+            ingestion.classify_semantic_node_type("(*) Team Lead sẽ phân quyền tài khoản Pancake", "action"),
+            "annotation",
+        )
+        self.assertEqual(
+            ingestion.normalize_decision_question("Yes\nNo\n6. KH/TX cung cấp thông tin\nNo\nYes\n9. KH/TX\nđồng ý với\nkết quả?"),
+            "KH/TX đồng ý với kết quả?",
+        )
 
     def test_workflow_semantic_validation_flags_orphan_annotations(self) -> None:
         graph = {

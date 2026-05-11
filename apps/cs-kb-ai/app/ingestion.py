@@ -948,6 +948,7 @@ def build_workflow_semantic_refinement(
     )
     graph_candidate["graph_confidence"] = graph_confidence
     graph_candidate["topology_review_required"] = topology_review_required
+    graph_candidate["validation_errors"] = list(dict.fromkeys(all_validation_errors))
 
     return {
         "source_type": "workflow_semantic_refinement",
@@ -1060,9 +1061,11 @@ def classify_semantic_node_type(text: str, visual_type: str) -> str:
     visual_type = visual_type.lower()
     if visual_type == "decision" or stripped.endswith("?") or "?" in stripped:
         return "decision"
-    if visual_type == "start":
+    if normalized == "end":
+        return "end"
+    if visual_type == "start" and not is_numbered_workflow_step(stripped):
         return "start"
-    if visual_type == "end" or normalized == "end":
+    if visual_type == "end" and not is_numbered_workflow_step(stripped):
         return "end"
     if is_audit_text(normalized):
         return "audit_rule"
@@ -1079,11 +1082,15 @@ def classify_semantic_node_type(text: str, visual_type: str) -> str:
     return "action"
 
 
+def is_numbered_workflow_step(text: str) -> bool:
+    return bool(re.match(r"^\s*\d+(?:\.\d+)*[.)]?\s+", text))
+
+
 def is_annotation_like_text(text: str) -> bool:
     normalized = normalized_search_text(text)
     stripped = text.strip().lower()
     return (
-        stripped.startswith(("(a)", "(b)", "(c)"))
+        stripped.startswith(("(a)", "(b)", "(c)", "(*)", "(**)"))
         or normalized.startswith(("luu y", "ghi chu", "note"))
         or "quy dinh note" in normalized
         or "quy dinh audit" in normalized
@@ -1141,6 +1148,17 @@ def infer_workflow_actor(text: str) -> str:
 
 def semantic_title(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    question_index = next((index for index in range(len(lines) - 1, -1, -1) if "?" in lines[index]), -1)
+    if question_index >= 0:
+        start_index = question_index
+        for index in range(question_index, -1, -1):
+            if re.match(r"^\d+(?:\.\d+)*[.)]?\s+", lines[index]):
+                start_index = index
+                break
+        question_title = " ".join(line for line in lines[start_index:question_index + 1] if normalized_search_text(line) not in {"yes", "no"}).strip()
+        if question_title:
+            return question_title[:180]
+    lines = [line for line in lines if normalized_search_text(line) not in {"yes", "no"}]
     first_line = lines[0] if lines else text.strip()
     return first_line[:180] or "Workflow semantic node"
 
@@ -1192,10 +1210,15 @@ def should_merge_semantic_nodes(left: dict[str, Any], right: dict[str, Any]) -> 
     if not left_text or not right_text:
         return False
     text_similarity = max(SequenceMatcher(None, left_text, right_text).ratio(), token_jaccard(left_text, right_text))
+    text_containment = token_containment(left_text, right_text)
     left_bbox = left.get("bbox") if isinstance(left.get("bbox"), list) else []
     right_bbox = right.get("bbox") if isinstance(right.get("bbox"), list) else []
     overlap = bbox_overlap_strength(left_bbox, right_bbox)
     distance = bbox_distance(left_bbox, right_bbox) if len(left_bbox) == 4 and len(right_bbox) == 4 else 99999.0
+    if overlap > 0.25 and text_containment > 0.72:
+        return True
+    if (left_text.startswith(right_text) or right_text.startswith(left_text)) and overlap > 0.2:
+        return True
     if overlap > 0.35 and text_similarity > 0.68:
         return True
     if text_similarity > 0.88 and distance < 380:
@@ -1208,7 +1231,7 @@ def should_merge_semantic_nodes(left: dict[str, Any], right: dict[str, Any]) -> 
 def compatible_semantic_types(left: str, right: str) -> bool:
     if left == right:
         return True
-    graph_action_family = {"action", "queue_rule", "sla_rule"}
+    graph_action_family = {"start", "end", "action", "queue_rule", "sla_rule"}
     annotation_family = {"annotation", "warning", "audit_rule", "macro_script"}
     return left in graph_action_family and right in graph_action_family or left in annotation_family and right in annotation_family
 
@@ -1219,6 +1242,14 @@ def token_jaccard(left: str, right: str) -> float:
     if not left_tokens or not right_tokens:
         return 0.0
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def token_containment(left: str, right: str) -> float:
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
 
 
 def bbox_overlap_strength(left: list[float], right: list[float]) -> float:
@@ -1471,15 +1502,16 @@ def workflow_graph_node_payload(node: dict[str, Any]) -> dict[str, Any]:
     graph_type = graph_node_type_for_semantic(str(node.get("semantic_node_type") or "action"))
     title = str(node.get("title") or node.get("content") or "Workflow node").strip()
     content = str(node.get("content") or title).strip()
+    question = normalize_decision_question(content) if graph_type == "decision" else ""
     return {
         "id": node["id"],
         "type": graph_type,
         "semantic_node_type": node.get("semantic_node_type"),
         "actor": node.get("actor", ""),
         "phase": "",
-        "title": title[:240],
+        "title": (question or title)[:240] if graph_type == "decision" else title[:240],
         "content": "" if graph_type == "decision" else content,
-        "question": normalize_decision_question(content) if graph_type == "decision" else "",
+        "question": question,
         "source_refs": node.get("source_refs", []),
         "attached_annotations": node.get("attached_annotations", []),
         "dedupe_status": node.get("dedupe_status", "unique"),
@@ -1489,7 +1521,17 @@ def workflow_graph_node_payload(node: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_decision_question(text: str) -> str:
-    cleaned = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", " ".join(line.strip() for line in text.splitlines() if line.strip())).strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    question_index = next((index for index in range(len(lines) - 1, -1, -1) if "?" in lines[index]), -1)
+    if question_index >= 0:
+        start_index = question_index
+        for index in range(question_index, -1, -1):
+            if re.match(r"^\d+(?:\.\d+)*[.)]?\s+", lines[index]):
+                start_index = index
+                break
+        lines = lines[start_index:question_index + 1]
+    lines = [line for line in lines if normalized_search_text(line) not in {"yes", "no"}]
+    cleaned = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", " ".join(lines)).strip()
     if cleaned and not cleaned.endswith("?"):
         cleaned += "?"
     return cleaned or "Điểm quyết định cần review?"
@@ -1671,6 +1713,39 @@ def semantic_workflow_candidate_chunks(filename: str, semantic_refinement: dict[
     topology_review_required = bool(graph_candidate.get("topology_review_required", True))
     uncertain_edges = graph_candidate.get("uncertain_edges") if isinstance(graph_candidate.get("uncertain_edges"), list) else []
     pages = semantic_refinement.get("pages") if isinstance(semantic_refinement.get("pages"), list) else []
+    if graph_candidate.get("nodes"):
+        validation_errors = graph_candidate.get("validation_errors") if isinstance(graph_candidate.get("validation_errors"), list) else semantic_refinement.get("validation_errors", [])
+        annotations = graph_candidate.get("annotations") if isinstance(graph_candidate.get("annotations"), list) else []
+        graph_refs = graph_candidate.get("source_refs") if isinstance(graph_candidate.get("source_refs"), list) else []
+        output.append(
+            degraded_chunk(
+                start_index,
+                "workflow_graph",
+                str(graph_candidate.get("title") or path_title(filename) or "Workflow graph"),
+                semantic_workflow_graph_summary(graph_candidate),
+                {
+                    "unit_type": "workflow_graph",
+                    "retrieval_scope": "graph",
+                    "workflow_graph": graph_candidate,
+                    "graph_confidence": graph_confidence,
+                    "requires_human_review": True,
+                    "review_reason": graph_candidate.get("review_reason") or "Semantic workflow graph was normalized from visual candidates and requires manual topology review.",
+                    "annotations": annotations,
+                    "uncertain_edges": uncertain_edges,
+                    "uncertain_edges_count": len(uncertain_edges),
+                    "graph_validation_errors": validation_errors,
+                    "graph_validation_error_count": len(validation_errors),
+                    "topology_review_required": topology_review_required,
+                    "graph_extraction_status": "semantic_workflow_graph_candidate_needs_review",
+                    "source_ref_quality": source_ref_quality_from_refs(graph_refs),
+                    "source_ref_acknowledged": False,
+                    "source_refs": graph_refs or [default_pdf_source_ref(filename)],
+                    "publish_blocked_reason": "workflow_graph_requires_review",
+                },
+                classification,
+                ai_error or "workflow_graph_requires_review",
+            )
+        )
     for page in pages:
         if not isinstance(page, dict):
             continue
@@ -1715,6 +1790,23 @@ def semantic_workflow_candidate_chunks(filename: str, semantic_refinement: dict[
                 )
             )
     return output[:100]
+
+
+def semantic_workflow_graph_summary(graph: dict[str, Any]) -> str:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    uncertain_edges = graph.get("uncertain_edges") if isinstance(graph.get("uncertain_edges"), list) else []
+    annotations = graph.get("annotations") if isinstance(graph.get("annotations"), list) else []
+    return "\n".join(
+        [
+            f"Workflow graph: {graph.get('title') or 'Workflow graph'}",
+            f"Nodes: {len(nodes)}",
+            f"Confirmed edges: {len(edges)}",
+            f"Uncertain edges requiring review: {len(uncertain_edges)}",
+            f"Annotations: {len(annotations)}",
+            str(graph.get("review_reason") or "Manual topology review required before publish."),
+        ]
+    )
 
 
 def visual_node_candidate_chunks(filename: str, visual_layout: dict[str, Any], start_index: int, classification: Any, ai_error: str) -> list[Any]:
