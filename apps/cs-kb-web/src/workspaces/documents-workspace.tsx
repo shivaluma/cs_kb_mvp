@@ -145,7 +145,10 @@ export function DocumentsWorkspace({
     (Array.isArray(workflowGraphValidationErrors) ? workflowGraphValidationErrors.length : 0) +
     (Array.isArray(workflowGraphUncertainEdges) ? workflowGraphUncertainEdges.length : 0) +
     Number(workflowGraphUnit?.metadata.uncertain_edges_count ?? 0);
-  const workflowGraphWarningsAcknowledged = workflowGraphWarningIssueCount === 0 || workflowGraphUnit?.metadata.graph_validation_acknowledged === true;
+  const workflowGraphAcknowledgementReason = String(workflowGraphUnit?.metadata.graph_validation_acknowledged_reason ?? "").trim();
+  const workflowGraphWarningsAcknowledged =
+    workflowGraphWarningIssueCount === 0 ||
+    (workflowGraphUnit?.metadata.graph_validation_acknowledged === true && workflowGraphAcknowledgementReason.length > 0);
   const workflowGraphIssueCount = (workflowGraphWarningsAcknowledged ? 0 : workflowGraphWarningIssueCount) + workflowEdgeReviewSummary.blockingCount;
   const workflowGraphIssuesAcknowledged = workflowGraphIssueCount === 0;
   const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && unit.unit_type !== "workflow_graph" && !unit.metadata.workflow_graph);
@@ -1422,7 +1425,16 @@ function WorkflowGraphPanel({
     (Array.isArray(uncertainEdges) ? uncertainEdges.length : 0) +
     Number(graphUnit?.metadata.uncertain_edges_count ?? 0);
   const issueCount = (Array.isArray(validationErrors) ? validationErrors.length : 0) + uncertainEdgeCount;
-  const acknowledged = issueCount === 0 || graphUnit?.metadata.graph_validation_acknowledged === true;
+  const savedAcknowledgementReason = String(graphUnit?.metadata.graph_validation_acknowledged_reason ?? "").trim();
+  const acknowledged = issueCount === 0 || (graphUnit?.metadata.graph_validation_acknowledged === true && savedAcknowledgementReason.length > 0);
+  const acknowledgementInputValid = acknowledgementReason.trim().length >= 8;
+  const acknowledgementDisabledReason = !canEdit
+    ? "Inspect an editable draft version first."
+    : saving
+      ? "Saving acknowledgement..."
+      : !acknowledgementInputValid
+        ? "Enter at least 8 characters explaining why this warning is acceptable."
+        : "";
   const edgeReviewSummary = buildWorkflowEdgeReviewSummary(graph, graphUnit);
   return (
     <Card className="rounded-xl">
@@ -1477,7 +1489,7 @@ function WorkflowGraphPanel({
                           value={acknowledgementReason}
                         />
                         <Button
-                          disabled={!canEdit || saving || acknowledgementReason.trim().length < 12}
+                          disabled={Boolean(acknowledgementDisabledReason)}
                           onClick={() => onAcknowledge(graphUnit, acknowledgementReason.trim())}
                           size="sm"
                           type="button"
@@ -1486,7 +1498,15 @@ function WorkflowGraphPanel({
                           {saving ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <ShieldCheck data-icon="inline-start" className="size-4" />}
                           Acknowledge with reason
                         </Button>
+                        {acknowledgementDisabledReason ? (
+                          <p className="text-[11px] leading-4 text-muted-foreground">{acknowledgementDisabledReason}</p>
+                        ) : null}
                       </div>
+                    ) : null}
+                    {acknowledged && savedAcknowledgementReason ? (
+                      <p className="basis-full text-xs leading-5 text-muted-foreground">
+                        Reason: {savedAcknowledgementReason}
+                      </p>
                     ) : null}
                   </div>
                 </div>
