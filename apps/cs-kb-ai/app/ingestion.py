@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from app.embedding import embed_text
-from app.openrouter import extract_rule_table_units, extract_workflow_units, refine_extracted_units, suggest_document_metadata
+from app.openrouter import extract_rule_table_units, extract_workflow_units, extract_workflow_units_v2, refine_extracted_units, suggest_document_metadata
 from app.schemas import DocumentMetadata
 from app.text_processing import (
     Chunk,
@@ -327,19 +327,40 @@ def try_ai_structuring(
             warnings.extend(render_warnings)
             if not page_images:
                 return [], warnings, "ai_workflow_structuring_failed:pdf_vision_render_required"
+            semantic_refinement = raw_context.get("workflow_semantic_refinement") if isinstance(raw_context.get("workflow_semantic_refinement"), dict) else {}
+            v2_units, v2_warnings = extract_workflow_units_v2(filename, raw_text, page_images=page_images, visual_context=None)
+            warnings.extend(v2_warnings)
+            v2_chunks = workflow_units_to_chunks(v2_units, raw_text, filename) if v2_units else []
+            if v2_chunks:
+                v2_quality_error = workflow_structuring_quality_error(v2_chunks, v2_warnings)
+                if not v2_quality_error:
+                    warnings.append("workflow_extraction_flow:v2_vision_primary")
+                    return mark_structured_chunks(v2_chunks), warnings, ""
+                warnings.append(f"workflow_v2_quality_rejected:{v2_quality_error}")
+
             visual_context = compact_visual_context(visual_layout) if visual_layout else None
             if visual_context:
                 warnings.append("visual_graph_context_supplied_to_llm")
             llm_units, llm_warnings = extract_workflow_units(filename, raw_text, page_images=page_images, visual_context=visual_context)
             warnings.extend(llm_warnings)
-            semantic_refinement = raw_context.get("workflow_semantic_refinement") if isinstance(raw_context.get("workflow_semantic_refinement"), dict) else {}
             if semantic_refinement:
                 llm_units = enrich_workflow_units_with_semantic_refinement(llm_units, semantic_refinement)
             chunks = workflow_units_to_chunks(llm_units, raw_text, filename) if llm_units else []
             if not chunks:
+                semantic_chunks = semantic_workflow_structured_chunks(filename, raw_text, classification, semantic_refinement)
+                if semantic_chunks:
+                    warnings.append("semantic_workflow_structuring_used_after_ai_failure")
+                    if llm_warnings:
+                        warnings.append(f"ai_workflow_structuring_rejected:{','.join(llm_warnings[:3])}")
+                    return mark_structured_chunks(semantic_chunks), warnings, ""
                 return [], warnings, f"ai_workflow_structuring_failed:{','.join(llm_warnings)}"
             quality_error = workflow_structuring_quality_error(chunks, llm_warnings)
             if quality_error:
+                semantic_chunks = semantic_workflow_structured_chunks(filename, raw_text, classification, semantic_refinement)
+                if semantic_chunks:
+                    warnings.append("semantic_workflow_structuring_used_after_ai_quality_reject")
+                    warnings.append(f"ai_workflow_structuring_rejected:{quality_error}")
+                    return mark_structured_chunks(semantic_chunks), warnings, ""
                 return [], warnings, f"ai_workflow_structuring_failed:{quality_error}"
             return mark_structured_chunks(chunks), warnings, ""
     except Exception as exc:
@@ -727,6 +748,112 @@ def workflow_structuring_quality_error(chunks: list[Any], warnings: list[str]) -
         return "missing_atomic_workflow_units"
 
     return ""
+
+
+def semantic_workflow_structured_chunks(filename: str, raw_text: str, classification: Any, semantic_refinement: dict[str, Any]) -> list[Any]:
+    if not semantic_refinement:
+        return []
+    from app.text_processing import Chunk
+
+    graph_candidate = semantic_refinement.get("workflow_graph_candidate") if isinstance(semantic_refinement.get("workflow_graph_candidate"), dict) else {}
+    nodes = graph_candidate.get("nodes") if isinstance(graph_candidate.get("nodes"), list) else []
+    if not nodes:
+        return []
+
+    chunks: list[Any] = []
+    graph_refs = graph_candidate.get("source_refs") if isinstance(graph_candidate.get("source_refs"), list) else []
+    full_sop_content = raw_text[:30000] or semantic_workflow_graph_summary(graph_candidate)
+    chunks.append(
+        Chunk(
+            chunk_index=len(chunks),
+            section="full_sop",
+            heading=path_title(filename),
+            content=full_sop_content,
+            token_count=len(tokenize(full_sop_content)),
+            metadata={
+                "unit_type": "full_sop",
+                "retrieval_scope": "document",
+                "source_refs": graph_refs or [default_pdf_source_ref(filename)],
+                "source_ref_quality": source_ref_quality_from_refs(graph_refs or [default_pdf_source_ref(filename)]),
+                "requires_human_review": True,
+                "confidence": min(float(getattr(classification, "confidence", 0.78) or 0.78), 0.78),
+            },
+        )
+    )
+    graph_content = semantic_workflow_graph_summary(graph_candidate)
+    validation_errors = graph_candidate.get("validation_errors") if isinstance(graph_candidate.get("validation_errors"), list) else semantic_refinement.get("validation_errors", [])
+    uncertain_edges = graph_candidate.get("uncertain_edges") if isinstance(graph_candidate.get("uncertain_edges"), list) else []
+    chunks.append(
+        Chunk(
+            chunk_index=len(chunks),
+            section="workflow_graph",
+            heading=str(graph_candidate.get("title") or path_title(filename)),
+            content=graph_content,
+            token_count=len(tokenize(graph_content)),
+            metadata={
+                "unit_type": "workflow_graph",
+                "retrieval_scope": "graph",
+                "workflow_graph": graph_candidate,
+                "graph_confidence": graph_candidate.get("graph_confidence"),
+                "requires_human_review": True,
+                "review_reason": graph_candidate.get("review_reason") or "Semantic workflow graph was normalized from visual candidates and requires manual topology review.",
+                "annotations": graph_candidate.get("annotations", []),
+                "uncertain_edges": uncertain_edges,
+                "uncertain_edges_count": len(uncertain_edges),
+                "graph_validation_errors": validation_errors,
+                "graph_validation_error_count": len(validation_errors),
+                "topology_review_required": graph_candidate.get("topology_review_required", True),
+                "graph_extraction_status": "semantic_workflow_graph_candidate_needs_review",
+                "source_refs": graph_refs or [default_pdf_source_ref(filename)],
+                "source_ref_quality": source_ref_quality_from_refs(graph_refs or [default_pdf_source_ref(filename)]),
+                "source_ref_acknowledged": False,
+                "confidence": min(float(graph_candidate.get("graph_confidence") or 0.62), 0.78),
+            },
+        )
+    )
+
+    pages = semantic_refinement.get("pages") if isinstance(semantic_refinement.get("pages"), list) else []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        for node in [*(page.get("semantic_nodes") or []), *(page.get("annotations") or [])]:
+            if not isinstance(node, dict):
+                continue
+            semantic_type = str(node.get("semantic_node_type") or "action")
+            if semantic_type in {"start", "end"}:
+                continue
+            unit_type = SEMANTIC_CANDIDATE_UNIT_TYPES.get(semantic_type, "candidate_action")
+            title = str(node.get("title") or node.get("content") or unit_type).strip()
+            content = str(node.get("content") or title).strip()
+            if not content:
+                continue
+            node_refs = node.get("source_refs") if isinstance(node.get("source_refs"), list) else []
+            chunks.append(
+                Chunk(
+                    chunk_index=len(chunks),
+                    section=unit_type,
+                    heading=candidate_heading(title, unit_type, len(chunks) + 1),
+                    content=content,
+                    token_count=len(tokenize(content)),
+                    metadata={
+                        "unit_type": unit_type,
+                        "retrieval_scope": "unit",
+                        "semantic_node_id": node.get("id"),
+                        "semantic_node_type": semantic_type,
+                        "dedupe_status": node.get("dedupe_status", "unique"),
+                        "attached_to_node_id": node.get("attached_to_node_id", ""),
+                        "attached_annotations": node.get("attached_annotations", []),
+                        "graph_confidence": graph_candidate.get("graph_confidence"),
+                        "topology_review_required": graph_candidate.get("topology_review_required", True),
+                        "graph_extraction_status": "semantic_workflow_refinement_needs_review",
+                        "source_refs": node_refs or [default_pdf_source_ref(filename)],
+                        "source_ref_quality": source_ref_quality_from_refs(node_refs or [default_pdf_source_ref(filename)]),
+                        "source_ref_acknowledged": False,
+                        "confidence": 0.62,
+                    },
+                )
+            )
+    return chunks[:100]
 
 
 def enrich_workflow_units_with_semantic_refinement(units: list[dict[str, Any]], semantic_refinement: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1779,6 +1906,7 @@ def build_semantic_workflow_graph_candidate(
     start_node_id = next((node["id"] for node in graph_nodes if node.get("type") == "start"), graph_nodes[0]["id"] if graph_nodes else "start")
     warnings = [annotation for annotation in graph_annotations if annotation.get("type") in {"warning", "audit_rule"}]
     summary = visual_layout.get("summary") if isinstance(visual_layout.get("summary"), dict) else {}
+    graph_source_ref = workflow_graph_page_source_ref(filename, visual_layout)
     return {
         "workflow_id": normalized_key(title) or "workflow_graph",
         "title": title,
@@ -1795,8 +1923,21 @@ def build_semantic_workflow_graph_candidate(
         "review_reason": "Semantic workflow graph was normalized from visual candidates and requires manual topology review.",
         "topology_source": "visual_connector_candidates_only",
         "topology_review_required": True,
-        "source_refs": [{"source_type": "pdf_diagram", "source_file": filename, "page": 1, "bbox": []}],
+        "source_refs": [graph_source_ref],
     }
+
+
+def workflow_graph_page_source_ref(filename: str, visual_layout: dict[str, Any]) -> dict[str, Any]:
+    pages = visual_layout.get("pages") if isinstance(visual_layout.get("pages"), list) else []
+    first_page = next((page for page in pages if isinstance(page, dict)), {})
+    image_size = first_page.get("image_size") if isinstance(first_page.get("image_size"), list) else []
+    bbox: list[float] = []
+    if len(image_size) >= 2:
+        try:
+            bbox = [0.0, 0.0, float(image_size[0]), float(image_size[1])]
+        except (TypeError, ValueError):
+            bbox = []
+    return {"source_type": "pdf_diagram", "source_file": filename, "page": int(first_page.get("page") or 1), "bbox": bbox}
 
 
 def workflow_graph_node_payload(node: dict[str, Any]) -> dict[str, Any]:
@@ -1885,7 +2026,8 @@ def validate_semantic_workflow_graph_candidate(graph: dict[str, Any]) -> list[st
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        key = (semantic_text_key(str(node.get("title") or node.get("question") or node.get("content") or "")), str(node.get("semantic_node_type") or node.get("type") or ""))
+        node_text = str(node.get("question") or node.get("content") or node.get("title") or "")
+        key = (semantic_text_key(node_text), str(node.get("semantic_node_type") or node.get("type") or ""))
         if key in seen_node_keys and key[0]:
             errors.append(f"duplicate_semantic_node:{node.get('id')}")
         seen_node_keys.add(key)
@@ -2054,6 +2196,8 @@ def semantic_workflow_candidate_chunks(filename: str, semantic_refinement: dict[
             if not isinstance(node, dict):
                 continue
             semantic_type = str(node.get("semantic_node_type") or "action")
+            if semantic_type in {"start", "end"}:
+                continue
             unit_type = SEMANTIC_CANDIDATE_UNIT_TYPES.get(semantic_type, "candidate_action")
             title = str(node.get("title") or node.get("content") or unit_type).strip()
             content = str(node.get("content") or title).strip()

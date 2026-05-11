@@ -358,6 +358,7 @@ class WorkflowGraph(BaseModel):
     annotations: list[WorkflowAnnotation] = Field(default_factory=list)
     warnings: list[WorkflowAnnotation] = Field(default_factory=list)
     uncertain_edges: list[WorkflowUncertainEdge] = Field(default_factory=list)
+    source_refs: list[SourceRef] = Field(default_factory=list)
     graph_confidence: float = Field(ge=0, le=1)
     requires_human_review: bool = True
     review_reason: str = ""

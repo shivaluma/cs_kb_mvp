@@ -26,9 +26,9 @@ type WorkflowGraphMetadata = {
   requires_human_review?: boolean;
   review_reason?: string;
   nodes?: Array<{ id?: string; type?: string; semantic_node_type?: string; actor?: string; phase?: string; title?: string; content?: string; question?: string }>;
-  edges?: Array<{ from_node?: string; to_node?: string; condition?: string; review_reason?: string; review_status?: string }>;
+  edges?: Array<{ from_node?: string; to_node?: string; condition?: string; confidence?: number; reason?: string; review_reason?: string; review_status?: string; topology_status?: string }>;
   annotations?: Array<{ id?: string; type?: string; attached_to?: string; title?: string; content?: string; risk_level?: string }>;
-  uncertain_edges?: Array<{ from_node?: string; to_node?: string; condition?: string; reason?: string; confidence?: number }>;
+  uncertain_edges?: Array<{ from_node?: string; to_node?: string; condition?: string; reason?: string; confidence?: number; review_status?: string; topology_status?: string }>;
   validation_errors?: string[];
 };
 type WorkflowEdgeMetadata = NonNullable<WorkflowGraphMetadata["edges"]>[number];
@@ -1990,7 +1990,8 @@ function WorkflowBranchTable({
 }) {
   const resolver = useMemo(() => buildWorkflowNodeResolver(graph), [graph]);
   const [edgeReasons, setEdgeReasons] = useState<Record<string, string>>({});
-  const branches = (graph.edges ?? []).slice(0, 100).map((edge, index) => {
+  const displayEdges = workflowGraphDisplayEdges(graph);
+  const branches = displayEdges.slice(0, 100).map((edge, index) => {
     const edgeKey = workflowEdgeKey(edge);
     const review = workflowEdgeReview(graphUnit, edge);
     return {
@@ -2005,6 +2006,7 @@ function WorkflowBranchTable({
       review,
       reviewed: isWorkflowEdgeReviewed(review),
       to: resolver.resolve(edge.to_node),
+      topologyStatus: edge.topology_status,
     };
   });
 
@@ -2033,13 +2035,16 @@ function WorkflowBranchTable({
           <div className="space-y-2">
             {branch.isDecisionEdge ? (
               <>
-                <Badge variant={branch.review.status === "confirmed" ? "secondary" : branch.review.status === "rejected" ? "destructive" : branch.review.status === "acknowledged" ? "outline" : "destructive"}>
-                  {branch.review.status || "needs_review"}
+                <Badge variant={branch.topologyStatus === "uncertain" ? "outline" : branch.review.status === "confirmed" ? "secondary" : branch.review.status === "rejected" ? "destructive" : branch.review.status === "acknowledged" ? "outline" : "destructive"}>
+                  {branch.topologyStatus === "uncertain" ? "uncertain topology" : branch.review.status || "needs_review"}
                 </Badge>
+                {branch.topologyStatus === "uncertain" ? (
+                  <p className="text-[11px] leading-4 text-muted-foreground">Review this in the uncertain edges panel, then acknowledge topology warnings.</p>
+                ) : null}
                 {branch.review.reason ? (
                   <p className="line-clamp-2 text-[11px] leading-4 text-muted-foreground">{branch.review.reason}</p>
                 ) : null}
-                {graphUnit && canEdit && !branch.reviewed ? (
+                {graphUnit && canEdit && !branch.reviewed && branch.topologyStatus !== "uncertain" ? (
                   <div className="grid gap-1.5">
                     <textarea
                       className="min-h-14 rounded-md border bg-background px-2 py-1.5 text-[11px] leading-4 outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
@@ -2090,7 +2095,7 @@ function WorkflowBranchTable({
                 ) : null}
               </>
             ) : (
-              <Badge variant="outline">not decision</Badge>
+              <Badge variant="outline">{branch.topologyStatus === "uncertain" ? "uncertain" : "not decision"}</Badge>
             )}
           </div>
         </div>
@@ -2267,7 +2272,7 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
 }
 
 function workflowGraphToMermaid(graph: WorkflowGraphMetadata) {
-  const edges = graph.edges ?? [];
+  const edges = workflowGraphDisplayEdges(graph);
   if (!edges.length) {
     return "";
   }
@@ -2288,6 +2293,25 @@ function workflowGraphToMermaid(graph: WorkflowGraphMetadata) {
   });
 
   return lines.join("\n");
+}
+
+function workflowGraphDisplayEdges(graph: WorkflowGraphMetadata): WorkflowEdgeMetadata[] {
+  const confirmed = (graph.edges ?? []).map((edge) => ({ ...edge, topology_status: edge.topology_status ?? "confirmed" }));
+  const uncertain = (graph.uncertain_edges ?? []).map((edge) => ({
+    ...edge,
+    review_reason: edge.reason,
+    review_status: edge.review_status ?? "needs_review",
+    topology_status: "uncertain",
+  }));
+  const seen = new Set<string>();
+  return [...confirmed, ...uncertain].filter((edge) => {
+    const key = workflowEdgeKey(edge);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return Boolean(edge.from_node && edge.to_node);
+  });
 }
 
 function ensureMermaidNode(lines: string[], id: string, label: string) {

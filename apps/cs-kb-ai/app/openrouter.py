@@ -13,9 +13,11 @@ from pydantic import ValidationError
 from app.config import settings
 from app.schemas import (
     ExtractionRefinementPayload,
+    ExtractedUnit,
     ExtractedUnitsPayload,
     GroundedAnswerPayload,
     RetrievalResponse,
+    SourceRef,
     WorkflowExtractionPayload,
 )
 
@@ -35,6 +37,101 @@ Quy tắc:
 - Mỗi unit bắt buộc có source_refs để trace ngược về nguồn. Mỗi source_ref bắt buộc có source_type và source_file.
 - source_refs theo loại file: Excel dùng {source_type:"excel", source_file, sheet, row_start, row_end, column_names}; PDF dùng {source_type:"pdf", source_file, page, bbox nếu có}; DOCX prose dùng {source_type:"docx", source_file, paragraph_index hoặc heading_path}; DOCX table dùng {source_type:"docx_table", source_file, table_index, row_index, column_names}; text/markdown dùng {source_type:"text", source_file, line_start, line_end}.
 - Không có source_refs thì output bị reject.
+"""
+
+
+WORKFLOW_EXTRACTION_PROMPT = """You are extracting a CS operational SOP from a workflow diagram.
+
+Use the page image as the source of truth.
+Use OCR text and visual candidates only as hints.
+Do not infer workflow order from OCR text order.
+Do not create business logic not visible in the source.
+
+Return structured JSON with:
+- document_metadata
+- full_sop
+- workflow_graph
+- atomic_units
+- annotations
+- warnings
+- uncertain_edges
+- source_refs
+- search_enrichment
+
+Required JSON object shape:
+{"document_metadata":{},"full_sop":{},"workflow_graph":{},"annotations":[],"uncertain_edges":[],"validation_errors":[],"atomic_units":[],"warnings":[],"source_refs":[],"search_enrichment":{}}.
+
+Rules:
+1. Preserve swimlanes/actors.
+2. Preserve phases if visible.
+3. Decision nodes must have a question string.
+4. Edges must come from visible arrows/connectors.
+5. If an edge is uncertain, put it in uncertain_edges with reason and confidence.
+6. Notes such as Lưu ý, Quy định audit, SLA, script blocks must be annotations or warning units, not workflow steps.
+7. Every node/unit must include source_refs with page and bbox if available.
+8. Do not auto-confirm uncertain Yes/No branches.
+9. Do not output raw OCR fragments as standalone units.
+10. If you cannot determine topology, return a partial graph and explain missing/uncertain areas in validation_errors, warnings, review_reason, and uncertain_edges.
+
+Architecture/schema mapping:
+- The output must validate as WorkflowExtractionPayload.
+- full_sop is an ExtractedUnit with unit_type="full_sop", title, content, confidence, metadata, source_refs.
+- workflow_graph must include workflow_id, title, start_node_id, lanes, nodes, edges, annotations, uncertain_edges, graph_confidence, requires_human_review=true, review_reason, source_refs.
+- workflow_graph.nodes must include id, type start/action/decision/end, title, content, question for decisions, actor/lane if visible, phase if visible, source_refs.
+- workflow_graph.edges must use from_node, to_node, condition. Do not use keys named from/to/source/target in final output.
+- uncertain_edges must use from_node, to_node, condition, reason, confidence, source_refs.
+- annotations must include id, type annotation/warning/sla_rule/audit_rule/macro_script/operational_note, attached_to if known, title, content, source_refs.
+- atomic_units should be search/review units grounded in visible diagram content: workflow_step, decision_point, sla_rule, routing_rule, handoff_rule, macro_script, operational_note, warning.
+- source_refs for PDF must use source_type="pdf_diagram", source_file, page, bbox if available; use bbox=[] only when unavailable.
+"""
+
+
+RULE_TABLE_EXTRACTION_PROMPT = """You are extracting a CS policy rule table.
+
+Use table rows/cells as the source of truth.
+Do not split examples into standalone rules.
+Do not create rules not present in the table.
+
+For each logical table row, create one operational unit:
+- policy_rule
+- exception_rule
+- warning
+- operational_note
+
+Attach:
+- examples
+- notes
+- thresholds
+- service
+- case type
+- source row/cell refs
+
+Return JSON:
+{
+  "full_sop": {},
+  "units": [],
+  "warnings": [],
+  "metadata_suggestions": {},
+  "coverage_report": {}
+}
+
+Rules:
+1. One table row should become one main unit unless it contains multiple explicit sub-rules.
+2. Examples belong to the nearest parent rule.
+3. "Không áp dụng" should become exception_rule.
+4. Preserve all numeric thresholds exactly.
+5. Every unit must cite source table row/cell.
+6. Do not infer policy beyond the source.
+
+Architecture/schema mapping:
+- full_sop and every item in units must be ExtractedUnit objects: unit_type, title, content, confidence, metadata, source_refs.
+- The parser will merge full_sop into units for the existing pipeline contract.
+- Excel source_refs need source_type="excel", source_file, sheet, row_start, row_end, column_names when available.
+- DOCX table source_refs need source_type="docx_table", source_file, table_index, row_index, column_names when available.
+- PDF/table text source_refs need source_type="pdf" or "pdf_diagram", source_file, page, bbox when available.
+- Put examples, thresholds, service, case_type, original columns/cells, tags, aliases into metadata when grounded.
+- Use metadata.examples as structured input/output examples when the row contains examples.
+- If rows are historical/archived versions, put that in metadata or warnings; do not create active rules unless the source says they are active.
 """
 
 
@@ -344,6 +441,8 @@ def extract_workflow_units(
         return [], ["openrouter_disabled"]
 
     extraction_prompt = (
+        WORKFLOW_EXTRACTION_PROMPT
+        + "\n\nPipeline-specific notes for the existing extraction architecture:\n"
         "Hãy trích xuất tài liệu workflow/swimlane SOP CS này thành JSON production draft. "
         "Trả đúng shape {\"document_metadata\":{},\"full_sop\":{},\"workflow_graph\":{},\"annotations\":[],\"uncertain_edges\":[],\"validation_errors\":[],\"atomic_units\":[],\"warnings\":[],\"search_enrichment\":{}}.\n\n"
         "QUY TẮC TOPOLOGY BẮT BUỘC:\n"
@@ -448,6 +547,234 @@ def extract_workflow_units(
         return [], [f"openrouter_extraction_failed:{exc.__class__.__name__}"]
 
 
+def extract_workflow_units_v2(
+    filename: str,
+    raw_text: str,
+    page_images: list[str] | None = None,
+    visual_context: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not enabled():
+        return [], ["openrouter_disabled"]
+    if not page_images:
+        return [], ["workflow_v2_vision_images_required"]
+
+    extraction_prompt = (
+        WORKFLOW_EXTRACTION_PROMPT
+        + "\n\nWorkflow extraction v2 notes:\n"
+        "Bạn đang chạy WORKFLOW_EXTRACTION_V2 cho tài liệu workflow diagram/swimlane SOP CS.\n"
+        "SOURCE OF TRUTH là ẢNH PDF được gửi kèm. Hãy đọc diagram như reviewer con người: lane, node, mũi tên, nhãn Yes/No, ghi chú, SLA, audit.\n"
+        "OCR/raw text/layout detector chỉ là evidence phụ để tham chiếu chữ và source refs; nếu OCR/layout mâu thuẫn với ảnh thì TIN ẢNH.\n\n"
+        "Trả CHỈ JSON object đúng shape:\n"
+        "{\"document_metadata\":{},\"full_sop\":{},\"workflow_graph\":{},\"annotations\":[],\"uncertain_edges\":[],\"validation_errors\":[],\"atomic_units\":[],\"warnings\":[],\"search_enrichment\":{}}.\n\n"
+        "QUY TẮC V2:\n"
+        "- workflow_graph.nodes phải là các node nghiệp vụ chính nhìn thấy trong diagram. Giữ full content của node trong field content; title chỉ là label ngắn.\n"
+        "- Decision node phải type=\"decision\" và có question string rõ ràng.\n"
+        "- Action/SLA/routing/handoff node phải có content string đầy đủ, không cắt cụt dòng.\n"
+        "- Notes như (a), (b), Lưu ý, Quy định audit, ZT, script/reference phải đưa vào annotations hoặc warnings, không đưa vào nodes.\n"
+        "- Edge chỉ tạo khi thấy mũi tên/connector/nhãn branch trong ẢNH. Không suy edge từ thứ tự OCR.\n"
+        "- Nếu thấy quan hệ nhưng không chắc hướng/nhánh, đưa vào uncertain_edges với reason/confidence; không bỏ mất edge nghi vấn.\n"
+        "- Không tạo graph tối thiểu một node nếu ảnh có workflow thật. Phải trích xuất graph thực tế từ ảnh.\n"
+        "- Nếu không chắc một số nhánh, vẫn trả workflow_graph reviewable với requires_human_review=true và graph_confidence thấp.\n"
+        "- full_sop bắt buộc có. Nếu source không có prose tổng quan, tự tóm tắt từ workflow_graph đã đọc từ ảnh và đánh requires_human_review=true.\n"
+        "- atomic_units bắt buộc có ít nhất các unit search/review được từ node chính. Chỉ dùng unit_type hợp lệ: workflow_step, decision_point, sla_rule, routing_rule, handoff_rule, operational_note, macro_script, warning.\n"
+        "- source_refs cho PDF dùng source_type=\"pdf_diagram\", source_file, page, bbox nếu biết; bbox có thể [] nếu không chắc.\n\n"
+        "FIELD GỢI Ý:\n"
+        "document_metadata: title, effective_from, document_type=\"workflow_diagram\", sub_type=\"vision_primary_workflow\", actors, audience, risk_level, extraction_strategy=\"workflow_v2_vision_primary\".\n"
+        "workflow_graph: workflow_id, title, start_node_id, lanes, nodes, edges, annotations, uncertain_edges, graph_confidence, requires_human_review=true, review_reason.\n"
+        "search_enrichment: tags, aliases, actors, systems, case_reasons nếu có căn cứ trong ảnh/source.\n\n"
+        f"Filename: {filename}\n\n"
+        f"Auxiliary OCR text, not topology source:\n{raw_text[:16000]}\n\n"
+        f"Auxiliary detector context, not source of truth:\n{json.dumps(visual_context or {}, ensure_ascii=False)[:8000]}"
+    )
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": extraction_prompt}]
+    user_content.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in page_images[:3])
+
+    payload = {
+        "model": settings.openrouter_vision_model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.05,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": settings.public_app_url,
+        "X-Title": "CS SOP Knowledge Base",
+    }
+
+    try:
+        content = completion_content(payload, headers)
+        parsed, repaired = parse_json_with_repair(content, payload, headers)
+        payload_model, schema_repaired = validate_workflow_payload_with_repair(parsed, payload, headers)
+        if "workflow_graph_missing_from_model_synthesized_for_review" in payload_model.warnings:
+            return [], ["workflow_v2_missing_workflow_graph", *payload_model.warnings]
+        payload_model = ensure_workflow_v2_review_layers(payload_model, filename)
+        payload_model, topology_repaired, topology_errors = validate_workflow_topology_with_repair(payload_model, payload, headers)
+        payload_model = ensure_workflow_v2_review_layers(payload_model, filename)
+        if topology_errors:
+            payload_model.validation_errors = list(dict.fromkeys([*payload_model.validation_errors, *topology_errors]))
+            payload_model.warnings = [
+                *payload_model.warnings,
+                "workflow_topology_requires_manual_review",
+                *[f"workflow_topology_error:{error}" for error in topology_errors[:8]],
+            ]
+            payload_model.workflow_graph.requires_human_review = True
+            if not payload_model.workflow_graph.review_reason:
+                payload_model.workflow_graph.review_reason = "Vision-primary workflow graph has topology warnings and must be reviewed before publish."
+        normalized = workflow_payload_to_units(payload_model, filename)
+        missing_refs = source_ref_validation_errors(normalized, filename)
+        if missing_refs:
+            return [], missing_refs
+        warnings = ["openrouter_workflow_v2_extraction_used", "workflow_v2_vision_primary", *workflow_v2_visible_warnings(payload_model.warnings)]
+        if repaired:
+            warnings.append("openrouter_json_repair_used")
+        if schema_repaired:
+            warnings.append("openrouter_schema_repair_used")
+        if topology_repaired:
+            warnings.append("openrouter_topology_repair_used")
+        if payload_model.uncertain_edges:
+            warnings.append(f"workflow_graph_has_{len(payload_model.uncertain_edges)}_uncertain_edges")
+        if payload_model.validation_errors:
+            warnings.extend(f"workflow_graph_validation_error:{error}" for error in payload_model.validation_errors[:8])
+        if payload_model.workflow_graph.requires_human_review:
+            warnings.append("workflow_graph_requires_human_review")
+        return [unit for unit in normalized if unit["content"]], warnings
+    except json.JSONDecodeError as exc:
+        return [], [f"openrouter_workflow_v2_invalid_json:{exc.msg}:{exc.pos}"]
+    except ValidationError as exc:
+        return [], [f"openrouter_workflow_v2_validation_failed:{validation_summary(exc)}"]
+    except Exception as exc:
+        return [], [f"openrouter_workflow_v2_failed:{exc.__class__.__name__}"]
+
+
+def workflow_v2_visible_warnings(warnings: list[str]) -> list[str]:
+    output = []
+    for warning in warnings:
+        if warning == "full_sop_missing_from_model_synthesized_for_review":
+            output.append("full_sop_synthesized_from_workflow_graph_for_review")
+            continue
+        output.append(warning)
+    return list(dict.fromkeys(output))
+
+
+def ensure_workflow_v2_review_layers(payload: WorkflowExtractionPayload, filename: str) -> WorkflowExtractionPayload:
+    if not payload.workflow_graph.source_refs:
+        payload.workflow_graph.source_refs = [default_pdf_diagram_source_ref(filename)]
+    for node in payload.workflow_graph.nodes:
+        if not node.source_refs:
+            node.source_refs = payload.workflow_graph.source_refs or [default_pdf_diagram_source_ref(filename)]
+    if "full_sop_missing_from_model_synthesized_for_review" in payload.warnings:
+        payload.full_sop.source_refs = payload.full_sop.source_refs or payload.workflow_graph.source_refs or [default_pdf_diagram_ref(filename)]
+        payload.full_sop.metadata = {
+            **payload.full_sop.metadata,
+            "retrieval_scope": "document",
+            "synthesized_from_workflow_graph": True,
+            "requires_human_review": True,
+        }
+    if not payload.atomic_units:
+        payload.atomic_units = workflow_atomic_units_from_graph(payload, filename)
+        if payload.atomic_units:
+            payload.warnings = [*payload.warnings, "workflow_v2_atomic_units_synthesized_from_graph"]
+    return payload
+
+
+def workflow_atomic_units_from_graph(payload: WorkflowExtractionPayload, filename: str) -> list[ExtractedUnit]:
+    units: list[ExtractedUnit] = []
+    for node in payload.workflow_graph.nodes:
+        node_type = normalized_workflow_label(node.type)
+        semantic_type = normalized_workflow_label(node.semantic_node_type)
+        if is_start_node(node_type, normalized_workflow_label(node.title)) or is_end_node(node_type, normalized_workflow_label(node.title)):
+            continue
+        content = (node.question or node.content or node.title).strip()
+        if not content:
+            continue
+        unit_type = workflow_atomic_unit_type(node_type, semantic_type, content)
+        refs = dump_source_refs(node.source_refs or payload.workflow_graph.source_refs) or [default_pdf_diagram_ref(filename)]
+        units.append(
+            ExtractedUnit.model_validate(
+                {
+                    "unit_type": unit_type,
+                    "title": node.title or node.question or unit_type,
+                    "content": content,
+                    "confidence": min(float(payload.workflow_graph.graph_confidence or 0.65), 0.82),
+                    "metadata": {
+                        "retrieval_scope": "unit",
+                        "workflow_node_id": node.id,
+                        "actor": node.actor,
+                        "phase": node.phase,
+                        "semantic_node_type": node.semantic_node_type,
+                        "source_refs": refs,
+                    },
+                    "source_refs": refs,
+                }
+            )
+        )
+    return units[:80]
+
+
+def dump_source_refs(refs: list[Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for ref in refs:
+        if hasattr(ref, "model_dump"):
+            output.append(ref.model_dump())
+        elif isinstance(ref, dict):
+            output.append(ref)
+    return output
+
+
+def workflow_atomic_unit_type(node_type: str, semantic_type: str, content: str) -> str:
+    normalized = normalized_workflow_label(content)
+    if "decision" in node_type or "?" in normalized:
+        return "decision_point"
+    if "sla" in semantic_type or "tre nhat" in normalized or re.search(r"\b\d+\s*(phut|gio)\b", normalized):
+        return "sla_rule"
+    if "queue" in semantic_type or "queue" in normalized or "all staff" in normalized or "food order issue" in normalized:
+        return "routing_rule"
+    if "handoff" in semantic_type or "chuyen case" in normalized or "chia case" in normalized:
+        return "handoff_rule"
+    return "workflow_step"
+
+
+def default_pdf_diagram_ref(filename: str) -> dict[str, Any]:
+    return {"source_type": "pdf_diagram", "source_file": filename, "page": 1, "bbox": []}
+
+
+def default_pdf_diagram_source_ref(filename: str) -> SourceRef:
+    return SourceRef.model_validate(default_pdf_diagram_ref(filename))
+
+
+def normalize_rule_table_response_payload(parsed: Any) -> tuple[Any, list[str]]:
+    if not isinstance(parsed, dict):
+        return parsed, []
+
+    warnings = [str(warning) for warning in parsed.get("warnings", []) if warning]
+    raw_units = parsed.get("units") if isinstance(parsed.get("units"), list) else []
+    units = [unit for unit in raw_units if isinstance(unit, dict)]
+
+    full_sop = parsed.get("full_sop") if isinstance(parsed.get("full_sop"), dict) else None
+    if full_sop:
+        metadata = full_sop.get("metadata") if isinstance(full_sop.get("metadata"), dict) else {}
+        if isinstance(parsed.get("metadata_suggestions"), dict):
+            metadata = {**metadata, "metadata_suggestions": parsed["metadata_suggestions"]}
+        if isinstance(parsed.get("coverage_report"), dict):
+            metadata = {**metadata, "coverage_report": parsed["coverage_report"]}
+        full_sop = {
+            **full_sop,
+            "unit_type": "full_sop",
+            "metadata": {**metadata, "retrieval_scope": "document"},
+        }
+        has_full_sop = any(str(unit.get("unit_type") or "").strip() == "full_sop" for unit in units)
+        if not has_full_sop:
+            units.insert(0, full_sop)
+
+    if units:
+        return {"units": units}, warnings
+    return parsed, warnings
+
+
 def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[str, Any]], list[str]]:
     if not enabled():
         return [], ["openrouter_disabled"]
@@ -459,10 +786,12 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
             {
                 "role": "user",
                 "content": (
+                    RULE_TABLE_EXTRACTION_PROMPT
+                    + "\n\nPipeline-specific constraints for the existing extraction architecture:\n"
                     "Hãy chuyển tài liệu Excel/bảng quy định CS này thành SOP draft có cấu trúc để CS Ops review. "
                     "Không hardcode và không tự bịa policy. Chỉ dùng thông tin có trong source.\n\n"
                     "Yêu cầu bắt buộc:\n"
-                    "- Trả JSON shape {\"units\":[{\"unit_type\":\"...\",\"title\":\"...\",\"content\":\"...\",\"confidence\":0.0,\"metadata\":{...}}]}.\n"
+                    "- Trả JSON theo shape policy table ở trên: full_sop object + units array + warnings/metadata_suggestions/coverage_report. Không bỏ full_sop.\n"
                     "- title là nhãn ngắn 4-10 từ để agent scan/search; không copy nguyên câu content vào title.\n"
                     "- Phải có đúng 1 unit_type=\"full_sop\" với metadata.retrieval_scope=\"document\".\n"
                     "- Mỗi unit bắt buộc có source_refs. Excel cần source_refs[].sheet và row_start/row_end nếu rule đến từ dòng cụ thể. full_sop có thể dùng sheet/row range tổng.\n"
@@ -492,15 +821,16 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
     try:
         content = completion_content(payload, headers)
         parsed, repaired = parse_json_with_repair(content, payload, headers)
-        payload = ExtractedUnitsPayload.model_validate(parsed)
-        normalized = [normalize_unit(unit.model_dump()) for unit in payload.units]
+        normalized_payload, model_warnings = normalize_rule_table_response_payload(parsed)
+        payload_model = ExtractedUnitsPayload.model_validate(normalized_payload)
+        normalized = [normalize_unit(unit.model_dump()) for unit in payload_model.units]
         usable = [unit for unit in normalized if unit["content"]]
         if not any(unit["unit_type"] == "full_sop" for unit in usable):
             return [], ["openrouter_missing_full_sop_unit"]
         missing_refs = source_ref_validation_errors(usable, filename)
         if missing_refs:
             return [], missing_refs
-        warnings = ["openrouter_rule_table_extraction_used"]
+        warnings = ["openrouter_rule_table_extraction_used", *[f"model_warning:{warning}" for warning in model_warnings]]
         if repaired:
             warnings.append("openrouter_json_repair_used")
         return usable, warnings
@@ -908,7 +1238,7 @@ def workflow_payload_to_units(payload: WorkflowExtractionPayload, filename: str)
     units.append(normalize_unit(full_sop))
 
     graph = payload.workflow_graph.model_dump()
-    graph_refs = payload.full_sop.source_refs
+    graph_refs = payload.workflow_graph.source_refs or payload.full_sop.source_refs
     topology_validation_errors = payload.validation_errors
     uncertain_edges = [edge.model_dump() for edge in payload.uncertain_edges]
     annotations = [annotation.model_dump() for annotation in payload.annotations]

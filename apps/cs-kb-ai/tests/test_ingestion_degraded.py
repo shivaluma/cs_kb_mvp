@@ -6,7 +6,7 @@ import unittest
 from docx import Document
 from openpyxl import Workbook
 
-from app import ingestion
+from app import ingestion, openrouter
 from app.schemas import DocumentMetadata, ExtractedUnitsPayload, WorkflowExtractionPayload
 
 
@@ -14,12 +14,14 @@ class IngestionDegradedDraftTest(unittest.TestCase):
     def setUp(self) -> None:
         self.original_rule_extractor = ingestion.extract_rule_table_units
         self.original_workflow_extractor = ingestion.extract_workflow_units
+        self.original_workflow_v2_extractor = ingestion.extract_workflow_units_v2
         self.original_renderer = ingestion.render_pdf_pages_as_data_urls
         self.original_refiner = ingestion.refine_extracted_units
 
     def tearDown(self) -> None:
         ingestion.extract_rule_table_units = self.original_rule_extractor
         ingestion.extract_workflow_units = self.original_workflow_extractor
+        ingestion.extract_workflow_units_v2 = self.original_workflow_v2_extractor
         ingestion.render_pdf_pages_as_data_urls = self.original_renderer
         ingestion.refine_extracted_units = self.original_refiner
 
@@ -57,6 +59,39 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertTrue(any(artifact["artifact_type"] == "degraded_draft" for artifact in artifacts))
         self.assertTrue(any(artifact["artifact_type"] == "verification_report" for artifact in artifacts))
         self.assertEqual(enrichment["pipeline_job_status"], "degraded")
+
+    def test_rule_table_prompt_shape_merges_full_sop_into_units_contract(self) -> None:
+        normalized_payload, warnings = openrouter.normalize_rule_table_response_payload(
+            {
+                "full_sop": {
+                    "title": "Quy định làm tròn số tiền",
+                    "content": "Quy định cách làm tròn theo từng dòng bảng.",
+                    "source_refs": [
+                        {"source_type": "docx_table", "source_file": "rounding.docx", "table_index": 0, "row_index": 0}
+                    ],
+                },
+                "units": [
+                    {
+                        "unit_type": "policy_rule",
+                        "title": "beFood bồi hoàn món ăn",
+                        "content": "Mốc 500đ: <500 làm tròn xuống, ≥500 làm tròn lên.",
+                        "source_refs": [
+                            {"source_type": "docx_table", "source_file": "rounding.docx", "table_index": 0, "row_index": 1}
+                        ],
+                    }
+                ],
+                "warnings": ["effective_from_missing"],
+                "metadata_suggestions": {"sub_type": "financial_threshold_matrix"},
+                "coverage_report": {"policy_rule_count": 1},
+            }
+        )
+
+        payload = ExtractedUnitsPayload.model_validate(normalized_payload)
+        self.assertEqual(warnings, ["effective_from_missing"])
+        self.assertEqual(payload.units[0].unit_type, "full_sop")
+        self.assertEqual(payload.units[0].metadata["retrieval_scope"], "document")
+        self.assertEqual(payload.units[0].metadata["metadata_suggestions"]["sub_type"], "financial_threshold_matrix")
+        self.assertEqual(payload.units[1].unit_type, "policy_rule")
 
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
@@ -498,8 +533,10 @@ class IngestionDegradedDraftTest(unittest.TestCase):
 
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
         original_workflow_extractor = ingestion.extract_workflow_units
+        original_workflow_v2_extractor = ingestion.extract_workflow_units_v2
         original_render_pdf = ingestion.render_pdf_pages_as_data_urls
         ingestion.extract_workflow_units = fake_workflow_extractor
+        ingestion.extract_workflow_units_v2 = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_disabled"])
         ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], ["pdf_vision_pages_rendered:1"])
         try:
             _chunks, warnings, ai_error = ingestion.try_ai_structuring(
@@ -525,12 +562,79 @@ class IngestionDegradedDraftTest(unittest.TestCase):
             )
         finally:
             ingestion.extract_workflow_units = original_workflow_extractor
+            ingestion.extract_workflow_units_v2 = original_workflow_v2_extractor
             ingestion.render_pdf_pages_as_data_urls = original_render_pdf
 
         self.assertIn("visual_graph_context_supplied_to_llm", warnings)
         self.assertIn("openrouter_disabled", ai_error)
         self.assertIsInstance(captured["visual_context"], dict)
         self.assertEqual(captured["visual_context"]["summary"]["shape_candidate_count"], 1)
+
+    def test_workflow_v2_vision_primary_is_used_before_legacy_flow(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_v2_extractor(_filename: str, _raw_text: str, page_images=None, visual_context=None):
+            captured["page_images"] = page_images
+            captured["visual_context"] = visual_context
+            return (
+                [
+                    {
+                        "unit_type": "full_sop",
+                        "title": "Quy trình theo dõi case hình ảnh",
+                        "content": "CS theo dõi case hình ảnh liên quan món ăn và chuyển MSC theo SLA.",
+                        "confidence": 0.82,
+                        "metadata": {"retrieval_scope": "document"},
+                        "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1}],
+                    },
+                    {
+                        "unit_type": "workflow_graph",
+                        "title": "Quy trình theo dõi case hình ảnh",
+                        "content": "Workflow graph có node và edge.",
+                        "confidence": 0.72,
+                        "metadata": {
+                            "retrieval_scope": "graph",
+                            "workflow_graph": {
+                                "workflow_id": "wf",
+                                "title": "Quy trình theo dõi case hình ảnh",
+                                "start_node_id": "start",
+                                "nodes": [{"id": "start", "type": "start", "title": "Start"}],
+                                "edges": [],
+                                "graph_confidence": 0.72,
+                            },
+                        },
+                        "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1}],
+                    },
+                    {
+                        "unit_type": "workflow_step",
+                        "title": "Hướng dẫn cung cấp hình ảnh",
+                        "content": "CS hướng dẫn KH cung cấp hình ảnh theo thời gian quy định.",
+                        "confidence": 0.82,
+                        "metadata": {"retrieval_scope": "unit"},
+                        "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1}],
+                    },
+                ],
+                ["openrouter_workflow_v2_extraction_used"],
+            )
+
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        ingestion.extract_workflow_units_v2 = fake_v2_extractor
+        ingestion.extract_workflow_units = lambda *_args, **_kwargs: self.fail("legacy workflow extractor should not run after v2 success")
+        ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], ["pdf_vision_pages_rendered:1"])
+
+        chunks, warnings, ai_error = ingestion.try_ai_structuring(
+            filename="workflow.pdf",
+            content_type="application/pdf",
+            data=b"%PDF-1.4",
+            raw_text="Quy trình có diagram",
+            classification=classification,
+            visual_layout={"summary": {"shape_candidate_count": 99}},
+        )
+
+        self.assertEqual(ai_error, "")
+        self.assertIn("workflow_extraction_flow:v2_vision_primary", warnings)
+        self.assertEqual(captured["visual_context"], None)
+        self.assertGreaterEqual(len(chunks), 3)
+        self.assertFalse(any(chunk.metadata.get("extraction_status") == "degraded" for chunk in chunks))
 
     def test_workflow_ai_missing_required_layers_is_not_structured_success(self) -> None:
         def fake_workflow_extractor(_filename: str, _raw_text: str, page_images=None, visual_context=None):
@@ -558,6 +662,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
             )
 
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        ingestion.extract_workflow_units_v2 = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_disabled"])
         ingestion.extract_workflow_units = fake_workflow_extractor
         ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], [])
 
@@ -599,6 +704,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
             )
 
         ingestion.extract_workflow_units = fake_workflow_extractor
+        ingestion.extract_workflow_units_v2 = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_disabled"])
         ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], [])
         chunks, warnings, ai_error = ingestion.try_ai_structuring(
             filename="workflow.pdf",
@@ -610,7 +716,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         )
 
         self.assertEqual(chunks, [])
-        self.assertEqual(warnings, [])
+        self.assertIn("openrouter_disabled", warnings)
         self.assertIn("missing_atomic_workflow_units", ai_error)
 
     def test_successful_ai_extraction_creates_structured_draft(self) -> None:
@@ -781,12 +887,20 @@ def workflow_visual_layout_fixture() -> dict:
                             "id": "p1_node_6",
                             "page": 1,
                             "type": "action",
+                            "title": "2.1. Theo dõi case và xử lý bước tiếp theo",
+                            "bbox": [260, 320, 450, 430],
+                            "confidence": 0.68,
+                        },
+                        {
+                            "id": "p1_node_7",
+                            "page": 1,
+                            "type": "action",
                             "title": "9.2 CS_B thực hiện bước tiếp theo và đảm bảo case chuyển MSC trễ nhất là 30 phút",
                             "bbox": [480, 320, 780, 430],
                             "confidence": 0.68,
                         },
                         {
-                            "id": "p1_node_7",
+                            "id": "p1_node_8",
                             "page": 1,
                             "type": "end",
                             "title": "End",

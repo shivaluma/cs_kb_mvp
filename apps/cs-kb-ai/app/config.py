@@ -19,8 +19,15 @@ class Settings:
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
         self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
-        self.openrouter_extraction_model = os.getenv("OPENROUTER_EXTRACTION_MODEL", self.openrouter_model)
-        self.openrouter_vision_model = os.getenv("OPENROUTER_VISION_MODEL", self.openrouter_extraction_model)
+        self.openrouter_extraction_model = os.getenv("OPENROUTER_EXTRACTION_MODEL", self.openrouter_model).strip() or self.openrouter_model
+        self.openrouter_refine_model = os.getenv(
+            "OPENROUTER_REFINE_MODEL",
+            "google/gemini-3-flash-preview",
+        ).strip()
+        self.openrouter_vision_model = (
+            os.getenv("OPENROUTER_VISION_MODEL", "").strip()
+            or self.openrouter_refine_model
+        )
         self.openrouter_metadata_model = os.getenv("OPENROUTER_METADATA_MODEL", self.openrouter_model)
         self.openrouter_chat_model = os.getenv("OPENROUTER_CHAT_MODEL", self.openrouter_model)
         self.openrouter_chat_simple_model = os.getenv(
@@ -42,10 +49,6 @@ class Settings:
         self.openrouter_chat_fallback_model = os.getenv(
             "OPENROUTER_CHAT_FALLBACK_MODEL",
             os.getenv("OPENROUTER_CHAT_MODEL_FALLBACK", "moonshotai/kimi-k2.6"),
-        ).strip()
-        self.openrouter_refine_model = os.getenv(
-            "OPENROUTER_REFINE_MODEL",
-            "google/gemini-3-flash-preview",
         ).strip()
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
