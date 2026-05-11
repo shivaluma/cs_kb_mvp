@@ -85,6 +85,46 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(current["metadata"]["source_refs"][0]["column_names"], ["Case", "Action"])
         self.assertTrue(any(artifact["artifact_type"] == "structuring_plan" for artifact in enrichment["pipeline_artifacts"]))
 
+    def test_docx_policy_table_creates_table_aware_atomic_units(self) -> None:
+        ingestion.extract_rule_table_units = lambda _filename, _raw_text: self.fail("docx policy table should not call OpenRouter")
+        data = docx_policy_table_bytes()
+
+        _raw, _digest, chunks, _warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định làm tròn số tiền.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=data,
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        self.assertEqual(enrichment["document_type"], "policy_rule")
+        self.assertEqual(enrichment["extraction_status"], "structured")
+        unit_types = [chunk["metadata"]["unit_type"] for chunk in chunks]
+        self.assertIn("full_sop", unit_types)
+        self.assertGreaterEqual(unit_types.count("policy_rule"), 2)
+        self.assertGreaterEqual(unit_types.count("exception_rule"), 2)
+
+        befood_rule = next(chunk for chunk in chunks if chunk["heading"] == "beFood - Bồi hoàn liên quan món ăn")
+        self.assertEqual(befood_rule["metadata"]["source_ref_quality"], "table_row")
+        self.assertEqual(befood_rule["metadata"]["source_refs"][0]["source_type"], "docx_table")
+        self.assertEqual(befood_rule["metadata"]["rounding_threshold"], 500)
+        self.assertEqual(len(befood_rule["metadata"]["examples"]), 3)
+        self.assertIn("10,450đ -> 10,000đ", befood_rule["content"])
+
+        normal_refund = next(chunk for chunk in chunks if chunk["heading"] == "Dịch vụ khác - Hoàn / rút tiền thông thường")
+        self.assertEqual(normal_refund["metadata"]["rounding_threshold"], 300)
+        self.assertIn(">300", normal_refund["content"])
+
+        pm04 = next(chunk for chunk in chunks if "PM04" in chunk["heading"])
+        self.assertEqual(pm04["metadata"]["unit_type"], "exception_rule")
+        self.assertFalse(pm04["metadata"]["rounding_applies"])
+
+        source_blocks = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_blocks")
+        self.assertEqual(source_blocks["payload"]["source_ref_quality"], "table_row")
+        self.assertTrue(any(block["type"] == "docx_table_row" for block in source_blocks["payload"]["preview_blocks"]))
+        verification = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "verification_report")
+        self.assertNotIn("missing_atomic_units", verification["payload"]["hard_blockers"])
+        self.assertNotIn("degraded_units_require_manual_curation", verification["payload"]["hard_blockers"])
+
     def test_workflow_ai_failure_does_not_create_confirmed_graph(self) -> None:
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
         chunks = ingestion.build_degraded_workflow_draft(
@@ -309,6 +349,39 @@ def docx_bytes(paragraphs: list[str]) -> bytes:
     document = Document()
     for paragraph in paragraphs:
         document.add_paragraph(paragraph)
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def docx_policy_table_bytes() -> bytes:
+    document = Document()
+    document.add_paragraph("QUY ĐỊNH LÀM TRÒN SỐ TIỀN")
+    headers = ["Dịch vụ", "Trường hợp", "Quy tắc làm tròn", "Lưu ý"]
+    rows = [
+        [
+            "beFood",
+            "Bồi hoàn liên quan món ăn",
+            "Mốc 500đ: <500↓, ≥500↑",
+            "Làm tròn giá trị bồi hoàn cuối cùng\nví dụ:\n10,450đ -> 10,000 đ\n10,500đ (hoặc 10,560đ) -> 11,000 đ",
+        ],
+        ["beFood", "Các trường hợp khác (begin-end...)", "Không áp dụng", "Làm tròn giá trị bồi hoàn cuối cùng"],
+        [
+            "Dịch vụ khác",
+            "Hoàn / rút tiền thông thường",
+            "Mốc: 300đ: >300↑, ≤300↓",
+            "Tại mỗi bước tính tiền, sau khi tính ra số tiền CS cần phải làm tròn theo quy tắc trước khi thực hiện bước tiếp theo.\nVD:\n10,400 -> 11000\n10,200 -> 10,000",
+        ],
+        ["Dịch vụ khác", "Hoàn / rút chiết khấu ĐT", "Không áp dụng", "Tại mỗi bước tính tiền, sau khi tính ra số tiền CS cần phải làm tròn theo quy tắc trước khi thực hiện bước tiếp theo."],
+        ["Dịch vụ khác", "Hoàn KH về PTTT đã dùng (PM04)", "Không áp dụng", "Tại mỗi bước tính tiền, sau khi tính ra số tiền CS cần phải làm tròn theo quy tắc trước khi thực hiện bước tiếp theo."],
+    ]
+    table = document.add_table(rows=1, cols=len(headers))
+    for index, header in enumerate(headers):
+        table.rows[0].cells[index].text = header
+    for row in rows:
+        cells = table.add_row().cells
+        for index, value in enumerate(row):
+            cells[index].text = value
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()

@@ -914,7 +914,13 @@ def has_required_source_ref(document_type: str, metadata: dict[str, Any]) -> boo
     if document_type == "policy_rule":
         return any(
             isinstance(ref, dict)
-            and (ref.get("paragraph_index") is not None or ref.get("heading_path") or ref.get("line_start") or ref.get("page"))
+            and (
+                ref.get("paragraph_index") is not None
+                or ref.get("heading_path")
+                or ref.get("line_start")
+                or ref.get("page")
+                or (ref.get("table_index") is not None and ref.get("row_index") is not None)
+            )
             for ref in refs
         )
     return True
@@ -1119,6 +1125,8 @@ def normalize_required_unit_type(value: str) -> str:
         "policy_rule",
         "validation_rule",
         "handling_rule",
+        "exception_rule",
+        "threshold_rule",
         "workflow_step",
         "decision_point",
         "decision_rule",

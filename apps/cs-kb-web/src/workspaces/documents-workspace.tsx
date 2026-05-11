@@ -961,6 +961,53 @@ export function DocumentsWorkspace({
           </TabsContent>
 
           <TabsContent className="mt-0 space-y-4" value="gate">
+            {workflowRequiresGraph && workflowGraphIssueCount > 0 ? (
+              <Card className="rounded-xl border-destructive/35 bg-destructive/5">
+                <CardHeader className="border-b border-destructive/20 pb-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <CardTitle className="text-destructive">Workflow graph blocks publish</CardTitle>
+                      <CardDescription>
+                        This is resolved in the Workflow tab. Verify only shows the blocker summary.
+                      </CardDescription>
+                    </div>
+                    <Button onClick={() => setDocumentStep("workflow")} size="sm" type="button" variant="secondary">
+                      <Network data-icon="inline-start" className="size-4" />
+                      Open Workflow review
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="grid gap-3 pt-4 md:grid-cols-2">
+                  <div className="rounded-lg border bg-background p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold">Topology warnings</p>
+                      <Badge variant={workflowGraphWarningsAcknowledged ? "secondary" : "destructive"}>
+                        {workflowGraphWarningsAcknowledged ? "acknowledged" : `${workflowGraphWarningIssueCount} open`}
+                      </Badge>
+                    </div>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                      {workflowGraphWarningsAcknowledged
+                        ? "Topology warnings have an acknowledgement reason."
+                        : "Open the Workflow tab, compare against source, then fill Acknowledge with reason."}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border bg-background p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold">Decision branch review</p>
+                      <Badge variant={workflowEdgeReviewSummary.blockingCount ? "destructive" : "secondary"}>
+                        {workflowEdgeReviewSummary.blockingCount ? `${workflowEdgeReviewSummary.blockingCount} open` : "done"}
+                      </Badge>
+                    </div>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                      {workflowEdgeReviewSummary.blockingCount
+                        ? "Open the Workflow tab and confirm each decision branch, or acknowledge ambiguous branches with a reason."
+                        : "All required decision branches are confirmed or acknowledged."}
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
+
             <Card className="rounded-xl">
               <CardHeader className="border-b pb-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1515,6 +1562,40 @@ function WorkflowGraphPanel({
                 {String(graph.review_reason ?? graphUnit.metadata.review_reason ?? "Review graph branches and arrow direction before publish.")}
               </p>
             </div>
+            {!acknowledged || edgeReviewSummary.blockingCount ? (
+              <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-destructive">How to clear “Workflow graph reviewed”</p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      Publish stays blocked until the graph warnings and decision branches below are explicitly reviewed.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {!acknowledged ? <Badge variant="destructive">{issueCount} topology warning(s)</Badge> : <Badge variant="secondary">topology acknowledged</Badge>}
+                    {edgeReviewSummary.blockingCount ? <Badge variant="destructive">{edgeReviewSummary.blockingCount} branch review(s)</Badge> : <Badge variant="secondary">branches reviewed</Badge>}
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2 text-xs leading-5 text-muted-foreground md:grid-cols-2">
+                  <div className="rounded-lg border bg-background p-3">
+                    <span className="font-semibold text-foreground">1. Topology warnings</span>
+                    <p className="mt-1">
+                      {!acknowledged
+                        ? "Compare the diagram/source, enter a reason, then click Acknowledge with reason."
+                        : "Done. The acknowledgement reason is saved on the graph unit."}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border bg-background p-3">
+                    <span className="font-semibold text-foreground">2. Decision branches</span>
+                    <p className="mt-1">
+                      {edgeReviewSummary.blockingCount
+                        ? "Use the branch table to Confirm correct Yes/No edges, or Ack ambiguous edges with a reason."
+                        : "Done. Required decision edges are confirmed or acknowledged."}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : null}
             {issueCount ? (
               <div className={cn("rounded-xl border p-4", acknowledged ? "bg-secondary/30" : "border-destructive/30 bg-destructive/5")}>
                 <div className="flex flex-wrap items-center justify-between gap-2">

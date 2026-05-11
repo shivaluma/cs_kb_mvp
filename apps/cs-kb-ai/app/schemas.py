@@ -30,6 +30,8 @@ ExtractionUnitType = Literal[
     "policy_rule",
     "validation_rule",
     "handling_rule",
+    "exception_rule",
+    "threshold_rule",
     "workflow_overview",
     "workflow_graph",
     "workflow_step",
@@ -113,6 +115,8 @@ class SourceRef(BaseModel):
     column_names: list[str] = Field(default_factory=list)
     page: int | None = Field(default=None, ge=1)
     paragraph_index: int | None = Field(default=None, ge=0)
+    table_index: int | None = Field(default=None, ge=0)
+    row_index: int | None = Field(default=None, ge=0)
     heading_path: list[str] = Field(default_factory=list)
     line_start: int | None = Field(default=None, ge=1)
     line_end: int | None = Field(default=None, ge=1)

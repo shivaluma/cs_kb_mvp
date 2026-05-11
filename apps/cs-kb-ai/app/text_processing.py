@@ -29,6 +29,7 @@ ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 NOTE_RE = re.compile(r"^\s*(lưu ý|luu y|note|warning|cảnh báo|canh bao|script|sla|zt)\b", re.IGNORECASE)
+DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 @dataclass(frozen=True)
@@ -99,9 +100,7 @@ def extract_text(filename: str, content_type: str, data: bytes) -> tuple[str, li
     elif is_spreadsheet_file(lower_name, content_type):
         text, spreadsheet_warnings, _ = extract_spreadsheet(lower_name, data)
         warnings.extend(spreadsheet_warnings)
-    elif lower_name.endswith(".docx") or content_type in {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    }:
+    elif is_docx_file(lower_name, content_type):
         text = extract_docx_text(data)
     else:
         text = data.decode("utf-8", errors="ignore")
@@ -118,6 +117,10 @@ def is_spreadsheet_file(filename: str, content_type: str) -> bool:
         "application/vnd.ms-excel.sheet.macroEnabled.12",
         "application/vnd.ms-excel",
     }
+
+
+def is_docx_file(filename: str, content_type: str) -> bool:
+    return filename.endswith(".docx") or content_type == DOCX_CONTENT_TYPE
 
 
 def is_image_file(filename: str, content_type: str) -> bool:
@@ -202,15 +205,104 @@ def render_pdf_page_jpeg(data: bytes, page_number: int = 1, scale: float = 1.8) 
     return buffer.getvalue()
 
 
-def extract_docx_text(data: bytes) -> str:
+def extract_docx_structure(data: bytes) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    if len(data) > settings.max_upload_bytes:
+        raise ValueError(f"file_too_large:{settings.max_upload_bytes}")
+
     doc = DocxDocument(io.BytesIO(data))
-    blocks = [paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()]
-    for table in doc.tables:
+    blocks: list[dict[str, Any]] = []
+    raw_lines: list[str] = []
+
+    for paragraph_index, paragraph in enumerate(doc.paragraphs):
+        text = normalize_cell_text(paragraph.text)
+        if not text:
+            continue
+        blocks.append(
+            {
+                "type": "paragraph",
+                "index": len(blocks),
+                "paragraph_index": paragraph_index,
+                "text": text,
+            }
+        )
+        raw_lines.append(text)
+
+    tables: list[dict[str, Any]] = []
+    for table_index, table in enumerate(doc.tables):
+        columns: list[str] = []
+        rows: list[dict[str, Any]] = []
         for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if cells:
-                blocks.append(" | ".join(cells))
-    return "\n".join(blocks)
+            cells = [normalize_docx_cell_text(cell.text) for cell in row.cells]
+            if not any(cells):
+                continue
+            if not columns:
+                columns = unique_docx_headers(cells)
+                header_text = " | ".join(columns)
+                blocks.append(
+                    {
+                        "type": "docx_table_header",
+                        "index": len(blocks),
+                        "table_index": table_index,
+                        "row_index": 0,
+                        "columns": columns,
+                        "cells": cells,
+                        "text": header_text,
+                    }
+                )
+                raw_lines.append(header_text)
+                continue
+
+            row_index = len(rows) + 1
+            values = {columns[index]: cells[index] for index in range(min(len(columns), len(cells))) if columns[index]}
+            row_text = " | ".join(cell_preview(cell) for cell in cells if cell)
+            row_payload = {
+                "row_index": row_index,
+                "cells": cells,
+                "values": values,
+                "text": row_text,
+            }
+            rows.append(row_payload)
+            blocks.append(
+                {
+                    "type": "docx_table_row",
+                    "index": len(blocks),
+                    "table_index": table_index,
+                    "row_index": row_index,
+                    "columns": columns,
+                    "cells": cells,
+                    "values": values,
+                    "text": row_text,
+                }
+            )
+            raw_lines.append(row_text)
+        if columns:
+            tables.append({"table_index": table_index, "columns": columns, "rows": rows})
+    return normalize_whitespace("\n".join(raw_lines)), blocks, tables
+
+
+def extract_docx_text(data: bytes) -> str:
+    raw_text, _blocks, _tables = extract_docx_structure(data)
+    return raw_text
+
+
+def normalize_docx_cell_text(value: str) -> str:
+    lines = [normalize_cell_text(line) for line in str(value or "").splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def cell_preview(value: str) -> str:
+    return re.sub(r"\s*\n\s*", " / ", value).strip()
+
+
+def unique_docx_headers(values: list[str]) -> list[str]:
+    output: list[str] = []
+    seen: dict[str, int] = {}
+    for index, value in enumerate(values, start=1):
+        header = cell_preview(value) or f"Column {index}"
+        count = seen.get(header, 0) + 1
+        seen[header] = count
+        output.append(header if count == 1 else f"{header} {count}")
+    return output
 
 
 def extract_spreadsheet(filename: str, data: bytes) -> tuple[str, list[str], list[Chunk]]:
@@ -663,6 +755,8 @@ def vietnamese_unit_title(unit_type: str) -> str:
         "handoff_rule": "Quy định handoff",
         "operational_instruction": "Hướng dẫn thao tác",
         "routing_rule": "Quy định routing",
+        "exception_rule": "Trường hợp ngoại lệ",
+        "threshold_rule": "Quy định ngưỡng",
         "macro_script": "Script phản hồi",
         "operational_note": "Lưu ý vận hành",
         "security_note": "Lưu ý bảo mật",

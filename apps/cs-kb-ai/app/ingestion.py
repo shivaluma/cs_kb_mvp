@@ -8,13 +8,16 @@ from app.embedding import embed_text
 from app.openrouter import extract_rule_table_units, extract_workflow_units, suggest_document_metadata
 from app.schemas import DocumentMetadata
 from app.text_processing import (
+    Chunk,
     ai_units_to_chunks,
     checksum,
     chunk_text,
     classify_document,
     ensure_full_sop_layer,
+    extract_docx_structure,
     extract_spreadsheet,
     extract_text,
+    is_docx_file,
     is_spreadsheet_file,
     render_pdf_pages_as_data_urls,
     spreadsheet_rows,
@@ -113,6 +116,7 @@ def prepare_document_version(
             raw_text=raw_text,
             classification=classification,
             visual_layout=visual_layout,
+            raw_context=raw_context,
         )
         warnings.extend(ai_warnings)
         pipeline_artifacts.append(
@@ -228,6 +232,9 @@ def extract_raw_evidence(filename: str, content_type: str, data: bytes) -> tuple
     if is_spreadsheet_file(filename.lower(), content_type):
         raw_text, warnings, spreadsheet_chunks = extract_spreadsheet(filename.lower(), data)
         return raw_text, warnings, {"spreadsheet_chunks": spreadsheet_chunks, "sheets": spreadsheet_rows(filename.lower(), data)}
+    if is_docx_file(filename.lower(), content_type):
+        raw_text, blocks, tables = extract_docx_structure(data)
+        return raw_text, [], {"docx_blocks": blocks, "docx_tables": tables}
     raw_text, warnings = extract_text(filename, content_type, data)
     return raw_text, warnings, {}
 
@@ -242,6 +249,8 @@ def parse_document_blocks(filename: str, content_type: str, raw_text: str, raw_c
             {"type": "sheet", "sheet": sheet_name, "rows": rows}
             for sheet_name, rows in raw_context.get("sheets", [])
         ]
+    if isinstance(raw_context.get("docx_blocks"), list):
+        return raw_context["docx_blocks"]
     if filename.lower().endswith(".docx") or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         paragraphs = [line.strip() for line in raw_text.splitlines() if line.strip()]
         return [{"type": "paragraph", "paragraph_index": index, "text": text} for index, text in enumerate(paragraphs)]
@@ -258,10 +267,15 @@ def try_ai_structuring(
     raw_text: str,
     classification: Any,
     visual_layout: dict[str, Any] | None = None,
+    raw_context: dict[str, Any] | None = None,
 ) -> tuple[list[Any], list[str], str]:
     warnings: list[str] = []
+    raw_context = raw_context or {}
     try:
         if classification.document_type in {"policy_rule", "policy_table"}:
+            table_chunks = extract_docx_policy_table_chunks(filename, content_type, raw_text, raw_context, classification)
+            if table_chunks:
+                return mark_structured_chunks(table_chunks), ["docx_policy_table_extraction_used"], ""
             llm_units, llm_warnings = extract_rule_table_units(filename, raw_text)
             warnings.extend(llm_warnings)
             if not llm_units:
@@ -288,6 +302,361 @@ def try_ai_structuring(
     except Exception as exc:
         return [], warnings, f"ai_structuring_exception:{sanitize_ai_error(exc)}"
     return [], warnings, ""
+
+
+def extract_docx_policy_table_chunks(
+    filename: str,
+    content_type: str,
+    raw_text: str,
+    raw_context: dict[str, Any],
+    classification: Any,
+) -> list[Chunk]:
+    if not is_docx_file(filename.lower(), content_type):
+        return []
+    tables = raw_context.get("docx_tables")
+    if not isinstance(tables, list):
+        return []
+
+    row_chunks: list[Chunk] = []
+    source_refs: list[dict[str, Any]] = []
+    for table in tables:
+        if not isinstance(table, dict) or not looks_like_docx_policy_rule_table(table):
+            continue
+        table_index = int(table.get("table_index") or 0)
+        columns = [str(column) for column in table.get("columns", []) if str(column).strip()]
+        if columns:
+            source_refs.append(docx_table_source_ref(filename, table_index, 0, columns))
+        rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            chunk = docx_policy_row_chunk(
+                filename=filename,
+                table_index=table_index,
+                row=row,
+                columns=columns,
+                index=len(row_chunks) + 1,
+                classification=classification,
+            )
+            if chunk:
+                row_chunks.append(chunk)
+
+    if not row_chunks:
+        return []
+
+    policy_count = sum(1 for chunk in row_chunks if chunk.metadata.get("unit_type") == "policy_rule")
+    exception_count = sum(1 for chunk in row_chunks if chunk.metadata.get("unit_type") == "exception_rule")
+    full_content = docx_policy_full_sop_content(raw_text, row_chunks)
+    full_metadata = {
+        "unit_type": "full_sop",
+        "retrieval_scope": "document",
+        "document_type": classification.document_type,
+        "source_type": classification.source_type,
+        "sub_type": "policy_table",
+        "structure_type": "financial_threshold_matrix",
+        "risk_level": "high",
+        "required_unit_types": ["policy_rule", "exception_rule"] if exception_count else ["policy_rule"],
+        "expected_policy_rule_count": policy_count,
+        "expected_exception_rule_count": exception_count,
+        "source_refs": source_refs or [docx_table_source_ref(filename, 0, 0, [])],
+        "source_ref_quality": "table_row",
+        "source_ref_acknowledged": True,
+        "tags": ["rounding", "financial_policy", "refund"],
+        "aliases": ["quy định làm tròn số tiền", "mốc làm tròn", "rounding policy"],
+        "confidence": min(max(float(getattr(classification, "confidence", 0.84)), 0.0), 0.92),
+        "review_status": "needs_review",
+    }
+    full_sop = Chunk(
+        chunk_index=0,
+        section="full_sop",
+        heading=path_title(filename),
+        content=full_content,
+        token_count=len(tokenize(full_content)),
+        metadata=full_metadata,
+    )
+    return [full_sop, *row_chunks]
+
+
+def looks_like_docx_policy_rule_table(table: dict[str, Any]) -> bool:
+    columns = [normalized_key(column) for column in table.get("columns", []) if str(column).strip()]
+    column_text = " ".join(columns)
+    has_case_matrix = (
+        any(key in column_text for key in ["dich_vu", "service"])
+        and any(key in column_text for key in ["truong_hop", "case"])
+        and any(key in column_text for key in ["quy_tac", "rule", "lam_tron"])
+    )
+    row_text = normalized_search_text(json.dumps(table.get("rows", []), ensure_ascii=False))
+    has_rounding_policy = "lam tron" in row_text and any(signal in row_text for signal in ["moc", "khong ap dung", "refund", "hoan", "rut"])
+    return has_case_matrix and has_rounding_policy
+
+
+def docx_policy_row_chunk(
+    *,
+    filename: str,
+    table_index: int,
+    row: dict[str, Any],
+    columns: list[str],
+    index: int,
+    classification: Any,
+) -> Chunk | None:
+    values = row.get("values") if isinstance(row.get("values"), dict) else {}
+    service = value_by_header(values, columns, ["dich_vu", "service"])
+    case_name = value_by_header(values, columns, ["truong_hop", "case"])
+    rule_text = value_by_header(values, columns, ["quy_tac", "lam_tron", "rule"])
+    note_text = value_by_header(values, columns, ["luu_y", "note"])
+    if not (service or case_name or rule_text):
+        return None
+
+    row_index = int(row.get("row_index") or index)
+    threshold = parse_rounding_threshold(rule_text)
+    no_apply = is_no_apply_rule(rule_text)
+    raw_notes, parsed_examples = extract_note_and_examples(note_text)
+    examples = [] if no_apply else parsed_examples
+    unit_type = "exception_rule" if no_apply else "policy_rule"
+    source_ref = docx_table_source_ref(filename, table_index, row_index, columns)
+    title = " - ".join(part for part in [service, case_name] if part).strip() or f"Dòng {row_index}"
+    content = policy_row_content(
+        service=service,
+        case_name=case_name,
+        rule_text=rule_text,
+        no_apply=no_apply,
+        threshold=threshold,
+        notes=raw_notes,
+        examples=examples,
+    )
+    row_text = " ".join([service, case_name, rule_text, note_text])
+    metadata = {
+        "unit_type": unit_type,
+        "retrieval_scope": "unit",
+        "document_type": classification.document_type,
+        "source_type": classification.source_type,
+        "sub_type": "policy_table",
+        "structure_type": "financial_threshold_matrix",
+        "service": normalize_service_key(service),
+        "service_label": service,
+        "case_type": normalized_key(case_name),
+        "case_name": case_name,
+        "rounding_applies": not no_apply,
+        "rounding_threshold": threshold,
+        "rounding_rule_raw": rule_text,
+        "rounding_directions": rounding_directions(rule_text, threshold),
+        "examples": examples,
+        "examples_need_review": parsed_examples if no_apply and parsed_examples else [],
+        "notes": raw_notes,
+        "risk_level": "high",
+        "tags": policy_tags(row_text, threshold, no_apply),
+        "aliases": policy_aliases(service, case_name, threshold, no_apply),
+        "source_table_index": table_index,
+        "source_row_index": row_index,
+        "source_columns": columns,
+        "source_refs": [source_ref],
+        "source_ref_quality": "table_row",
+        "source_ref_acknowledged": True,
+        "confidence": min(max(float(getattr(classification, "confidence", 0.84)), 0.0), 0.9),
+        "review_status": "needs_review",
+    }
+    return Chunk(
+        chunk_index=index,
+        section=unit_type,
+        heading=title[:180],
+        content=content,
+        token_count=len(tokenize(content)),
+        metadata=metadata,
+    )
+
+
+def docx_policy_full_sop_content(raw_text: str, row_chunks: list[Chunk]) -> str:
+    title = next((line.strip() for line in raw_text.splitlines() if line.strip()), "Quy định làm tròn số tiền")
+    rules = []
+    exceptions = []
+    for chunk in row_chunks:
+        first_line = next((line for line in chunk.content.splitlines() if line.strip()), chunk.content)
+        if chunk.metadata.get("unit_type") == "exception_rule":
+            exceptions.append(f"- {chunk.heading}: {first_line}")
+        else:
+            rules.append(f"- {chunk.heading}: {first_line}")
+    sections = [
+        title,
+        "Mục đích: Quy định cách làm tròn số tiền theo từng dịch vụ và trường hợp trong bảng nguồn.",
+    ]
+    if rules:
+        sections.extend(["", "Quy tắc áp dụng:", *rules])
+    if exceptions:
+        sections.extend(["", "Trường hợp không áp dụng:", *exceptions])
+    return "\n".join(sections).strip()
+
+
+def policy_row_content(
+    *,
+    service: str,
+    case_name: str,
+    rule_text: str,
+    no_apply: bool,
+    threshold: int | None,
+    notes: list[str],
+    examples: list[dict[str, str]],
+) -> str:
+    subject = " - ".join(part for part in [service, case_name] if part).strip()
+    if no_apply:
+        first = f"{subject}: Không áp dụng quy định làm tròn." if subject else "Không áp dụng quy định làm tròn."
+    elif threshold:
+        first = f"{subject}: {rounding_sentence(rule_text, threshold)}" if subject else rounding_sentence(rule_text, threshold)
+    else:
+        first = f"{subject}: {rule_text}." if subject else rule_text
+
+    lines = [normalize_money_text(first)]
+    for note in notes:
+        lines.append(f"Lưu ý: {normalize_money_text(note)}")
+    if examples:
+        lines.append("Ví dụ:")
+        for example in examples:
+            lines.append(f"- {example['input']} -> {example['output']}")
+    return "\n".join(line for line in lines if line.strip()).strip()
+
+
+def rounding_sentence(rule_text: str, threshold: int) -> str:
+    normalized = normalized_search_text(rule_text)
+    if "<" in rule_text and ("≥" in rule_text or ">=" in rule_text):
+        return f"Mốc làm tròn {threshold}đ: <{threshold} làm tròn xuống, >={threshold} làm tròn lên."
+    if ">" in rule_text and ("≤" in rule_text or "<=" in rule_text):
+        return f"Mốc làm tròn {threshold}đ: >{threshold} làm tròn lên, <={threshold} làm tròn xuống."
+    if "xuong" in normalized and "len" in normalized:
+        return f"Mốc làm tròn {threshold}đ theo quy tắc trong nguồn: {rule_text}."
+    return f"Áp dụng quy tắc làm tròn: {rule_text}."
+
+
+def parse_rounding_threshold(rule_text: str) -> int | None:
+    match = re.search(r"(?:mốc\s*:?\s*)?(\d{2,6})\s*đ?", rule_text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def is_no_apply_rule(rule_text: str) -> bool:
+    return "khong ap dung" in normalized_search_text(rule_text)
+
+
+def rounding_directions(rule_text: str, threshold: int | None) -> list[dict[str, Any]]:
+    if threshold is None:
+        return []
+    directions: list[dict[str, Any]] = []
+    if re.search(rf"<\s*{threshold}\b", rule_text):
+        directions.append({"operator": "<", "threshold": threshold, "direction": "down"})
+    if re.search(rf"(?:≥|>=)\s*{threshold}\b", rule_text):
+        directions.append({"operator": ">=", "threshold": threshold, "direction": "up"})
+    if re.search(rf">\s*{threshold}\b", rule_text) and not re.search(rf">=\s*{threshold}\b", rule_text):
+        directions.append({"operator": ">", "threshold": threshold, "direction": "up"})
+    if re.search(rf"(?:≤|<=)\s*{threshold}\b", rule_text):
+        directions.append({"operator": "<=", "threshold": threshold, "direction": "down"})
+    return directions
+
+
+def extract_note_and_examples(note_text: str) -> tuple[list[str], list[dict[str, str]]]:
+    notes: list[str] = []
+    examples: list[dict[str, str]] = []
+    for line in note_text.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if re.match(r"^(ví dụ|vi du|vd)\s*:?\s*$", normalized_search_text(text), re.IGNORECASE):
+            continue
+        parsed = parse_example_line(text)
+        if parsed:
+            examples.extend(parsed)
+            continue
+        notes.append(text)
+    return notes, examples
+
+
+def parse_example_line(text: str) -> list[dict[str, str]]:
+    if "->" not in text and "=>" not in text:
+        return []
+    left, right = re.split(r"->|=>", text, maxsplit=1)
+    output = normalize_money_text(right.strip())
+    inputs = re.findall(r"\d[\d,.]*(?:\s*đ)?", left)
+    if not inputs and left.strip():
+        inputs = [left.strip()]
+    return [
+        {"input": normalize_money_text(input_value), "output": output}
+        for input_value in inputs
+        if normalize_money_text(input_value) and output
+    ]
+
+
+def value_by_header(values: dict[str, Any], columns: list[str], candidates: list[str]) -> str:
+    for column in columns:
+        key = normalized_key(column)
+        if any(candidate in key for candidate in candidates):
+            return str(values.get(column) or "").strip()
+    return ""
+
+
+def docx_table_source_ref(filename: str, table_index: int, row_index: int, columns: list[str]) -> dict[str, Any]:
+    return {
+        "source_type": "docx_table",
+        "source_file": filename,
+        "table_index": table_index,
+        "row_index": row_index,
+        "column_names": columns,
+    }
+
+
+def policy_tags(text: str, threshold: int | None, no_apply: bool) -> list[str]:
+    normalized = normalized_search_text(text)
+    tags = ["rounding", "financial_policy"]
+    if "befood" in normalized:
+        tags.append("befood")
+    if any(term in normalized for term in ["hoan", "refund", "boi hoan"]):
+        tags.append("refund")
+    if any(term in normalized for term in ["rut", "withdraw"]):
+        tags.append("withdraw")
+    if "pm04" in normalized:
+        tags.append("pm04")
+    if "pttt" in normalized or "thanh toan" in normalized:
+        tags.append("payment_method")
+    if "chiet khau" in normalized:
+        tags.append("discount")
+    if no_apply:
+        tags.append("no_rounding")
+    if threshold:
+        tags.append(f"threshold_{threshold}")
+    return list(dict.fromkeys(tags))
+
+
+def policy_aliases(service: str, case_name: str, threshold: int | None, no_apply: bool) -> list[str]:
+    aliases = [
+        " ".join(part for part in [service, case_name, "làm tròn"] if part).strip(),
+        " ".join(part for part in [case_name, "rounding"] if part).strip(),
+    ]
+    if threshold:
+        aliases.append(f"mốc {threshold}đ")
+        aliases.append(f"{threshold}đ rounding")
+    if no_apply:
+        aliases.append(f"{case_name} không làm tròn".strip())
+        aliases.append("không áp dụng làm tròn")
+    return [alias for alias in dict.fromkeys(aliases) if alias]
+
+
+def normalize_service_key(service: str) -> str:
+    normalized = normalized_key(service)
+    if normalized in {"dich_vu_khac", "khac"}:
+        return "other_services"
+    return normalized or "unknown"
+
+
+def normalized_key(value: str) -> str:
+    return "_".join(tokenize(value))
+
+
+def normalized_search_text(value: str) -> str:
+    return " ".join(tokenize(value))
+
+
+def normalize_money_text(value: str) -> str:
+    return re.sub(r"\s+đ\b", "đ", str(value or "").strip()).replace(">=", "≥").replace("<=", "≤")
 
 
 def workflow_structuring_quality_error(chunks: list[Any], warnings: list[str]) -> str:
@@ -846,6 +1215,14 @@ def source_ref_for_text_block(filename: str, content_type: str, blocks: list[dic
     lower = filename.lower()
     selected = [block for block in blocks if start_index <= int(block.get("index", 0)) <= end_index]
     if lower.endswith(".docx") or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        table_block = next((block for block in selected if block.get("type") == "docx_table_row"), None)
+        if table_block:
+            return docx_table_source_ref(
+                filename,
+                int(table_block.get("table_index") or 0),
+                int(table_block.get("row_index") or 0),
+                [str(column) for column in table_block.get("columns", [])],
+            )
         return {"source_type": "docx", "source_file": filename, "paragraph_index": start_index, "heading_path": []}
     if lower.endswith(".pdf") or content_type == "application/pdf":
         page = int(selected[0].get("page", 1)) if selected else 1
@@ -866,6 +1243,8 @@ def source_ref_quality_from_refs(refs: Any) -> str:
         return "bbox"
     if any(isinstance(ref, dict) and ref.get("sheet") and (ref.get("row_start") or ref.get("row_end")) for ref in refs):
         return "sheet_row"
+    if any(isinstance(ref, dict) and ref.get("table_index") is not None and ref.get("row_index") is not None for ref in refs):
+        return "table_row"
     if any(isinstance(ref, dict) and ref.get("paragraph_index") is not None for ref in refs):
         return "paragraph_only"
     if any(isinstance(ref, dict) and ref.get("page") for ref in refs):
@@ -886,7 +1265,7 @@ def source_refs_from_chunk(chunk: Any) -> list[dict[str, Any]]:
 
 def aggregate_source_ref_quality(chunks: list[Any]) -> str:
     qualities = [str(chunk.metadata.get("source_ref_quality") or source_ref_quality_from_refs(chunk.metadata.get("source_refs"))) for chunk in chunks]
-    for candidate in ("bbox", "sheet_row", "paragraph_only", "page_only", "none"):
+    for candidate in ("bbox", "sheet_row", "table_row", "paragraph_only", "page_only", "none"):
         if candidate in qualities:
             return candidate
     return "none"
@@ -967,6 +1346,7 @@ def source_blocks_payload(filename: str, content_type: str, raw_text: str, block
         "block_count": len(blocks),
         "content_type": content_type,
         "filename": filename,
+        "docx_table_count": len(raw_context.get("docx_tables", [])) if isinstance(raw_context.get("docx_tables"), list) else 0,
         "preview_blocks": blocks[:60],
         "raw_text_chars": len(raw_text),
         "source_ref_quality": source_ref_quality_from_blocks(blocks),
@@ -1067,6 +1447,7 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
         hard_blockers.append("unreviewed_units")
     if any(metadata.get("source_ref_quality") == "page_only" and metadata.get("source_ref_acknowledged") is not True for metadata in metadata_items):
         hard_blockers.append("weak_source_refs_unacknowledged")
+    hard_blockers.extend(policy_table_verification_blockers(metadata_items, document_type))
     if any(metadata.get("extraction_status") == "degraded" for metadata in metadata_items):
         hard_blockers.append("degraded_units_require_manual_curation")
     if any(metadata.get("index_eligible") is True and str(metadata.get("review_status")) != "approved" for metadata in metadata_items):
@@ -1082,6 +1463,50 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
     }
 
 
+def policy_table_verification_blockers(metadata_items: list[dict[str, Any]], document_type: str) -> list[str]:
+    if document_type not in {"policy_rule", "policy_table"}:
+        return []
+    is_policy_matrix = any(
+        metadata.get("structure_type") == "financial_threshold_matrix"
+        or metadata.get("source_ref_quality") == "table_row"
+        for metadata in metadata_items
+    )
+    if not is_policy_matrix:
+        return []
+
+    blockers: list[str] = []
+    policy_rules = [metadata for metadata in metadata_items if metadata.get("unit_type") == "policy_rule"]
+    exception_rules = [metadata for metadata in metadata_items if metadata.get("unit_type") == "exception_rule"]
+    expected_policy_count = max([int_or_zero(metadata.get("expected_policy_rule_count")) for metadata in metadata_items] or [0])
+    expected_exception_count = max([int_or_zero(metadata.get("expected_exception_rule_count")) for metadata in metadata_items] or [0])
+    if expected_policy_count and len(policy_rules) < expected_policy_count:
+        blockers.append("missing_policy_rules")
+    if expected_exception_count and len(exception_rules) < expected_exception_count:
+        blockers.append("missing_exception_rules")
+    if policy_rules and any(not metadata.get("rounding_threshold") for metadata in policy_rules):
+        blockers.append("missing_threshold_metadata")
+    if any(metadata.get("unit_type") in {"policy_rule", "exception_rule", "threshold_rule"} and metadata.get("source_ref_quality") != "table_row" for metadata in metadata_items):
+        blockers.append("weak_table_source_refs")
+    if any(is_orphan_example_metadata(metadata) for metadata in metadata_items):
+        blockers.append("orphan_examples")
+    return blockers
+
+
+def is_orphan_example_metadata(metadata: dict[str, Any]) -> bool:
+    unit_type = str(metadata.get("unit_type") or "")
+    if unit_type in {"policy_rule", "exception_rule", "threshold_rule", "full_sop"}:
+        return False
+    text = json.dumps(metadata, ensure_ascii=False).lower()
+    return ("->" in text or "=>" in text) and not metadata.get("attached_to")
+
+
+def int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def source_ref_quality_from_blocks(blocks: list[dict[str, Any]]) -> str:
     if not blocks:
         return "none"
@@ -1089,6 +1514,8 @@ def source_ref_quality_from_blocks(blocks: list[dict[str, Any]]) -> str:
         return "bbox"
     if any(block.get("sheet") and block.get("rows") for block in blocks):
         return "sheet_row"
+    if any(block.get("type") in {"docx_table_header", "docx_table_row"} for block in blocks):
+        return "table_row"
     if any(block.get("paragraph_index") is not None for block in blocks):
         return "paragraph_only"
     if any(block.get("page") for block in blocks):

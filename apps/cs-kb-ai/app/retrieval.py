@@ -184,6 +184,8 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
         "routing_rule",
         "operational_instruction",
         "policy_rule",
+        "exception_rule",
+        "threshold_rule",
         "sla_rule",
         "decision_rule",
         "escalation_rule",
@@ -208,7 +210,7 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
 
     if has_prohibition_intent(normalized_query) and has_prohibition_answer(text):
         boost += 0.28
-        if unit_type in {"security_note", "compliance_note", "warning", "operational_note", "policy_rule"}:
+        if unit_type in {"security_note", "compliance_note", "warning", "operational_note", "policy_rule", "exception_rule"}:
             boost += 0.08
 
     if any(token in query_tokens for token in {"zt", "bao", "mat", "security", "compliance", "khong", "cam"}) and unit_type in {"security_note", "compliance_note", "warning", "operational_note"}:

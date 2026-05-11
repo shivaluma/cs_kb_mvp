@@ -32,7 +32,7 @@ Quy tắc:
 - Giữ nguyên mã nghiệp vụ/ký hiệu/viết tắt đúng như xuất hiện trong tài liệu nguồn.
 - Ưu tiên unit nhỏ, dễ review: workflow_overview, verification_dependency, workflow_step, decision_point, macro_script, operational_note, security_note, related_document.
 - Mỗi unit bắt buộc có source_refs để trace ngược về nguồn. Mỗi source_ref bắt buộc có source_type và source_file.
-- source_refs theo loại file: Excel dùng {source_type:"excel", source_file, sheet, row_start, row_end, column_names}; PDF dùng {source_type:"pdf", source_file, page, bbox nếu có}; DOCX dùng {source_type:"docx", source_file, paragraph_index hoặc heading_path}; text/markdown dùng {source_type:"text", source_file, line_start, line_end}.
+- source_refs theo loại file: Excel dùng {source_type:"excel", source_file, sheet, row_start, row_end, column_names}; PDF dùng {source_type:"pdf", source_file, page, bbox nếu có}; DOCX prose dùng {source_type:"docx", source_file, paragraph_index hoặc heading_path}; DOCX table dùng {source_type:"docx_table", source_file, table_index, row_index, column_names}; text/markdown dùng {source_type:"text", source_file, line_start, line_end}.
 - Không có source_refs thì output bị reject.
 """
 
@@ -463,6 +463,9 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
                     "- Phải có đúng 1 unit_type=\"full_sop\" với metadata.retrieval_scope=\"document\".\n"
                     "- Mỗi unit bắt buộc có source_refs. Excel cần source_refs[].sheet và row_start/row_end nếu rule đến từ dòng cụ thể. full_sop có thể dùng sheet/row range tổng.\n"
                     "- Tạo các unit nhỏ cho từng rule/action quan trọng với unit_type như routing_rule, validation_rule, handling_rule, warning, macro_script.\n"
+                    "- Nếu source là policy matrix/table, mỗi dòng logic của bảng phải thành một policy_rule hoặc exception_rule atomic unit. Không tách ví dụ thành unit riêng; attach examples vào rule cha gần nhất.\n"
+                    "- Với bảng quy định làm tròn/threshold, trích metadata rounding_threshold, rounding_directions, rounding_applies, service, case_type, tags, aliases nếu có căn cứ trong source.\n"
+                    "- Nếu một dòng ghi \"Không áp dụng\", dùng unit_type=\"exception_rule\" và giữ source_refs đến đúng dòng bảng.\n"
                     "- Nếu có nhiều sheet theo ngày/version, chọn sheet mới nhất/hiện hành làm active rule units; sheet cũ chỉ ghi trong metadata.historical_sheets hoặc warning, không tạo active rule units từ sheet cũ.\n"
                     "- Với mỗi rule unit, metadata nên giữ các field/cột có trong bảng dưới dạng lowercase snake_case; ưu tiên source_sheet, source_row, domain, audience, priority, action, condition, owner, system, channel, risk_level, tags, aliases, case_reasons nếu có căn cứ.\n"
                     "- Nếu field không có trong source, không đoán. Để missing/null và thêm warning nếu quan trọng.\n"
@@ -787,6 +790,8 @@ def infer_source_ref_quality(source_refs: Any) -> str:
         if not isinstance(ref, dict):
             continue
         source_type = str(ref.get("source_type") or "").lower()
+        if source_type == "docx_table" or (ref.get("table_index") is not None and ref.get("row_index") is not None):
+            return "table_row"
         if source_type in {"pdf", "pdf_diagram", "diagram_pdf"}:
             has_pdf = True
             bbox = ref.get("bbox")
@@ -924,7 +929,12 @@ def source_ref_validation_errors(units: list[dict[str, Any]], filename: str) -> 
                 errors.append(f"source_ref_missing_sheet:unit_{index}")
             if lower_name.endswith(".pdf") and not ref.get("page"):
                 errors.append(f"source_ref_missing_page:unit_{index}")
-            if lower_name.endswith(".docx") and ref.get("paragraph_index") is None and not ref.get("heading_path"):
+            if (
+                lower_name.endswith(".docx")
+                and ref.get("paragraph_index") is None
+                and not ref.get("heading_path")
+                and (ref.get("table_index") is None or ref.get("row_index") is None)
+            ):
                 errors.append(f"source_ref_missing_docx_anchor:unit_{index}")
     return errors[:10]
 
