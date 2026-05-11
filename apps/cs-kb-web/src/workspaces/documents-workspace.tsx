@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Archive, BookOpen, CheckCircle2, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, Network, Plus, RefreshCw, ShieldCheck, TriangleAlert, Upload, WandSparkles } from "lucide-react";
+import { Archive, BookOpen, CheckCircle2, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, MessageSquareText, Network, Plus, RefreshCw, Search, ShieldCheck, TriangleAlert, Upload, WandSparkles } from "lucide-react";
 
 import { DraftRetrievalPreview, ExtractionPipelineTrace, PublishTaskList, SopQualityAuditPanel, buildPublishTasks, buildSopQualityAudit } from "@/components/documents-review-insights";
 import { DocumentFact, ReadinessCheck } from "@/components/operations";
@@ -11,6 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { EmptyPanel, Field, StatusBadge } from "@/components/common";
 import { ExtractionReviewEditor } from "@/components/extraction-review-editor";
 import { API_BASE_URL } from "@/config";
+import { workspacePaths } from "@/constants";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, UploadState, VersionRawText, VersionSummary } from "@/types";
@@ -117,6 +118,7 @@ export function DocumentsWorkspace({
   const uploadReady = Boolean(selectedFile && validType && validSize);
   const uploadSteps = ["Upload", "Extract", "Chunk", "Embed", "Index"];
   const selectedVersion = versions.find((version) => version.version_id === selectedChunkVersionId);
+  const selectedDocumentTitle = selectedDocument?.title || upload.title || "published SOP";
   const [sourceMode, setSourceMode] = useState<"file" | "text">("file");
   const [confirmingPublishVersionId, setConfirmingPublishVersionId] = useState("");
   const [rawTextError, setRawTextError] = useState("");
@@ -899,17 +901,41 @@ export function DocumentsWorkspace({
                                 ? "Confirm publish"
                                 : "Publish"}
                           </Button>
+                        ) : (
+                          <Badge variant="secondary">indexed</Badge>
+                        )}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button
+                          onClick={() => onInspectVersion(version.version_id)}
+                          size="sm"
+                          type="button"
+                          variant={selectedChunkVersionId === version.version_id ? "secondary" : "outline"}
+                        >
+                          Inspect version
+                        </Button>
+                        {version.status === "published" ? (
+                          <>
+                            <Button asChild size="sm" type="button" variant="outline">
+                              <a href={`${workspacePaths.lookup}?q=${encodeURIComponent(selectedDocumentTitle)}`}>
+                                <Search data-icon="inline-start" className="size-3.5" />
+                                Test lookup
+                              </a>
+                            </Button>
+                            <Button asChild size="sm" type="button" variant="ghost">
+                              <a href={`${workspacePaths.chat}?q=${encodeURIComponent(`Dựa trên ${selectedDocumentTitle}, CS cần làm gì?`)}`}>
+                                <MessageSquareText data-icon="inline-start" className="size-3.5" />
+                                Ask chat
+                              </a>
+                            </Button>
+                          </>
                         ) : null}
                       </div>
-                      <Button
-                        className="mt-3"
-                        onClick={() => onInspectVersion(version.version_id)}
-                        size="sm"
-                        type="button"
-                        variant={selectedChunkVersionId === version.version_id ? "secondary" : "outline"}
-                      >
-                        Inspect version
-                      </Button>
+                      {version.status === "published" ? (
+                        <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                          This version is live. Test it from the same Lookup and SOP Chat surfaces agents will use.
+                        </p>
+                      ) : null}
                       {confirmingPublishVersionId === version.version_id ? (
                         <p className="mt-2 text-xs leading-5 text-muted-foreground">
                           {selectedIsArchived

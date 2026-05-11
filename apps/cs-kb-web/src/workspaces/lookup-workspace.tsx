@@ -68,7 +68,11 @@ export function LookupWorkspace({
 }) {
   const groupedResults = groupRetrievalResults(semanticResults);
   const aiSuggestedSops = aiSuggestion?.suggested_sops ?? [];
-  const visibleCount = listSource.length + semanticResults.length + aiSuggestedSops.length;
+  const selectedCitationMatches =
+    selectedDocumentMatch && !semanticResults.some((result) => result.chunk_id === selectedDocumentMatch.chunk_id)
+      ? [selectedDocumentMatch]
+      : [];
+  const visibleCount = listSource.length + semanticResults.length + selectedCitationMatches.length + aiSuggestedSops.length;
 
   function openFullSop(match: RetrievalResult) {
     const parentMatch = semanticResults.find((item) => item.document_id === match.document_id && isDocumentLayer(item));
@@ -131,6 +135,24 @@ export function LookupWorkspace({
                   <EmptyResults query={query} />
                 ) : (
                   <div className="space-y-4">
+                    {selectedCitationMatches.length > 0 ? (
+                      <div className="space-y-2">
+                        <ResultGroupHeader count={selectedCitationMatches.length} title="Selected citation" />
+                        <div className="rounded-xl border bg-secondary/45 p-3 text-xs leading-5 text-secondary-foreground">
+                          Opened from Chat or a citation link. Search results may still be loading or may not match this exact title.
+                        </div>
+                        {selectedCitationMatches.map((match) => (
+                          <DocumentMatchButton
+                            key={match.chunk_id}
+                            match={match}
+                            onClick={() => onSelectDocumentMatch(match)}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => openFullSop(match)}
+                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
                     {groupedResults.exact.length > 0 ? (
                       <div className="space-y-2">
                         <ResultGroupHeader count={groupedResults.exact.length} title="Exact rule match" />

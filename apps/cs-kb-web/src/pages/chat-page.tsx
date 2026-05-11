@@ -24,18 +24,19 @@ export function ChatPage() {
   const { getParam } = useUrlSearch();
   const { reportError, reportNotice } = useFeedback();
   const initialQuestion = getParam("q", "");
-  const initialQuestionSent = useRef(false);
+  const initialQuestionSent = useRef("");
   const chatModelRoutesQuery = useChatModelRoutes();
   const groundedChatMutation = useGroundedChat();
   const [messages, setMessages] = useState<ChatThreadMessage[]>([]);
   const [modelRoute, setModelRoute] = useState<ChatModelRoute>("simple");
 
   useEffect(() => {
-    if (!initialQuestion || initialQuestionSent.current) {
+    const trimmedInitialQuestion = initialQuestion.trim();
+    if (!trimmedInitialQuestion || initialQuestionSent.current === trimmedInitialQuestion) {
       return;
     }
-    initialQuestionSent.current = true;
-    askGroundedChat(initialQuestion);
+    initialQuestionSent.current = trimmedInitialQuestion;
+    askGroundedChat(trimmedInitialQuestion);
   }, [initialQuestion]);
 
   function askGroundedChat(question: string) {

@@ -199,11 +199,51 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
     if unit_type in action_unit_types and metadata_overlap:
         boost += 0.025
 
+    if unit_type in action_unit_types and text_overlap:
+        coverage = text_overlap / max(1, len(query_tokens))
+        boost += min(0.18, coverage * 0.12)
+
+    if normalized_query and normalized_query in text:
+        boost += 0.18
+
+    if has_prohibition_intent(normalized_query) and has_prohibition_answer(text):
+        boost += 0.28
+        if unit_type in {"security_note", "compliance_note", "warning", "operational_note", "policy_rule"}:
+            boost += 0.08
+
+    if any(token in query_tokens for token in {"zt", "bao", "mat", "security", "compliance", "khong", "cam"}) and unit_type in {"security_note", "compliance_note", "warning", "operational_note"}:
+        boost += 0.06
+
     risk_level = normalize_phrase(str(metadata.get("risk_level") or ""))
     if risk_level in {"high", "critical"} and any(token in query_tokens for token in {"risk", "rui", "ro", "bao", "mat", "security", "compliance", "tuan", "thu"}):
         boost += 0.025
 
     return boost
+
+
+def has_prohibition_intent(normalized_query: str) -> bool:
+    if not normalized_query:
+        return False
+    tokens = set(normalized_query.split())
+    if {"khong", "cung", "cap"} <= tokens:
+        return True
+    if {"khong", "duoc"} <= tokens:
+        return True
+    if "cam" in tokens:
+        return True
+    return ("zt" in tokens or "bao mat" in normalized_query) and any(term in normalized_query for term in ["order id", "trip id", "cung cap", "bao mat", "zt"])
+
+
+def has_prohibition_answer(normalized_text: str) -> bool:
+    if not normalized_text:
+        return False
+    if "khong cung cap" in normalized_text:
+        return True
+    if "khong duoc" in normalized_text:
+        return True
+    if "zt" in normalized_text and ("bao mat" in normalized_text or "cung cap" in normalized_text):
+        return True
+    return False
 
 
 def flatten_metadata_terms(value: Any) -> list[str]:

@@ -28,6 +28,7 @@ export function LookupPage() {
   const [copied, setCopied] = useState("");
   const [copyError, setCopyError] = useState("");
   const autoSelectedInitialSop = useRef(false);
+  const autoSearchedInitialQuery = useRef("");
   const homepageQuery = useHomepage();
   const searchMutation = useSearch();
   const sopMutation = useSOP();
@@ -63,6 +64,15 @@ export function LookupPage() {
       sessionStorage.removeItem("kb:selected-quick-source");
     }
   }, [chunkId, selectedDocumentMatch]);
+
+  useEffect(() => {
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery || searchMutation.data || searchMutation.isPending || autoSearchedInitialQuery.current === trimmedQuery) {
+      return;
+    }
+    autoSearchedInitialQuery.current = trimmedQuery;
+    runSearch(trimmedQuery, filters);
+  }, [filters, query, searchMutation.data, searchMutation.isPending]);
 
   useEffect(() => {
     if (!autoSelectedInitialSop.current && !selected && homepage?.recently_updated?.[0] && !selectedDocumentMatch) {
