@@ -270,8 +270,81 @@ function PipelineArtifactCard({ output }: { output: ExtractionStageOutput }) {
         ))}
       </div>
       {output.artifact_type === "reconcile_suggestions" ? <ReconcileSuggestions payload={payload} /> : null}
+      {output.artifact_type === "ai_breakdown" ? <AiBreakdown payload={payload} /> : null}
       {output.artifact_type.includes("verification") ? <VerificationReport payload={payload} /> : null}
     </article>
+  );
+}
+
+function AiBreakdown({ payload }: { payload: Record<string, unknown> }) {
+  const attempts = arrayPayload(payload.attempts);
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="grid gap-2 text-xs md:grid-cols-4">
+        <div>
+          <span className="text-muted-foreground">Attempts</span>
+          <p className="mt-1 font-semibold">{stringValue(payload.attempt_count, "0")}</p>
+        </div>
+        <div>
+          <span className="text-muted-foreground">Selected flow</span>
+          <p className="mt-1 font-semibold">{stringValue(payload.selected_flow, "-")}</p>
+        </div>
+        <div>
+          <span className="text-muted-foreground">Models</span>
+          <p className="mt-1 font-semibold">{Array.isArray(payload.models) ? payload.models.join(", ") : "-"}</p>
+        </div>
+        <div>
+          <span className="text-muted-foreground">Error</span>
+          <p className="mt-1 font-semibold">{stringValue(payload.error, "none")}</p>
+        </div>
+      </div>
+      {attempts.length ? attempts.map((attempt, index) => {
+        const rawResponse = isRecord(attempt.raw_response) ? attempt.raw_response : {};
+        const parsedResponse = isRecord(attempt.parsed_response) ? attempt.parsed_response : {};
+        const repairs = isRecord(attempt.repairs) ? attempt.repairs : {};
+        const warnings = stringArrayPayload(attempt.warnings);
+        return (
+          <section className="rounded-lg border bg-background p-3" key={`${stringValue(attempt.flow, "attempt")}-${index}`}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <Badge variant={attempt.status === "completed" ? "secondary" : attempt.status === "skipped" ? "outline" : "destructive"}>{stringValue(attempt.status, "unknown")}</Badge>
+                <span className="min-w-0 truncate text-xs font-semibold">{stringValue(attempt.flow, "AI attempt")}</span>
+              </div>
+              <span className="text-xs text-muted-foreground">{stringValue(attempt.model, "no model")}</span>
+            </div>
+            <div className="mt-3 grid gap-2 text-xs md:grid-cols-4">
+              <span>units: {stringValue(attempt.normalized_unit_count, "0")}</span>
+              <span>images: {stringValue(attempt.image_count, "0")}</span>
+              <span>prompt chars: {stringValue(isRecord(attempt.prompt) ? attempt.prompt.chars : undefined, "0")}</span>
+              <span>response chars: {stringValue(rawResponse.chars, "0")}</span>
+            </div>
+            {attempt.error ? <p className="mt-2 text-xs leading-5 text-destructive">{stringValue(attempt.error)}</p> : null}
+            {warnings.length ? <p className="mt-2 text-xs leading-5 text-muted-foreground">Warnings: {warnings.slice(0, 6).join(", ")}</p> : null}
+            {Object.keys(repairs).length ? (
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                Repairs: {Object.entries(repairs).filter(([, value]) => Boolean(value)).map(([key]) => key.replace(/_/g, " ")).join(", ") || "none"}
+              </p>
+            ) : null}
+            <div className="mt-3 grid gap-3 lg:grid-cols-2">
+              <div>
+                <div className="mb-1 text-xs font-semibold">Raw AI response</div>
+                <pre className="max-h-72 overflow-auto rounded-lg border bg-muted/15 p-3 text-xs leading-5 text-muted-foreground">
+                  {stringValue(rawResponse.text, "No raw response captured.")}
+                </pre>
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold">Parsed JSON</div>
+                <pre className="max-h-72 overflow-auto rounded-lg border bg-muted/15 p-3 text-xs leading-5 text-muted-foreground">
+                  {stringValue(parsedResponse.json, "No parsed JSON captured.")}
+                </pre>
+              </div>
+            </div>
+          </section>
+        );
+      }) : (
+        <p className="rounded-lg border bg-background p-3 text-xs leading-5 text-muted-foreground">No AI attempt was captured for this stage.</p>
+      )}
+    </div>
   );
 }
 
@@ -341,6 +414,7 @@ function artifactRows(output: ExtractionStageOutput) {
   if (payload.document_type) rows.push({ label: "doc type", value: stringValue(payload.document_type) });
   if (payload.source_ref_quality) rows.push({ label: "source refs", value: stringValue(payload.source_ref_quality) });
   if (payload.unit_count !== undefined) rows.push({ label: "units", value: stringValue(payload.unit_count) });
+  if (payload.attempt_count !== undefined) rows.push({ label: "attempts", value: stringValue(payload.attempt_count) });
   if (payload.block_count !== undefined) rows.push({ label: "blocks", value: stringValue(payload.block_count) });
   if (payload.coverage_score !== undefined) rows.push({ label: "coverage", value: `${stringValue(payload.coverage_score)}/100` });
   return rows.slice(0, 6);
@@ -360,6 +434,9 @@ function artifactSummary(output: ExtractionStageOutput) {
   }
   if (output.artifact_type === "structuring_plan") {
     return `Plan for ${stringValue(payload.document_type, "document")} with ${arrayLength(payload.atomic_unit_candidates)} unit types`;
+  }
+  if (output.artifact_type === "ai_breakdown") {
+    return `${stringValue(payload.attempt_count, "0")} AI attempts, selected ${stringValue(payload.selected_flow, "none")}`;
   }
   if (output.artifact_type.includes("verification")) {
     return `${stringArrayPayload(payload.hard_blockers).length} blockers, ${stringArrayPayload(payload.warnings).length} warnings`;

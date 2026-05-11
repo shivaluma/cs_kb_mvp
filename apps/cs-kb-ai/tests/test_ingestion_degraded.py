@@ -93,6 +93,57 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(payload.units[0].metadata["metadata_suggestions"]["sub_type"], "financial_threshold_matrix")
         self.assertEqual(payload.units[1].unit_type, "policy_rule")
 
+    def test_ai_breakdown_artifact_is_persisted_for_structuring_attempt(self) -> None:
+        def fake_rule_extractor(_filename: str, _raw_text: str):
+            openrouter.record_ai_breakdown(
+                {
+                    "flow": "rule_table",
+                    "model": "test/model",
+                    "status": "completed",
+                    "raw_response": {"text": "{\"units\":[]}", "chars": 12, "truncated": False},
+                    "parsed_response": {"json": "{\"units\":[]}", "chars": 12, "truncated": False},
+                    "normalized_unit_count": 2,
+                    "warnings": [],
+                }
+            )
+            refs = [{"source_type": "docx", "source_file": "email.docx", "paragraph_index": 0}]
+            return (
+                [
+                    {
+                        "unit_type": "full_sop",
+                        "title": "Quy định xác minh email",
+                        "content": "Quy định xử lý email sai định dạng.",
+                        "confidence": 0.8,
+                        "metadata": {"retrieval_scope": "document"},
+                        "source_refs": refs,
+                    },
+                    {
+                        "unit_type": "policy_rule",
+                        "title": "Sửa email sai định dạng",
+                        "content": "CS sửa các lỗi định dạng email phổ biến trước khi phản hồi.",
+                        "confidence": 0.8,
+                        "metadata": {"retrieval_scope": "unit"},
+                        "source_refs": refs,
+                    },
+                ],
+                ["openrouter_rule_table_extraction_used"],
+            )
+
+        ingestion.extract_rule_table_units = fake_rule_extractor
+
+        _raw, _digest, _chunks, _warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định xác minh địa chỉ email.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=docx_email_verification_bytes(),
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        ai_breakdown = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "ai_breakdown")
+        self.assertEqual(ai_breakdown["stage"], "ai_structure")
+        self.assertEqual(ai_breakdown["payload"]["attempt_count"], 1)
+        self.assertEqual(ai_breakdown["payload"]["selected_flow"], "rule_table")
+        self.assertEqual(ai_breakdown["payload"]["attempts"][0]["raw_response"]["text"], "{\"units\":[]}")
+
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
         data = workbook_bytes(

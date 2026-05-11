@@ -6,7 +6,15 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from app.embedding import embed_text
-from app.openrouter import extract_rule_table_units, extract_workflow_units, extract_workflow_units_v2, refine_extracted_units, suggest_document_metadata
+from app.openrouter import (
+    extract_rule_table_units,
+    extract_workflow_units,
+    extract_workflow_units_v2,
+    finish_ai_breakdown_capture,
+    refine_extracted_units,
+    start_ai_breakdown_capture,
+    suggest_document_metadata,
+)
 from app.schemas import DocumentMetadata
 from app.text_processing import (
     Chunk,
@@ -131,15 +139,20 @@ def prepare_document_version(
     source_chunks: list[Any] = []
     ai_error = ""
     if classification.document_type in {"policy_rule", "policy_table", "workflow_diagram"}:
-        source_chunks, ai_warnings, ai_error = try_ai_structuring(
-            filename=filename,
-            content_type=content_type,
-            data=data,
-            raw_text=raw_text,
-            classification=classification,
-            visual_layout=visual_layout,
-            raw_context=raw_context,
-        )
+        ai_warnings: list[str] = []
+        ai_breakdown_token = start_ai_breakdown_capture()
+        try:
+            source_chunks, ai_warnings, ai_error = try_ai_structuring(
+                filename=filename,
+                content_type=content_type,
+                data=data,
+                raw_text=raw_text,
+                classification=classification,
+                visual_layout=visual_layout,
+                raw_context=raw_context,
+            )
+        finally:
+            ai_breakdowns = finish_ai_breakdown_capture(ai_breakdown_token)
         warnings.extend(ai_warnings)
         pipeline_artifacts.append(
             stage_artifact(
@@ -150,6 +163,16 @@ def prepare_document_version(
                 error=ai_error,
             )
         )
+        if ai_breakdowns:
+            pipeline_artifacts.append(
+                stage_artifact(
+                    "ai_structure",
+                    "ai_breakdown",
+                    ai_breakdown_payload(ai_breakdowns, ai_warnings, ai_error),
+                    status="failed" if ai_error else "completed",
+                    error=ai_error,
+                )
+            )
 
     if not source_chunks and classification.document_type not in AI_STRUCTURED_DOCUMENT_TYPES:
         source_chunks = mark_structured_chunks(chunk_text(raw_text))
@@ -3268,6 +3291,25 @@ def ai_structured_payload(source_chunks: list[Any], warnings: list[str]) -> dict
         "unit_count": len(source_chunks),
         "unit_types": sorted({str(chunk.metadata.get("unit_type") or chunk.section) for chunk in source_chunks}),
         "warnings": warnings[:30],
+    }
+
+
+def ai_breakdown_payload(breakdowns: list[dict[str, Any]], warnings: list[str], ai_error: str) -> dict[str, Any]:
+    attempts = [breakdown for breakdown in breakdowns if isinstance(breakdown, dict)]
+    completed = [attempt for attempt in attempts if attempt.get("status") == "completed"]
+    failed = [attempt for attempt in attempts if attempt.get("status") == "failed"]
+    skipped = [attempt for attempt in attempts if attempt.get("status") == "skipped"]
+    return {
+        "attempt_count": len(attempts),
+        "completed_count": len(completed),
+        "failed_count": len(failed),
+        "skipped_count": len(skipped),
+        "selected_flow": str(completed[-1].get("flow") or "") if completed else "",
+        "models": list(dict.fromkeys(str(attempt.get("model") or "") for attempt in attempts if attempt.get("model"))),
+        "flows": [str(attempt.get("flow") or "") for attempt in attempts if attempt.get("flow")],
+        "warnings": warnings[:60],
+        "error": ai_error,
+        "attempts": attempts,
     }
 
 

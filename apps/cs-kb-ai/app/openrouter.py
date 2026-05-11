@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
 import json
 import re
 import time
@@ -20,6 +21,13 @@ from app.schemas import (
     SourceRef,
     WorkflowExtractionPayload,
 )
+
+
+MAX_AI_BREAKDOWN_PROMPT_CHARS = 24000
+MAX_AI_BREAKDOWN_RESPONSE_CHARS = 60000
+MAX_AI_BREAKDOWN_JSON_CHARS = 60000
+
+_AI_BREAKDOWN_BUFFER: ContextVar[list[dict[str, Any]] | None] = ContextVar("ai_breakdown_buffer", default=None)
 
 
 SYSTEM_PROMPT = """Bạn trích xuất bản nháp SOP chăm sóc khách hàng từ tài liệu nguồn lộn xộn.
@@ -133,6 +141,73 @@ Architecture/schema mapping:
 - Use metadata.examples as structured input/output examples when the row contains examples.
 - If rows are historical/archived versions, put that in metadata or warnings; do not create active rules unless the source says they are active.
 """
+
+
+def start_ai_breakdown_capture() -> Token[list[dict[str, Any]] | None]:
+    return _AI_BREAKDOWN_BUFFER.set([])
+
+
+def finish_ai_breakdown_capture(token: Token[list[dict[str, Any]] | None]) -> list[dict[str, Any]]:
+    breakdowns = _AI_BREAKDOWN_BUFFER.get() or []
+    _AI_BREAKDOWN_BUFFER.reset(token)
+    return breakdowns
+
+
+def record_ai_breakdown(entry: dict[str, Any]) -> None:
+    buffer = _AI_BREAKDOWN_BUFFER.get()
+    if buffer is None:
+        return
+    buffer.append(entry)
+
+
+def truncated_text(value: str, limit: int) -> tuple[str, bool, int]:
+    text = str(value or "")
+    return text[:limit], len(text) > limit, len(text)
+
+
+def json_preview(value: Any, limit: int = MAX_AI_BREAKDOWN_JSON_CHARS) -> dict[str, Any]:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=lambda item: item.model_dump() if hasattr(item, "model_dump") else str(item))
+    except TypeError:
+        text = str(value)
+    preview, truncated, chars = truncated_text(text, limit)
+    return {"chars": chars, "json": preview, "truncated": truncated}
+
+
+def ai_prompt_preview(prompt: str) -> dict[str, Any]:
+    preview, truncated, chars = truncated_text(prompt, MAX_AI_BREAKDOWN_PROMPT_CHARS)
+    return {"chars": chars, "text": preview, "truncated": truncated}
+
+
+def ai_response_preview(content: str) -> dict[str, Any]:
+    preview, truncated, chars = truncated_text(content, MAX_AI_BREAKDOWN_RESPONSE_CHARS)
+    return {"chars": chars, "text": preview, "truncated": truncated}
+
+
+def base_ai_breakdown(
+    *,
+    filename: str,
+    flow: str,
+    model: str,
+    prompt: str,
+    raw_text: str,
+    temperature: float,
+    visual_context: dict[str, Any] | None = None,
+    page_images: list[str] | None = None,
+) -> dict[str, Any]:
+    visual_context_json = json.dumps(visual_context or {}, ensure_ascii=False)
+    return {
+        "filename": filename,
+        "flow": flow,
+        "model": model,
+        "prompt": ai_prompt_preview(prompt),
+        "raw_text_chars": len(raw_text or ""),
+        "response_format": "json_object",
+        "temperature": temperature,
+        "visual_context_chars": len(visual_context_json),
+        "image_count": len(page_images or []),
+        "images_supplied": bool(page_images),
+    }
 
 
 def enabled() -> bool:
@@ -438,6 +513,7 @@ def extract_workflow_units(
     visual_context: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not enabled():
+        record_ai_breakdown({"filename": filename, "flow": "workflow_legacy", "status": "skipped", "skip_reason": "openrouter_disabled"})
         return [], ["openrouter_disabled"]
 
     extraction_prompt = (
@@ -497,6 +573,25 @@ def extract_workflow_units(
         "response_format": {"type": "json_object"},
         "temperature": 0.1,
     }
+    breakdown = base_ai_breakdown(
+        filename=filename,
+        flow="workflow_legacy",
+        model=str(payload["model"]),
+        page_images=page_images,
+        prompt=extraction_prompt,
+        raw_text=raw_text,
+        temperature=0.1,
+        visual_context=visual_context,
+    )
+    content = ""
+    parsed: Any = None
+    normalized: list[dict[str, Any]] = []
+    output_warnings: list[str] = []
+    status = "failed"
+    error = ""
+    repaired = False
+    schema_repaired = False
+    topology_repaired = False
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "Content-Type": "application/json",
@@ -522,6 +617,8 @@ def extract_workflow_units(
         normalized = workflow_payload_to_units(payload_model, filename)
         missing_refs = source_ref_validation_errors(normalized, filename)
         if missing_refs:
+            output_warnings = missing_refs
+            error = ",".join(missing_refs)
             return [], missing_refs
         warnings = ["openrouter_workflow_extraction_used", *payload_model.warnings]
         if visual_context:
@@ -538,13 +635,39 @@ def extract_workflow_units(
             warnings.extend(f"workflow_graph_validation_error:{error}" for error in payload_model.validation_errors[:8])
         if payload_model.workflow_graph.requires_human_review:
             warnings.append("workflow_graph_requires_human_review")
+        output_warnings = warnings
+        status = "completed"
         return [unit for unit in normalized if unit["content"]], warnings
     except json.JSONDecodeError as exc:
-        return [], [f"openrouter_workflow_invalid_json:{exc.msg}:{exc.pos}"]
+        error = f"openrouter_workflow_invalid_json:{exc.msg}:{exc.pos}"
+        output_warnings = [error]
+        return [], output_warnings
     except ValidationError as exc:
-        return [], [f"openrouter_workflow_validation_failed:{validation_summary(exc)}"]
+        error = f"openrouter_workflow_validation_failed:{validation_summary(exc)}"
+        output_warnings = [error]
+        return [], output_warnings
     except Exception as exc:
-        return [], [f"openrouter_extraction_failed:{exc.__class__.__name__}"]
+        error = f"openrouter_extraction_failed:{exc.__class__.__name__}"
+        output_warnings = [error]
+        return [], output_warnings
+    finally:
+        record_ai_breakdown(
+            {
+                **breakdown,
+                "error": error,
+                "normalized_unit_count": len(normalized),
+                "normalized_unit_types": sorted({str(unit.get("unit_type") or "") for unit in normalized if isinstance(unit, dict)}),
+                "parsed_response": json_preview(parsed) if parsed is not None else None,
+                "raw_response": ai_response_preview(content),
+                "repairs": {
+                    "json_repair_used": repaired,
+                    "schema_repair_used": schema_repaired,
+                    "topology_repair_used": topology_repaired,
+                },
+                "status": status,
+                "warnings": output_warnings[:40],
+            }
+        )
 
 
 def extract_workflow_units_v2(
@@ -554,8 +677,10 @@ def extract_workflow_units_v2(
     visual_context: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not enabled():
+        record_ai_breakdown({"filename": filename, "flow": "workflow_v2_vision_primary", "status": "skipped", "skip_reason": "openrouter_disabled"})
         return [], ["openrouter_disabled"]
     if not page_images:
+        record_ai_breakdown({"filename": filename, "flow": "workflow_v2_vision_primary", "status": "skipped", "skip_reason": "workflow_v2_vision_images_required"})
         return [], ["workflow_v2_vision_images_required"]
 
     extraction_prompt = (
@@ -598,6 +723,25 @@ def extract_workflow_units_v2(
         "response_format": {"type": "json_object"},
         "temperature": 0.05,
     }
+    breakdown = base_ai_breakdown(
+        filename=filename,
+        flow="workflow_v2_vision_primary",
+        model=str(payload["model"]),
+        page_images=page_images,
+        prompt=extraction_prompt,
+        raw_text=raw_text,
+        temperature=0.05,
+        visual_context=visual_context,
+    )
+    content = ""
+    parsed: Any = None
+    normalized: list[dict[str, Any]] = []
+    output_warnings: list[str] = []
+    status = "failed"
+    error = ""
+    repaired = False
+    schema_repaired = False
+    topology_repaired = False
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "Content-Type": "application/json",
@@ -610,7 +754,9 @@ def extract_workflow_units_v2(
         parsed, repaired = parse_json_with_repair(content, payload, headers)
         payload_model, schema_repaired = validate_workflow_payload_with_repair(parsed, payload, headers)
         if "workflow_graph_missing_from_model_synthesized_for_review" in payload_model.warnings:
-            return [], ["workflow_v2_missing_workflow_graph", *payload_model.warnings]
+            output_warnings = ["workflow_v2_missing_workflow_graph", *payload_model.warnings]
+            error = "workflow_v2_missing_workflow_graph"
+            return [], output_warnings
         payload_model = ensure_workflow_v2_review_layers(payload_model, filename)
         payload_model, topology_repaired, topology_errors = validate_workflow_topology_with_repair(payload_model, payload, headers)
         payload_model = ensure_workflow_v2_review_layers(payload_model, filename)
@@ -627,6 +773,8 @@ def extract_workflow_units_v2(
         normalized = workflow_payload_to_units(payload_model, filename)
         missing_refs = source_ref_validation_errors(normalized, filename)
         if missing_refs:
+            output_warnings = missing_refs
+            error = ",".join(missing_refs)
             return [], missing_refs
         warnings = ["openrouter_workflow_v2_extraction_used", "workflow_v2_vision_primary", *workflow_v2_visible_warnings(payload_model.warnings)]
         if repaired:
@@ -641,13 +789,39 @@ def extract_workflow_units_v2(
             warnings.extend(f"workflow_graph_validation_error:{error}" for error in payload_model.validation_errors[:8])
         if payload_model.workflow_graph.requires_human_review:
             warnings.append("workflow_graph_requires_human_review")
+        output_warnings = warnings
+        status = "completed"
         return [unit for unit in normalized if unit["content"]], warnings
     except json.JSONDecodeError as exc:
-        return [], [f"openrouter_workflow_v2_invalid_json:{exc.msg}:{exc.pos}"]
+        error = f"openrouter_workflow_v2_invalid_json:{exc.msg}:{exc.pos}"
+        output_warnings = [error]
+        return [], output_warnings
     except ValidationError as exc:
-        return [], [f"openrouter_workflow_v2_validation_failed:{validation_summary(exc)}"]
+        error = f"openrouter_workflow_v2_validation_failed:{validation_summary(exc)}"
+        output_warnings = [error]
+        return [], output_warnings
     except Exception as exc:
-        return [], [f"openrouter_workflow_v2_failed:{exc.__class__.__name__}"]
+        error = f"openrouter_workflow_v2_failed:{exc.__class__.__name__}"
+        output_warnings = [error]
+        return [], output_warnings
+    finally:
+        record_ai_breakdown(
+            {
+                **breakdown,
+                "error": error,
+                "normalized_unit_count": len(normalized),
+                "normalized_unit_types": sorted({str(unit.get("unit_type") or "") for unit in normalized if isinstance(unit, dict)}),
+                "parsed_response": json_preview(parsed) if parsed is not None else None,
+                "raw_response": ai_response_preview(content),
+                "repairs": {
+                    "json_repair_used": repaired,
+                    "schema_repair_used": schema_repaired,
+                    "topology_repair_used": topology_repaired,
+                },
+                "status": status,
+                "warnings": output_warnings[:40],
+            }
+        )
 
 
 def workflow_v2_visible_warnings(warnings: list[str]) -> list[str]:
@@ -777,40 +951,57 @@ def normalize_rule_table_response_payload(parsed: Any) -> tuple[Any, list[str]]:
 
 def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[str, Any]], list[str]]:
     if not enabled():
+        record_ai_breakdown({"filename": filename, "flow": "rule_table", "status": "skipped", "skip_reason": "openrouter_disabled"})
         return [], ["openrouter_disabled"]
 
+    extraction_prompt = (
+        RULE_TABLE_EXTRACTION_PROMPT
+        + "\n\nPipeline-specific constraints for the existing extraction architecture:\n"
+        "Hãy chuyển tài liệu Excel/bảng quy định CS này thành SOP draft có cấu trúc để CS Ops review. "
+        "Không hardcode và không tự bịa policy. Chỉ dùng thông tin có trong source.\n\n"
+        "Yêu cầu bắt buộc:\n"
+        "- Trả JSON theo shape policy table ở trên: full_sop object + units array + warnings/metadata_suggestions/coverage_report. Không bỏ full_sop.\n"
+        "- title là nhãn ngắn 4-10 từ để agent scan/search; không copy nguyên câu content vào title.\n"
+        "- Phải có đúng 1 unit_type=\"full_sop\" với metadata.retrieval_scope=\"document\".\n"
+        "- Mỗi unit bắt buộc có source_refs. Excel cần source_refs[].sheet và row_start/row_end nếu rule đến từ dòng cụ thể. full_sop có thể dùng sheet/row range tổng.\n"
+        "- Tạo các unit nhỏ cho từng rule/action quan trọng với unit_type như routing_rule, validation_rule, handling_rule, warning, macro_script.\n"
+        "- Nếu source là policy matrix/table, mỗi dòng logic của bảng phải thành một policy_rule hoặc exception_rule atomic unit. Không tách ví dụ thành unit riêng; attach examples vào rule cha gần nhất.\n"
+        "- Với bảng quy định làm tròn/threshold, trích metadata rounding_threshold, rounding_directions, rounding_applies, service, case_type, tags, aliases nếu có căn cứ trong source.\n"
+        "- Nếu một dòng ghi \"Không áp dụng\", dùng unit_type=\"exception_rule\" và giữ source_refs đến đúng dòng bảng.\n"
+        "- Nếu có nhiều sheet theo ngày/version, chọn sheet mới nhất/hiện hành làm active rule units; sheet cũ chỉ ghi trong metadata.historical_sheets hoặc warning, không tạo active rule units từ sheet cũ.\n"
+        "- Với mỗi rule unit, metadata nên giữ các field/cột có trong bảng dưới dạng lowercase snake_case; ưu tiên source_sheet, source_row, domain, audience, priority, action, condition, owner, system, channel, risk_level, tags, aliases, case_reasons nếu có căn cứ.\n"
+        "- Nếu field không có trong source, không đoán. Để missing/null và thêm warning nếu quan trọng.\n"
+        "- title/content/user-facing metadata phải là tiếng Việt tự nhiên; UI labels vẫn do frontend xử lý.\n"
+        "- Nếu source thể hiện rủi ro tài chính, tài khoản, bảo mật/riêng tư, giao tiếp khách hàng, escalation, hoặc compliance, đặt metadata.risk_level phù hợp và tạo warning/compliance unit nếu đủ căn cứ.\n\n"
+        f"Filename: {filename}\n\nSource text:\n{raw_text[:50000]}"
+    )
     payload = {
         "model": settings.openrouter_extraction_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": (
-                    RULE_TABLE_EXTRACTION_PROMPT
-                    + "\n\nPipeline-specific constraints for the existing extraction architecture:\n"
-                    "Hãy chuyển tài liệu Excel/bảng quy định CS này thành SOP draft có cấu trúc để CS Ops review. "
-                    "Không hardcode và không tự bịa policy. Chỉ dùng thông tin có trong source.\n\n"
-                    "Yêu cầu bắt buộc:\n"
-                    "- Trả JSON theo shape policy table ở trên: full_sop object + units array + warnings/metadata_suggestions/coverage_report. Không bỏ full_sop.\n"
-                    "- title là nhãn ngắn 4-10 từ để agent scan/search; không copy nguyên câu content vào title.\n"
-                    "- Phải có đúng 1 unit_type=\"full_sop\" với metadata.retrieval_scope=\"document\".\n"
-                    "- Mỗi unit bắt buộc có source_refs. Excel cần source_refs[].sheet và row_start/row_end nếu rule đến từ dòng cụ thể. full_sop có thể dùng sheet/row range tổng.\n"
-                    "- Tạo các unit nhỏ cho từng rule/action quan trọng với unit_type như routing_rule, validation_rule, handling_rule, warning, macro_script.\n"
-                    "- Nếu source là policy matrix/table, mỗi dòng logic của bảng phải thành một policy_rule hoặc exception_rule atomic unit. Không tách ví dụ thành unit riêng; attach examples vào rule cha gần nhất.\n"
-                    "- Với bảng quy định làm tròn/threshold, trích metadata rounding_threshold, rounding_directions, rounding_applies, service, case_type, tags, aliases nếu có căn cứ trong source.\n"
-                    "- Nếu một dòng ghi \"Không áp dụng\", dùng unit_type=\"exception_rule\" và giữ source_refs đến đúng dòng bảng.\n"
-                    "- Nếu có nhiều sheet theo ngày/version, chọn sheet mới nhất/hiện hành làm active rule units; sheet cũ chỉ ghi trong metadata.historical_sheets hoặc warning, không tạo active rule units từ sheet cũ.\n"
-                    "- Với mỗi rule unit, metadata nên giữ các field/cột có trong bảng dưới dạng lowercase snake_case; ưu tiên source_sheet, source_row, domain, audience, priority, action, condition, owner, system, channel, risk_level, tags, aliases, case_reasons nếu có căn cứ.\n"
-                    "- Nếu field không có trong source, không đoán. Để missing/null và thêm warning nếu quan trọng.\n"
-                    "- title/content/user-facing metadata phải là tiếng Việt tự nhiên; UI labels vẫn do frontend xử lý.\n"
-                    "- Nếu source thể hiện rủi ro tài chính, tài khoản, bảo mật/riêng tư, giao tiếp khách hàng, escalation, hoặc compliance, đặt metadata.risk_level phù hợp và tạo warning/compliance unit nếu đủ căn cứ.\n\n"
-                    f"Filename: {filename}\n\nSource text:\n{raw_text[:50000]}"
-                ),
+                "content": extraction_prompt,
             },
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.05,
     }
+    breakdown = base_ai_breakdown(
+        filename=filename,
+        flow="rule_table",
+        model=str(payload["model"]),
+        prompt=extraction_prompt,
+        raw_text=raw_text,
+        temperature=0.05,
+    )
+    content = ""
+    parsed: Any = None
+    normalized: list[dict[str, Any]] = []
+    output_warnings: list[str] = []
+    status = "failed"
+    error = ""
+    repaired = False
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "Content-Type": "application/json",
@@ -826,20 +1017,46 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         normalized = [normalize_unit(unit.model_dump()) for unit in payload_model.units]
         usable = [unit for unit in normalized if unit["content"]]
         if not any(unit["unit_type"] == "full_sop" for unit in usable):
-            return [], ["openrouter_missing_full_sop_unit"]
+            output_warnings = ["openrouter_missing_full_sop_unit"]
+            error = "openrouter_missing_full_sop_unit"
+            return [], output_warnings
         missing_refs = source_ref_validation_errors(usable, filename)
         if missing_refs:
+            output_warnings = missing_refs
+            error = ",".join(missing_refs)
             return [], missing_refs
         warnings = ["openrouter_rule_table_extraction_used", *[f"model_warning:{warning}" for warning in model_warnings]]
         if repaired:
             warnings.append("openrouter_json_repair_used")
+        output_warnings = warnings
+        status = "completed"
         return usable, warnings
     except json.JSONDecodeError as exc:
-        return [], [f"openrouter_rule_table_invalid_json:{exc.msg}:{exc.pos}"]
+        error = f"openrouter_rule_table_invalid_json:{exc.msg}:{exc.pos}"
+        output_warnings = [error]
+        return [], output_warnings
     except ValidationError as exc:
-        return [], [f"openrouter_rule_table_validation_failed:{validation_summary(exc)}"]
+        error = f"openrouter_rule_table_validation_failed:{validation_summary(exc)}"
+        output_warnings = [error]
+        return [], output_warnings
     except Exception as exc:
-        return [], [f"openrouter_rule_table_extraction_failed:{exc.__class__.__name__}"]
+        error = f"openrouter_rule_table_extraction_failed:{exc.__class__.__name__}"
+        output_warnings = [error]
+        return [], output_warnings
+    finally:
+        record_ai_breakdown(
+            {
+                **breakdown,
+                "error": error,
+                "normalized_unit_count": len(normalized),
+                "normalized_unit_types": sorted({str(unit.get("unit_type") or "") for unit in normalized if isinstance(unit, dict)}),
+                "parsed_response": json_preview(parsed) if parsed is not None else None,
+                "raw_response": ai_response_preview(content),
+                "repairs": {"json_repair_used": repaired},
+                "status": status,
+                "warnings": output_warnings[:40],
+            }
+        )
 
 
 def refine_extracted_units(

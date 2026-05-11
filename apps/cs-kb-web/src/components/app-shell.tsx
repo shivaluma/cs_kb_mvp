@@ -5,6 +5,23 @@ import { StatusMessage } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+	Sidebar,
+	SidebarContent,
+	SidebarGroup,
+	SidebarGroupContent,
+	SidebarGroupLabel,
+	SidebarHeader,
+	SidebarInset,
+	SidebarMenu,
+	SidebarMenuButton,
+	SidebarMenuItem,
+	SidebarProvider,
+	SidebarRail,
+	SidebarSeparator,
+	SidebarTrigger,
+	useSidebar,
+} from "@/components/ui/sidebar";
 import { Switch } from "@/components/ui/switch";
 import { navItems, type Workspace } from "@/constants";
 
@@ -28,6 +45,65 @@ function getInitialDarkMode() {
 	}
 
 	return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function MainSidebar({ workspace }: { workspace: Workspace }) {
+	const { setOpenMobile } = useSidebar();
+
+	return (
+		<Sidebar collapsible="icon" className="border-sidebar-border">
+			<SidebarHeader className="px-3 py-3">
+				<div className="flex min-h-10 items-center gap-2.5 rounded-xl px-1">
+					<div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+						<ShieldCheck className="size-5" />
+					</div>
+					<div className="min-w-0 group-data-[collapsible=icon]:hidden">
+						<p className="truncate text-sm font-semibold">CS SOP KB</p>
+						<p className="truncate text-xs text-sidebar-foreground/60">
+							Policy operations
+						</p>
+					</div>
+				</div>
+			</SidebarHeader>
+
+			<SidebarContent className="px-1">
+				<SidebarGroup>
+					<SidebarGroupLabel>Main</SidebarGroupLabel>
+					<SidebarGroupContent>
+						<SidebarMenu>
+							{navItems.map((item) => (
+								<SidebarMenuItem key={item.id}>
+									<SidebarMenuButton
+										asChild
+										isActive={workspace === item.id}
+										tooltip={item.label}
+									>
+										<Link onClick={() => setOpenMobile(false)} to={item.path}>
+											<item.icon className="size-4" />
+											<span>{item.label}</span>
+										</Link>
+									</SidebarMenuButton>
+								</SidebarMenuItem>
+							))}
+						</SidebarMenu>
+					</SidebarGroupContent>
+				</SidebarGroup>
+
+				<SidebarSeparator />
+
+				<SidebarGroup className="group-data-[collapsible=icon]:hidden">
+					<div className="rounded-lg border border-sidebar-border bg-background/70 p-3 text-xs leading-5 text-sidebar-foreground/70">
+						<div className="font-medium text-sidebar-foreground">
+							Production rule
+						</div>
+						Only published, approved versions should enter lookup and AI answer
+						flows.
+					</div>
+				</SidebarGroup>
+			</SidebarContent>
+			<SidebarRail />
+		</Sidebar>
+	);
 }
 
 export function AppShell({
@@ -94,7 +170,7 @@ export function AppShell({
 	}, []);
 
 	return (
-		<main className="min-h-svh bg-background text-foreground">
+		<main className="h-svh overflow-hidden bg-background text-foreground">
 			<a
 				className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
 				href="#main-content"
@@ -102,59 +178,28 @@ export function AppShell({
 				Skip to main content
 			</a>
 
-			<div className="grid min-h-svh lg:grid-cols-[15.5rem_minmax(0,1fr)]">
-				<aside className="border-b bg-sidebar px-3 py-3 lg:border-b-0 lg:border-r lg:px-4">
-					<div className="flex items-center gap-2.5 px-1">
-						<div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-							<ShieldCheck className="size-5" />
-						</div>
-						<div className="min-w-0">
-							<p className="truncate text-sm font-semibold">CS SOP KB</p>
-							<p className="truncate text-xs text-muted-foreground">
-								Policy operations
-							</p>
-						</div>
-					</div>
+			<SidebarProvider className="h-full min-h-0 overflow-hidden">
+				<MainSidebar workspace={workspace} />
 
-					<nav
-						aria-label="Main navigation"
-						className="mt-5 grid grid-cols-2 gap-1.5 lg:grid-cols-1"
-					>
-						{navItems.map((item) => (
-							<Button
-								asChild
-								className="h-auto justify-start px-2 py-2"
-								key={item.id}
-								variant={workspace === item.id ? "secondary" : "ghost"}
-							>
-								<Link to={item.path}>
-									<item.icon data-icon="inline-start" className="size-4" />
-									<span className="truncate">{item.label}</span>
-								</Link>
-							</Button>
-						))}
-					</nav>
-
-					<section className="mt-5 hidden rounded-lg border bg-background p-3 text-xs leading-5 text-muted-foreground lg:block">
-						<div className="font-medium text-foreground">Production rule</div>
-						Only published, approved versions should enter lookup and AI answer
-						flows.
-					</section>
-				</aside>
-
-				<section className="min-w-0" id="main-content">
-					<header className="border-b bg-background px-4 py-3 md:px-6">
+				<SidebarInset
+					className="min-h-0 w-0 min-w-0 overflow-hidden"
+					id="main-content"
+				>
+					<header className="shrink-0 border-b bg-background px-4 py-3 md:px-6">
 						<div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-							<div className="min-w-0">
-								<div className="text-xs text-muted-foreground">
-									CS Knowledge Base
+							<div className="flex min-w-0 gap-3">
+								<SidebarTrigger className="mt-1 shrink-0" />
+								<div className="min-w-0">
+									<div className="text-xs text-muted-foreground">
+										CS Knowledge Base
+									</div>
+									<h1 className="mt-0.5 text-xl font-semibold tracking-tight">
+										{current.label}
+									</h1>
+									<p className="mt-1 max-w-[72ch] text-sm text-muted-foreground">
+										{current.description}
+									</p>
 								</div>
-								<h1 className="mt-0.5 text-xl font-semibold tracking-tight">
-									{current.label}
-								</h1>
-								<p className="mt-1 max-w-[72ch] text-sm text-muted-foreground">
-									{current.description}
-								</p>
 							</div>
 
 							<div className="flex flex-wrap items-center gap-2">
@@ -232,9 +277,11 @@ export function AppShell({
 						) : null}
 					</header>
 
-					<div className="p-4 md:p-5">{children}</div>
-				</section>
-			</div>
+					<div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+						{children}
+					</div>
+				</SidebarInset>
+			</SidebarProvider>
 			{commandOpen ? (
 				<div
 					aria-modal="true"
