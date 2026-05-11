@@ -62,6 +62,7 @@ Example request:
 | `POST` | `/ai/documents/upload` | Proxy multipart document upload and indexing |
 | `GET` | `/ai/documents/{id}/versions` | Proxy document version history |
 | `POST` | `/ai/documents/{id}/archive` | Proxy document archive |
+| `POST` | `/ai/extraction-units/{id}` | Browser-compatible proxy for extraction unit update. Gateway forwards to internal AI `PATCH` |
 | `POST` | `/ai/versions/{id}/publish` | Proxy version publish |
 | `GET` | `/ai/versions/{id}/publish-readiness` | Proxy backend publish dry-run blockers |
 | `POST` | `/ai/retrieve` | Proxy hybrid retrieval |

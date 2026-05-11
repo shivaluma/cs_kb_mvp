@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiGet, apiPatch, apiPost, apiUpload } from "@/lib/api";
+import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import type {
   DocumentChunk,
   ExtractionPipelineInspection,
@@ -168,7 +168,7 @@ export function useUpdateExtractionUnit() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: { unitId: string; update: ExtractionUnitUpdate }) =>
-      apiPatch<ExtractionUnit>(`/api/v1/ai/extraction-units/${payload.unitId}`, payload.update),
+      apiPost<ExtractionUnit>(`/api/v1/ai/extraction-units/${payload.unitId}`, payload.update),
     onMutate: async (payload) => {
       await queryClient.cancelQueries({ queryKey: ["ai-extraction-units"] });
       await queryClient.cancelQueries({ queryKey: ["ai-document-chunks"] });
