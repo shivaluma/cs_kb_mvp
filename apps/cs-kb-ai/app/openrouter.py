@@ -333,7 +333,12 @@ def has_no_condition(conditions: list[str]) -> bool:
     return any(condition == "no" or condition.startswith("no ") or "no response" in condition for condition in conditions)
 
 
-def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+def extract_workflow_units(
+    filename: str,
+    raw_text: str,
+    page_images: list[str] | None = None,
+    visual_context: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
     if not enabled():
         return [], ["openrouter_disabled"]
 
@@ -349,6 +354,11 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         "- Decision node phải có nhánh yes/no nếu diagram thể hiện Yes/No. Không đảo nhánh Yes/No.\n"
         "- Start không có incoming edge. End không có outgoing edge.\n"
         "- Phase/actor chỉ gán khi có căn cứ từ swimlane/label/source, không gán bừa.\n\n"
+        "VISUAL GRAPH CANDIDATES:\n"
+        "- Nếu có visual_layout/visual_graph_candidates bên dưới, hãy xem đó là evidence topology từ detector trước LLM.\n"
+        "- Ưu tiên nodes/edge_candidates có bbox để tạo workflow_graph.nodes/edges và source_refs.bbox.\n"
+        "- Edge candidate confidence thấp hoặc direction_reason là geometric_guess phải đưa vào uncertain_edges nếu ảnh không xác nhận rõ.\n"
+        "- Không tạo edge mới ngoài edge_candidates trừ khi ảnh thể hiện mũi tên rất rõ.\n\n"
         "Yêu cầu document_metadata: title, effective_from nếu thấy trong nguồn, document_type=\"workflow_diagram\", sub_type nếu là swimlane_process, channel, audience, actors, phases, systems, risk_level, requires_layout_extraction=true, requires_human_review=true, extraction_confidence, required_unit_types.\n"
         "required_unit_types là danh sách generic các unit_type bắt buộc phải review trước publish dựa trên nội dung thật của source. Ví dụ nếu source có SLA thì thêm sla_rule; có handoff thì thêm handoff_rule; có cảnh báo bảo mật/compliance thì thêm security_note/compliance_note. Không thêm nếu source không có căn cứ.\n"
         "Yêu cầu full_sop: là ExtractedUnit unit_type=\"full_sop\", metadata.retrieval_scope=\"document\", title/content tiếng Việt, source_refs có page.\n"
@@ -364,7 +374,9 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         "Mỗi unit có tags/aliases/phase/actor/risk_level nếu có căn cứ trong source. "
         "Bắt buộc title/content tiếng Việt. Không bịa rule ngoài nguồn.\n"
         "Mỗi full_sop/atomic_unit phải có source_refs: PDF cần source_type=\"pdf_diagram\" hoặc \"pdf\", source_file, page; bbox nếu biết, nếu không để [].\n\n"
-        f"Filename: {filename}\n\nSource text:\n{raw_text[:18000]}"
+        f"Filename: {filename}\n\n"
+        f"Visual layout candidates JSON:\n{json.dumps(visual_context or {}, ensure_ascii=False)[:18000]}\n\n"
+        f"Source text:\n{raw_text[:16000]}"
     )
     user_content: str | list[dict[str, Any]]
     if page_images:
@@ -409,6 +421,8 @@ def extract_workflow_units(filename: str, raw_text: str, page_images: list[str] 
         if missing_refs:
             return [], missing_refs
         warnings = ["openrouter_workflow_extraction_used", *payload_model.warnings]
+        if visual_context:
+            warnings.append("visual_graph_context_used")
         if repaired:
             warnings.append("openrouter_json_repair_used")
         if schema_repaired:

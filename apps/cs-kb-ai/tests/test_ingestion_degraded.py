@@ -91,6 +91,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
             filename="workflow.pdf",
             raw_text="1. CS tiếp nhận yêu cầu\n2. Nếu đủ thông tin thì xử lý\nLưu ý: SLA 30 phút",
             blocks=[],
+            raw_context={},
             classification=classification,
             ai_error="ai_workflow_structuring_failed:invalid_json",
         )
@@ -102,6 +103,87 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertNotIn("workflow_graph", sections)
         self.assertTrue(all(chunk.metadata["publish_blocked"] for chunk in chunks))
         self.assertEqual(chunks[0].metadata["graph_extraction_status"], "not_reliable_without_layout_review")
+
+    def test_workflow_visual_layout_creates_reviewable_bbox_candidates(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        chunks = ingestion.build_degraded_workflow_draft(
+            filename="workflow.pdf",
+            raw_text="1. CS tiếp nhận yêu cầu",
+            blocks=[],
+            raw_context={
+                "visual_layout": {
+                    "summary": {"shape_candidate_count": 1, "edge_candidate_count": 0},
+                    "pages": [
+                        {
+                            "page": 1,
+                            "graph_candidate": {
+                                "nodes": [
+                                    {
+                                        "id": "p1_node_1",
+                                        "type": "action",
+                                        "title": "CS tiếp nhận yêu cầu",
+                                        "bbox": [10, 20, 120, 80],
+                                    }
+                                ],
+                                "edge_candidates": [],
+                            },
+                        }
+                    ],
+                }
+            },
+            classification=classification,
+            ai_error="ai_workflow_structuring_failed:invalid_json",
+        )
+
+        visual_candidate = next(chunk for chunk in chunks if chunk.metadata.get("visual_node_id") == "p1_node_1")
+        self.assertEqual(chunks[0].metadata["graph_extraction_status"], "visual_layout_candidates_need_review")
+        self.assertEqual(visual_candidate.metadata["source_ref_quality"], "bbox")
+        self.assertFalse(visual_candidate.metadata["source_ref_acknowledged"])
+        self.assertEqual(visual_candidate.metadata["source_refs"][0]["bbox"], [10, 20, 120, 80])
+
+    def test_workflow_ai_structuring_receives_visual_context(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_workflow_extractor(_filename: str, _raw_text: str, page_images=None, visual_context=None):
+            captured["page_images"] = page_images
+            captured["visual_context"] = visual_context
+            return [], ["openrouter_disabled"]
+
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        original_workflow_extractor = ingestion.extract_workflow_units
+        original_render_pdf = ingestion.render_pdf_pages_as_data_urls
+        ingestion.extract_workflow_units = fake_workflow_extractor
+        ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], ["pdf_vision_pages_rendered:1"])
+        try:
+            _chunks, warnings, ai_error = ingestion.try_ai_structuring(
+                filename="workflow.pdf",
+                content_type="application/pdf",
+                data=b"%PDF-1.4",
+                raw_text="Quy trình có Yes/No",
+                classification=classification,
+                visual_layout={
+                    "source_type": "pdf_visual_layout",
+                    "summary": {"shape_candidate_count": 1, "edge_candidate_count": 1},
+                    "pages": [
+                        {
+                            "page": 1,
+                            "image_size": [200, 100],
+                            "graph_candidate": {
+                                "nodes": [{"id": "p1_node_1", "type": "action", "title": "Start", "bbox": [1, 2, 3, 4]}],
+                                "edge_candidates": [],
+                            },
+                        }
+                    ],
+                },
+            )
+        finally:
+            ingestion.extract_workflow_units = original_workflow_extractor
+            ingestion.render_pdf_pages_as_data_urls = original_render_pdf
+
+        self.assertIn("visual_graph_context_supplied_to_llm", warnings)
+        self.assertIn("openrouter_disabled", ai_error)
+        self.assertIsInstance(captured["visual_context"], dict)
+        self.assertEqual(captured["visual_context"]["summary"]["shape_candidate_count"], 1)
 
     def test_successful_ai_extraction_creates_structured_draft(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: (

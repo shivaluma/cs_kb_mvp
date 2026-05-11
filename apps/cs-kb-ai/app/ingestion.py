@@ -21,6 +21,7 @@ from app.text_processing import (
     tokenize,
     workflow_units_to_chunks,
 )
+from app.visual_layout import compact_visual_context, extract_pdf_visual_layout
 
 
 CONDITION_ACTION_SIGNALS = [
@@ -79,6 +80,13 @@ def prepare_document_version(
     blocks = parse_document_blocks(filename, content_type, raw_text, raw_context)
     classification = classify_document(filename, content_type, raw_text)
     warnings.extend(classification.warnings)
+    visual_layout: dict[str, Any] = {}
+    if classification.document_type == "workflow_diagram" and is_pdf_file(filename, content_type):
+        visual_layout, visual_warnings = extract_pdf_visual_layout(data, filename)
+        warnings.extend(visual_warnings)
+        if visual_layout:
+            raw_context["visual_layout"] = visual_layout
+            blocks.extend(visual_blocks_for_map(visual_layout))
     pipeline_artifacts = [
         stage_artifact(
             "map",
@@ -91,6 +99,9 @@ def prepare_document_version(
             classification_payload(classification),
         ),
     ]
+    if visual_layout:
+        pipeline_artifacts.append(stage_artifact("map", "visual_layout_blocks", visual_layout_payload(visual_layout)))
+        pipeline_artifacts.append(stage_artifact("map", "visual_graph_candidates", visual_graph_payload(visual_layout)))
 
     source_chunks: list[Any] = []
     ai_error = ""
@@ -101,6 +112,7 @@ def prepare_document_version(
             data=data,
             raw_text=raw_text,
             classification=classification,
+            visual_layout=visual_layout,
         )
         warnings.extend(ai_warnings)
         pipeline_artifacts.append(
@@ -220,6 +232,10 @@ def extract_raw_evidence(filename: str, content_type: str, data: bytes) -> tuple
     return raw_text, warnings, {}
 
 
+def is_pdf_file(filename: str, content_type: str) -> bool:
+    return filename.lower().endswith(".pdf") or content_type == "application/pdf"
+
+
 def parse_document_blocks(filename: str, content_type: str, raw_text: str, raw_context: dict[str, Any]) -> list[dict[str, Any]]:
     if "sheets" in raw_context:
         return [
@@ -241,6 +257,7 @@ def try_ai_structuring(
     data: bytes,
     raw_text: str,
     classification: Any,
+    visual_layout: dict[str, Any] | None = None,
 ) -> tuple[list[Any], list[str], str]:
     warnings: list[str] = []
     try:
@@ -256,7 +273,10 @@ def try_ai_structuring(
             warnings.extend(render_warnings)
             if not page_images:
                 return [], warnings, "ai_workflow_structuring_failed:pdf_vision_render_required"
-            llm_units, llm_warnings = extract_workflow_units(filename, raw_text, page_images=page_images)
+            visual_context = compact_visual_context(visual_layout) if visual_layout else None
+            if visual_context:
+                warnings.append("visual_graph_context_supplied_to_llm")
+            llm_units, llm_warnings = extract_workflow_units(filename, raw_text, page_images=page_images, visual_context=visual_context)
             warnings.extend(llm_warnings)
             chunks = workflow_units_to_chunks(llm_units, raw_text, filename) if llm_units else []
             if not chunks:
@@ -280,7 +300,7 @@ def build_degraded_draft(
     if classification.document_type == "policy_table":
         return build_degraded_spreadsheet_draft(filename, raw_text, blocks, classification, ai_error)
     if classification.document_type == "workflow_diagram":
-        return build_degraded_workflow_draft(filename, raw_text, blocks, classification, ai_error)
+        return build_degraded_workflow_draft(filename, raw_text, blocks, raw_context, classification, ai_error)
     if classification.document_type == "policy_rule":
         return build_degraded_policy_text_draft(filename, content_type, raw_text, blocks, classification, ai_error)
     return mark_degraded_chunks(
@@ -411,7 +431,10 @@ def build_degraded_spreadsheet_draft(filename: str, raw_text: str, blocks: list[
     return chunks
 
 
-def build_degraded_workflow_draft(filename: str, raw_text: str, blocks: list[dict[str, Any]], classification: Any, ai_error: str) -> list[Any]:
+def build_degraded_workflow_draft(filename: str, raw_text: str, blocks: list[dict[str, Any]], raw_context: dict[str, Any], classification: Any, ai_error: str) -> list[Any]:
+    visual_layout = raw_context.get("visual_layout") if isinstance(raw_context.get("visual_layout"), dict) else {}
+    visual_summary = visual_layout.get("summary") if isinstance(visual_layout, dict) and isinstance(visual_layout.get("summary"), dict) else {}
+    graph_status = "visual_layout_candidates_need_review" if visual_summary.get("shape_candidate_count") else "not_reliable_without_layout_review"
     chunks: list[Any] = [
         degraded_chunk(
             0,
@@ -422,7 +445,8 @@ def build_degraded_workflow_draft(filename: str, raw_text: str, blocks: list[dic
                 "unit_type": "full_sop",
                 "retrieval_scope": "document",
                 "source_refs": [default_pdf_source_ref(filename)],
-                "graph_extraction_status": "not_reliable_without_layout_review",
+                "graph_extraction_status": graph_status,
+                "visual_layout_summary": visual_summary,
                 "publish_blocked_reason": "workflow_graph_requires_review",
             },
             classification,
@@ -437,13 +461,16 @@ def build_degraded_workflow_draft(filename: str, raw_text: str, blocks: list[dic
                 "unit_type": "candidate_workflow_text",
                 "retrieval_scope": "unit",
                 "source_refs": [default_pdf_source_ref(filename)],
-                "graph_extraction_status": "not_reliable_without_layout_review",
+                "graph_extraction_status": graph_status,
+                "visual_layout_summary": visual_summary,
                 "publish_blocked_reason": "workflow_graph_requires_review",
             },
             classification,
             ai_error or "workflow_graph_requires_review",
         ),
     ]
+    for visual_chunk in visual_node_candidate_chunks(filename, visual_layout, len(chunks), classification, ai_error):
+        chunks.append(visual_chunk)
     step_candidates = workflow_step_candidates(raw_text)
     for index, text in enumerate(step_candidates, start=1):
         unit_type = "candidate_warning" if contains_signal(text, [*WARNING_SIGNALS, "script", "sla"]) else "candidate_step"
@@ -465,6 +492,57 @@ def build_degraded_workflow_draft(filename: str, raw_text: str, blocks: list[dic
             )
         )
     return chunks
+
+
+def visual_node_candidate_chunks(filename: str, visual_layout: dict[str, Any], start_index: int, classification: Any, ai_error: str) -> list[Any]:
+    if not visual_layout:
+        return []
+    output: list[Any] = []
+    for page in visual_layout.get("pages", []) if isinstance(visual_layout.get("pages"), list) else []:
+        if not isinstance(page, dict):
+            continue
+        page_number = int(page.get("page") or 1)
+        graph = page.get("graph_candidate") if isinstance(page.get("graph_candidate"), dict) else {}
+        for node in graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else []:
+            if not isinstance(node, dict):
+                continue
+            title = str(node.get("title") or "").strip()
+            if not title:
+                continue
+            node_type = str(node.get("type") or "")
+            unit_type = "candidate_step"
+            if node_type == "decision":
+                unit_type = "decision_point"
+            content = f"Visual node candidate: {title}"
+            output.append(
+                degraded_chunk(
+                    start_index + len(output),
+                    unit_type,
+                    candidate_heading(title, unit_type, len(output) + 1),
+                    content,
+                    {
+                        "unit_type": unit_type,
+                        "retrieval_scope": "unit",
+                        "visual_node_id": node.get("id"),
+                        "visual_node_type": node_type,
+                        "graph_extraction_status": "visual_layout_candidates_need_review",
+                        "source_ref_quality": "bbox" if node.get("bbox") else "page_only",
+                        "source_ref_acknowledged": False,
+                        "source_refs": [
+                            {
+                                "source_type": "pdf_diagram",
+                                "source_file": filename,
+                                "page": page_number,
+                                "bbox": node.get("bbox") or [],
+                            }
+                        ],
+                        "publish_blocked_reason": "workflow_graph_requires_review",
+                    },
+                    classification,
+                    ai_error or "workflow_graph_requires_review",
+                )
+            )
+    return output[:80]
 
 
 def degraded_chunk(index: int, section: str, heading: str, content: str, metadata: dict[str, Any], classification: Any, ai_error: str) -> Any:
@@ -792,6 +870,66 @@ def stage_artifact(stage: str, artifact_type: str, payload: dict[str, Any], stat
         "stage": stage,
         "status": status,
     }
+
+
+def visual_blocks_for_map(visual_layout: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    for page in visual_layout.get("pages", []) if isinstance(visual_layout.get("pages"), list) else []:
+        if not isinstance(page, dict):
+            continue
+        page_number = int(page.get("page") or 1)
+        for shape in page.get("shape_candidates", []) if isinstance(page.get("shape_candidates"), list) else []:
+            if not isinstance(shape, dict):
+                continue
+            blocks.append(
+                {
+                    "type": "visual_shape",
+                    "page": page_number,
+                    "bbox": shape.get("bbox") or [],
+                    "index": len(blocks),
+                    "text": shape.get("text") or shape.get("shape_type") or "",
+                }
+            )
+        graph = page.get("graph_candidate") if isinstance(page.get("graph_candidate"), dict) else {}
+        for edge in graph.get("edge_candidates", []) if isinstance(graph.get("edge_candidates"), list) else []:
+            if not isinstance(edge, dict):
+                continue
+            blocks.append(
+                {
+                    "type": "visual_connector",
+                    "page": page_number,
+                    "bbox": edge.get("bbox") or [],
+                    "index": len(blocks),
+                    "text": f"{edge.get('from_node', '')} --{edge.get('condition', 'next')}--> {edge.get('to_node', '')}",
+                }
+            )
+    return blocks
+
+
+def visual_layout_payload(visual_layout: dict[str, Any]) -> dict[str, Any]:
+    pages = visual_layout.get("pages") if isinstance(visual_layout.get("pages"), list) else []
+    return {
+        "filename": visual_layout.get("filename", ""),
+        "source_type": visual_layout.get("source_type", "pdf_visual_layout"),
+        "summary": visual_layout.get("summary", {}),
+        "pages": [
+            {
+                "page": page.get("page"),
+                "image_size": page.get("image_size"),
+                "text_block_count": len(page.get("text_blocks", [])) if isinstance(page.get("text_blocks"), list) else 0,
+                "shape_candidate_count": len(page.get("shape_candidates", [])) if isinstance(page.get("shape_candidates"), list) else 0,
+                "connector_candidate_count": len(page.get("connector_candidates", [])) if isinstance(page.get("connector_candidates"), list) else 0,
+                "preview_shapes": (page.get("shape_candidates", []) if isinstance(page.get("shape_candidates"), list) else [])[:20],
+                "warnings": page.get("warnings", []),
+            }
+            for page in pages[:3]
+            if isinstance(page, dict)
+        ],
+    }
+
+
+def visual_graph_payload(visual_layout: dict[str, Any]) -> dict[str, Any]:
+    return compact_visual_context(visual_layout)
 
 
 def source_blocks_payload(filename: str, content_type: str, raw_text: str, blocks: list[dict[str, Any]], raw_context: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
