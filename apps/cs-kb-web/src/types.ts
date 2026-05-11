@@ -281,6 +281,31 @@ export type DocumentChunk = {
   created_at: string;
 };
 
+export type ExtractionStageOutput = {
+  id: string;
+  job_id: string;
+  stage: string;
+  artifact_type: string;
+  payload: Record<string, unknown>;
+  status: string;
+  error: string;
+  created_at: string;
+};
+
+export type ExtractionJobSummary = {
+  id: string;
+  document_id: string;
+  version_id: string;
+  status: string;
+  current_stage: string;
+  source_type: string;
+  document_type: string;
+  risk_level: string;
+  created_at: string;
+  updated_at: string;
+  outputs: ExtractionStageOutput[];
+};
+
 export type VersionRawText = {
   version_id: string;
   document_id: string;

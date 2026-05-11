@@ -49,6 +49,12 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         first_rule = next(chunk for chunk in chunks if chunk["section"] == "candidate_rule")
         self.assertEqual(first_rule["metadata"]["review_status"], "needs_review")
         self.assertEqual(first_rule["metadata"]["source_ref_quality"], "paragraph_only")
+        artifacts = enrichment["pipeline_artifacts"]
+        self.assertTrue(any(artifact["artifact_type"] == "source_blocks" for artifact in artifacts))
+        self.assertTrue(any(artifact["artifact_type"] == "classification_result" for artifact in artifacts))
+        self.assertTrue(any(artifact["artifact_type"] == "degraded_draft" for artifact in artifacts))
+        self.assertTrue(any(artifact["artifact_type"] == "verification_report" for artifact in artifacts))
+        self.assertEqual(enrichment["pipeline_job_status"], "degraded")
 
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
@@ -77,6 +83,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(historical["metadata"]["version_scope"], "historical_candidate")
         self.assertEqual(current["metadata"]["source_refs"][0]["row_start"], 2)
         self.assertEqual(current["metadata"]["source_refs"][0]["column_names"], ["Case", "Action"])
+        self.assertTrue(any(artifact["artifact_type"] == "structuring_plan" for artifact in enrichment["pipeline_artifacts"]))
 
     def test_workflow_ai_failure_does_not_create_confirmed_graph(self) -> None:
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
@@ -131,6 +138,8 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertFalse(enrichment["publish_blocked"])
         self.assertIn("policy_rule", [chunk["section"] for chunk in chunks])
         self.assertTrue(all(chunk["metadata"]["extraction_status"] == "structured" for chunk in chunks))
+        self.assertTrue(all(chunk["metadata"]["index_eligible"] is False for chunk in chunks))
+        self.assertTrue(any(artifact["artifact_type"] == "ai_structured_payload" for artifact in enrichment["pipeline_artifacts"]))
 
 
 def docx_bytes(paragraphs: list[str]) -> bytes:

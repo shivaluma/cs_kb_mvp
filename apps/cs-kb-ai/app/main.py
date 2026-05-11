@@ -23,6 +23,7 @@ from app.schemas import (
     DocumentChunkSummary,
     DocumentSummary,
     DocumentVersionResponse,
+    ExtractionJobSummary,
     ExtractionUnit,
     ExtractionUnitCreateRequest,
     ExtractionUnitUpdateRequest,
@@ -394,6 +395,54 @@ def failed_extraction_draft(
         "source_ref_acknowledged": source_ref_quality != "page_only",
         "effective_from": effective_from,
         "publish_blocked_reason": "structured_ai_extraction_failed",
+        "pipeline_current_stage": "verify",
+        "pipeline_job_status": "failed",
+        "pipeline_artifacts": [
+            {
+                "stage": "map",
+                "artifact_type": "source_blocks",
+                "status": "completed" if raw_text.strip() else "failed",
+                "error": "" if raw_text.strip() else "raw_extraction_empty",
+                "payload": {
+                    "filename": filename,
+                    "content_type": content_type,
+                    "raw_text_chars": len(raw_text),
+                    "source_ref_quality": source_ref_quality,
+                    "warnings": extraction_warnings[:20],
+                },
+            },
+            {
+                "stage": "classify",
+                "artifact_type": "classification_result",
+                "status": "completed",
+                "error": "",
+                "payload": {
+                    "document_type": classification.document_type,
+                    "source_type": classification.source_type,
+                    "confidence": classification.confidence,
+                    "requires_review": True,
+                    "signals": classification.warnings,
+                },
+            },
+            {
+                "stage": "ai_structure",
+                "artifact_type": "ai_structured_payload",
+                "status": "failed",
+                "error": failure_reason,
+                "payload": {"unit_count": 0, "warnings": [failure_reason]},
+            },
+            {
+                "stage": "verify",
+                "artifact_type": "verification_report",
+                "status": "failed",
+                "error": "",
+                "payload": {
+                    "coverage_score": 0,
+                    "hard_blockers": ["extraction_failed", "manual_curation_required"],
+                    "warnings": [failure_reason],
+                },
+            },
+        ],
     }
     chunks: list[dict[str, Any]] = []
     if raw_text.strip():
@@ -468,6 +517,11 @@ def list_document_chunks(document_id: str, version_id: str = "") -> list[Documen
 @app.get("/ai/v1/documents/{document_id}/extraction-units", response_model=list[ExtractionUnit])
 def list_document_extraction_units(document_id: str, version_id: str = "") -> list[ExtractionUnit]:
     return [ExtractionUnit(**row) for row in repository.list_extraction_units(document_id, version_id)]
+
+
+@app.get("/ai/v1/versions/{version_id}/extraction-pipeline", response_model=list[ExtractionJobSummary])
+def list_version_extraction_pipeline(version_id: str) -> list[ExtractionJobSummary]:
+    return [ExtractionJobSummary(**row) for row in repository.list_extraction_pipeline(version_id)]
 
 
 @app.patch("/ai/v1/extraction-units/{unit_id}", response_model=ExtractionUnit)

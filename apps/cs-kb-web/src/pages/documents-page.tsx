@@ -10,6 +10,7 @@ import {
   useDocumentMetadataPreview,
   useDocuments,
   useDocumentVersions,
+  useExtractionPipeline,
   useExtractionUnits,
   usePublishVersion,
   useUpdateExtractionUnit,
@@ -52,6 +53,7 @@ export function DocumentsPage() {
   const versionsQuery = useDocumentVersions(selectedDocument?.document_id);
   const chunksQuery = useDocumentChunks(selectedDocument?.document_id, effectiveVersionId);
   const extractionUnitsQuery = useExtractionUnits(selectedDocument?.document_id, effectiveVersionId);
+  const extractionPipelineQuery = useExtractionPipeline(effectiveVersionId);
   const versionRawQuery = useVersionRawText(effectiveVersionId);
   const uploadMutation = useUploadDocument();
   const uploadAsyncMutation = useUploadDocumentAsync();
@@ -294,6 +296,8 @@ export function DocumentsPage() {
         documents={documents}
         extractionUnits={extractionUnitsQuery.data ?? []}
         extractionUnitsLoading={extractionUnitsQuery.isFetching}
+        extractionPipeline={extractionPipelineQuery.data ?? []}
+        extractionPipelineLoading={extractionPipelineQuery.isFetching}
         metadataPreview={metadataPreviewMutation.data ?? null}
         onArchiveDocument={archiveDocument}
         onBulkReviewVersion={bulkReviewVersion}

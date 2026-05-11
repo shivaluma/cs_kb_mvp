@@ -99,6 +99,9 @@ class DocumentMetadata(BaseModel):
     effective_from: str = ""
     required_unit_types: list[str] = Field(default_factory=list)
     risk_level: str = ""
+    pipeline_job_status: str = ""
+    pipeline_current_stage: str = ""
+    pipeline_artifacts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SourceRef(BaseModel):
@@ -548,6 +551,31 @@ class DocumentChunkSummary(BaseModel):
     token_count: int
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class ExtractionStageOutput(BaseModel):
+    id: str
+    job_id: str
+    stage: str
+    artifact_type: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    status: str = "completed"
+    error: str = ""
+    created_at: datetime
+
+
+class ExtractionJobSummary(BaseModel):
+    id: str
+    document_id: str
+    version_id: str
+    status: str
+    current_stage: str
+    source_type: str = ""
+    document_type: str = "unknown"
+    risk_level: str = ""
+    created_at: datetime
+    updated_at: datetime
+    outputs: list[ExtractionStageOutput] = Field(default_factory=list)
 
 
 class ExtractionUnit(BaseModel):

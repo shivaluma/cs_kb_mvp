@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -78,6 +79,18 @@ def prepare_document_version(
     blocks = parse_document_blocks(filename, content_type, raw_text, raw_context)
     classification = classify_document(filename, content_type, raw_text)
     warnings.extend(classification.warnings)
+    pipeline_artifacts = [
+        stage_artifact(
+            "map",
+            "source_blocks",
+            source_blocks_payload(filename, content_type, raw_text, blocks, raw_context, warnings),
+        ),
+        stage_artifact(
+            "classify",
+            "classification_result",
+            classification_payload(classification),
+        ),
+    ]
 
     source_chunks: list[Any] = []
     ai_error = ""
@@ -90,6 +103,15 @@ def prepare_document_version(
             classification=classification,
         )
         warnings.extend(ai_warnings)
+        pipeline_artifacts.append(
+            stage_artifact(
+                "ai_structure",
+                "ai_structured_payload",
+                ai_structured_payload(source_chunks, ai_warnings),
+                status="failed" if ai_error else "completed",
+                error=ai_error,
+            )
+        )
 
     if not source_chunks and classification.document_type not in AI_STRUCTURED_DOCUMENT_TYPES:
         source_chunks = mark_structured_chunks(chunk_text(raw_text))
@@ -106,8 +128,20 @@ def prepare_document_version(
             raw_context=raw_context,
             ai_error=ai_error,
         )
+        pipeline_artifacts.append(
+            stage_artifact(
+                "plan",
+                "degraded_draft",
+                draft_units_payload(source_chunks),
+                status="degraded",
+                error=ai_error,
+            )
+        )
     else:
         source_chunks = normalize_units(source_chunks)
+
+    if should_create_structuring_plan(classification.document_type, raw_text, raw_context, source_chunks):
+        pipeline_artifacts.append(stage_artifact("plan", "structuring_plan", structuring_plan_payload(classification, source_chunks, raw_context)))
 
     source_chunks = validate_units_for_review(source_chunks, classification.document_type)
 
@@ -160,6 +194,17 @@ def prepare_document_version(
     }
 
     chunks = embed_chunks(source_chunks, metadata.model_dump(), enrichment, filename)
+    pipeline_artifacts.append(stage_artifact("refine", "draft_units", draft_units_payload(source_chunks)))
+    verification_report = verification_report_payload(chunks, classification.document_type)
+    pipeline_artifacts.append(stage_artifact("verify", "verification_report", verification_report, status="failed" if verification_report["hard_blockers"] else "completed"))
+    pipeline_artifacts.append(stage_artifact("verify", "publish_readiness_report", verification_report, status="failed" if verification_report["hard_blockers"] else "completed"))
+    enrichment.update(
+        {
+            "pipeline_artifacts": pipeline_artifacts,
+            "pipeline_current_stage": "verify",
+            "pipeline_job_status": "degraded" if extraction_status == "degraded" else "completed",
+        }
+    )
 
     if not chunks:
         warnings.append("no_chunks_created")
@@ -540,6 +585,10 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
     document_title = str(base_metadata.get("title") or path_title(filename))
     for chunk in source_chunks:
         unit_type = str(chunk.metadata.get("unit_type") or chunk.section or "text_section")
+        extraction_status = str(chunk.metadata.get("extraction_status") or enrichment.get("extraction_status") or "structured")
+        review_status = str(chunk.metadata.get("review_status") or "needs_review")
+        publish_blocked = bool(chunk.metadata.get("publish_blocked") or extraction_status == "degraded")
+        index_eligible = extraction_status in {"structured", "manually_curated"} and review_status == "approved" and not publish_blocked
         parent_unit_id = str(
             chunk.metadata.get("parent_unit_id")
             or chunk.metadata.get("rule_id")
@@ -555,9 +604,13 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
             **enrichment,
             "source_filename": filename,
             **chunk.metadata,
+            "artifact_type": chunk.metadata.get("artifact_type") or ("draft_unit" if extraction_status != "failed" else "source_evidence"),
             "document_title": document_title,
+            "index_eligible": index_eligible,
+            "pipeline_stage": chunk.metadata.get("pipeline_stage") or ("plan" if extraction_status == "degraded" else "refine"),
             "section_path": section_path,
             "parent_unit_id": parent_unit_id,
+            "publish_state": chunk.metadata.get("publish_state") or ("blocked" if publish_blocked else "draft"),
             "unit_type": unit_type,
         }
         chunks.append(
@@ -729,6 +782,160 @@ def aggregate_source_ref_quality(chunks: list[Any]) -> str:
         if candidate in qualities:
             return candidate
     return "none"
+
+
+def stage_artifact(stage: str, artifact_type: str, payload: dict[str, Any], status: str = "completed", error: str = "") -> dict[str, Any]:
+    return {
+        "artifact_type": artifact_type,
+        "error": error,
+        "payload": payload,
+        "stage": stage,
+        "status": status,
+    }
+
+
+def source_blocks_payload(filename: str, content_type: str, raw_text: str, blocks: list[dict[str, Any]], raw_context: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    return {
+        "block_count": len(blocks),
+        "content_type": content_type,
+        "filename": filename,
+        "preview_blocks": blocks[:60],
+        "raw_text_chars": len(raw_text),
+        "source_ref_quality": source_ref_quality_from_blocks(blocks),
+        "spreadsheet_sheet_count": len(raw_context.get("sheets", [])) if isinstance(raw_context.get("sheets"), list) else 0,
+        "warnings": warnings[:20],
+    }
+
+
+def classification_payload(classification: Any) -> dict[str, Any]:
+    return {
+        "confidence": classification.confidence,
+        "document_type": classification.document_type,
+        "reasons": classification.warnings,
+        "requires_review": classification.requires_review,
+        "risk_level": risk_level_for_document_type(classification.document_type),
+        "source_type": classification.source_type,
+        "signals": classification.warnings,
+    }
+
+
+def ai_structured_payload(source_chunks: list[Any], warnings: list[str]) -> dict[str, Any]:
+    return {
+        "unit_count": len(source_chunks),
+        "unit_types": sorted({str(chunk.metadata.get("unit_type") or chunk.section) for chunk in source_chunks}),
+        "warnings": warnings[:30],
+    }
+
+
+def draft_units_payload(source_chunks: list[Any]) -> dict[str, Any]:
+    return {
+        "unit_count": len(source_chunks),
+        "units": [
+            {
+                "confidence": chunk.metadata.get("confidence"),
+                "index": chunk.chunk_index,
+                "review_status": chunk.metadata.get("review_status"),
+                "source_ref_quality": chunk.metadata.get("source_ref_quality"),
+                "title": chunk.heading,
+                "unit_type": chunk.metadata.get("unit_type") or chunk.section,
+            }
+            for chunk in source_chunks[:120]
+        ],
+    }
+
+
+def should_create_structuring_plan(document_type: str, raw_text: str, raw_context: dict[str, Any], source_chunks: list[Any]) -> bool:
+    sheet_count = len(raw_context.get("sheets", [])) if isinstance(raw_context.get("sheets"), list) else 0
+    return (
+        document_type in {"policy_table", "workflow_diagram"}
+        or (document_type == "policy_rule" and any("high" == str(chunk.metadata.get("risk_level")) for chunk in source_chunks))
+        or sheet_count > 1
+        or len(raw_text) > 12000
+    )
+
+
+def structuring_plan_payload(classification: Any, source_chunks: list[Any], raw_context: dict[str, Any]) -> dict[str, Any]:
+    unit_types = sorted({str(chunk.metadata.get("unit_type") or chunk.section) for chunk in source_chunks})
+    sheets = [sheet_name for sheet_name, _rows in raw_context.get("sheets", [])] if isinstance(raw_context.get("sheets"), list) else []
+    return {
+        "active_vs_historical_candidates": [
+            {
+                "sheet": sheet,
+                "version_scope": version_scope_from_sheet(sheet),
+                "effective_from": effective_from_from_sheet(sheet),
+            }
+            for sheet in sheets
+        ],
+        "atomic_unit_candidates": unit_types,
+        "document_type": classification.document_type,
+        "full_sop_candidate": any(unit_type == "full_sop" for unit_type in unit_types),
+        "human_approval_required": classification.document_type in {"policy_table", "workflow_diagram", "policy_rule"},
+        "metadata_suggestions": {
+            "risk_level": risk_level_for_document_type(classification.document_type),
+            "source_type": classification.source_type,
+        },
+        "related_sop_candidates": [],
+        "warning_candidates": [chunk.heading for chunk in source_chunks if "warning" in str(chunk.metadata.get("unit_type") or chunk.section) or "note" in str(chunk.metadata.get("unit_type") or chunk.section)][:20],
+        "workflow_graph_candidates": [chunk.heading for chunk in source_chunks if str(chunk.metadata.get("unit_type") or chunk.section) == "workflow_graph"][:5],
+    }
+
+
+def verification_report_payload(chunks: list[dict[str, Any]], document_type: str) -> dict[str, Any]:
+    hard_blockers: list[str] = []
+    warnings: list[str] = []
+    metadata_items = [chunk.get("metadata") or {} for chunk in chunks]
+    has_full_sop = any(str(metadata.get("unit_type") or "") == "full_sop" or str(metadata.get("retrieval_scope") or "") == "document" for metadata in metadata_items)
+    atomic_units = [
+        metadata for metadata in metadata_items
+        if str(metadata.get("retrieval_scope") or "") != "document"
+        and str(metadata.get("unit_type") or "") != "full_sop"
+        and not str(metadata.get("unit_type") or "").startswith("candidate_")
+    ]
+    if not has_full_sop:
+        hard_blockers.append("missing_full_sop")
+    if document_type in {"policy_rule", "policy_table", "workflow_diagram"} and not atomic_units:
+        hard_blockers.append("missing_atomic_units")
+    if any(str(metadata.get("review_status") or "needs_review") == "needs_review" for metadata in metadata_items):
+        hard_blockers.append("unreviewed_units")
+    if any(metadata.get("source_ref_quality") == "page_only" and metadata.get("source_ref_acknowledged") is not True for metadata in metadata_items):
+        hard_blockers.append("weak_source_refs_unacknowledged")
+    if any(metadata.get("extraction_status") == "degraded" for metadata in metadata_items):
+        hard_blockers.append("degraded_units_require_manual_curation")
+    if any(metadata.get("index_eligible") is True and str(metadata.get("review_status")) != "approved" for metadata in metadata_items):
+        hard_blockers.append("draft_units_trying_to_index")
+    if not any("alias" in json.dumps(metadata, ensure_ascii=False).lower() for metadata in metadata_items):
+        warnings.append("weak_aliases")
+    if not any("related" in json.dumps(metadata, ensure_ascii=False).lower() for metadata in metadata_items):
+        warnings.append("missing_related_sop")
+    return {
+        "coverage_score": max(0, 100 - len(hard_blockers) * 20 - len(warnings) * 5),
+        "hard_blockers": list(dict.fromkeys(hard_blockers)),
+        "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
+def source_ref_quality_from_blocks(blocks: list[dict[str, Any]]) -> str:
+    if not blocks:
+        return "none"
+    if any(block.get("bbox") for block in blocks):
+        return "bbox"
+    if any(block.get("sheet") and block.get("rows") for block in blocks):
+        return "sheet_row"
+    if any(block.get("paragraph_index") is not None for block in blocks):
+        return "paragraph_only"
+    if any(block.get("page") for block in blocks):
+        return "page_only"
+    if any(block.get("line_start") for block in blocks):
+        return "paragraph_only"
+    return "none"
+
+
+def risk_level_for_document_type(document_type: str) -> str:
+    if document_type in {"policy_rule", "policy_table", "workflow_diagram"}:
+        return "high"
+    if document_type in {"macro_script", "text_sop"}:
+        return "medium"
+    return "low"
 
 
 def first_header_row(rows: list[tuple[int, list[str]]]) -> list[str]:

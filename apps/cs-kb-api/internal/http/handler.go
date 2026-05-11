@@ -65,6 +65,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/publish", h.proxyAIVersionPublish)
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/bulk-review", h.proxyAIVersionBulkReview)
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/extraction-units", h.proxyAIVersionExtractionUnitCreate)
+	mux.HandleFunc("GET /api/v1/ai/versions/{id}/extraction-pipeline", h.proxyAIVersionExtractionPipeline)
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/raw", h.proxyAIVersionRaw)
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/source/pages/{page}", h.proxyAIVersionSourcePage)
 	mux.HandleFunc("POST /api/v1/ai/retrieve", h.proxyAI("/ai/v1/retrieve"))
@@ -374,6 +375,10 @@ func (h *Handler) proxyAIExtractionUnitUpdate(w http.ResponseWriter, r *http.Req
 
 func (h *Handler) proxyAIVersionRaw(w http.ResponseWriter, r *http.Request) {
 	h.proxyAI("/ai/v1/versions/"+r.PathValue("id")+"/raw")(w, r)
+}
+
+func (h *Handler) proxyAIVersionExtractionPipeline(w http.ResponseWriter, r *http.Request) {
+	h.proxyAI("/ai/v1/versions/"+r.PathValue("id")+"/extraction-pipeline")(w, r)
 }
 
 func (h *Handler) proxyAIVersionSourcePage(w http.ResponseWriter, r *http.Request) {

@@ -26,6 +26,12 @@ def pg_text(value: Any) -> str:
     return str(value or "").replace("\x00", "")
 
 
+def metadata_storage_json(metadata: DocumentMetadata) -> str:
+    payload = metadata.model_dump()
+    payload.pop("pipeline_artifacts", None)
+    return pg_text(json.dumps(payload))
+
+
 @contextmanager
 def connection() -> Iterator[Connection[Any]]:
     if pool.closed:
@@ -145,6 +151,36 @@ def ensure_schema() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS extraction_jobs (
+              id uuid PRIMARY KEY,
+              document_id uuid NOT NULL REFERENCES ai_documents(id) ON DELETE CASCADE,
+              version_id uuid NOT NULL REFERENCES ai_document_versions(id) ON DELETE CASCADE,
+              status text NOT NULL DEFAULT 'pending',
+              current_stage text NOT NULL DEFAULT 'map',
+              source_type text NOT NULL DEFAULT '',
+              document_type text NOT NULL DEFAULT 'unknown',
+              risk_level text NOT NULL DEFAULT '',
+              created_at timestamptz NOT NULL DEFAULT now(),
+              updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS extraction_stage_outputs (
+              id uuid PRIMARY KEY,
+              job_id uuid NOT NULL REFERENCES extraction_jobs(id) ON DELETE CASCADE,
+              stage text NOT NULL,
+              artifact_type text NOT NULL,
+              payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+              status text NOT NULL DEFAULT 'completed',
+              error text NOT NULL DEFAULT '',
+              created_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS ai_retrieval_events (
               id uuid PRIMARY KEY,
               query text NOT NULL,
@@ -188,6 +224,8 @@ def ensure_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_versions_status ON ai_document_versions(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_document_version ON ai_chunks(document_id, version_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_sources_document ON ai_document_sources(document_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_jobs_version ON extraction_jobs(version_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_stage_outputs_job ON extraction_stage_outputs(job_id, stage)")
         conn.execute("DROP INDEX IF EXISTS idx_ai_chunks_content_fts")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_content_unaccent_fts ON ai_chunks USING gin (to_tsvector('simple', immutable_unaccent(content)))")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_metadata ON ai_chunks USING gin (metadata)")
@@ -330,7 +368,7 @@ def create_document_version(
 ) -> dict[str, Any]:
     document_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
-    metadata_json = pg_text(json.dumps(metadata.model_dump()))
+    metadata_json = metadata_storage_json(metadata)
     clean_external_id = pg_text(external_id)
     clean_raw_text = pg_text(raw_text)
     clean_title = pg_text(title)
@@ -423,6 +461,12 @@ def create_document_version(
                 )
 
             insert_chunks(conn, document_id, version_id, chunks)
+            job_id = persist_extraction_pipeline_artifacts(
+                conn,
+                document_id=document_id,
+                version_id=version_id,
+                metadata=metadata,
+            )
 
             if status == "published":
                 publish_version_tx(conn, version_id, created_by)
@@ -441,6 +485,7 @@ def create_document_version(
                     "document_type": document_type,
                     "review_status": review_status,
                     "extraction_confidence": extraction_confidence,
+                    "extraction_job_id": job_id,
                 },
             )
 
@@ -473,11 +518,18 @@ def replace_document_version_extraction(
     actor: str,
     change_summary: str = "",
 ) -> None:
-    metadata_json = pg_text(json.dumps(metadata.model_dump()))
+    metadata_json = metadata_storage_json(metadata)
     with connection() as conn:
         with conn.transaction():
             conn.execute("DELETE FROM ai_chunks WHERE version_id = %s", (version_id,))
             insert_chunks(conn, document_id, version_id, chunks)
+            conn.execute("DELETE FROM extraction_jobs WHERE version_id = %s", (version_id,))
+            job_id = persist_extraction_pipeline_artifacts(
+                conn,
+                document_id=document_id,
+                version_id=version_id,
+                metadata=metadata,
+            )
             conn.execute(
                 """
                 UPDATE ai_document_versions
@@ -520,6 +572,7 @@ def replace_document_version_extraction(
                     "document_type": document_type,
                     "review_status": review_status,
                     "extraction_confidence": extraction_confidence,
+                    "extraction_job_id": job_id,
                 },
             )
 
@@ -553,6 +606,283 @@ def insert_chunks(conn: Connection[Any], document_id: str, version_id: str, chun
             """,
             rows,
         )
+
+
+def persist_extraction_pipeline_artifacts(
+    conn: Connection[Any],
+    *,
+    document_id: str,
+    version_id: str,
+    metadata: DocumentMetadata,
+) -> str:
+    metadata_payload = metadata.model_dump()
+    artifacts = metadata_payload.get("pipeline_artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = []
+    artifacts = [
+        *artifacts,
+        build_reduce_reconcile_artifact(conn, document_id=document_id, version_id=version_id, metadata_payload=metadata_payload),
+    ]
+    status = str(metadata_payload.get("pipeline_job_status") or ("degraded" if metadata_payload.get("extraction_status") == "degraded" else "completed"))
+    current_stage = str(metadata_payload.get("pipeline_current_stage") or "verify")
+    source_type = str(metadata_payload.get("source_type") or artifact_payload_value(artifacts, "classification_result", "source_type") or "")
+    document_type = str(metadata_payload.get("document_type") or artifact_payload_value(artifacts, "classification_result", "document_type") or "unknown")
+    risk_level = str(metadata_payload.get("risk_level") or artifact_payload_value(artifacts, "classification_result", "risk_level") or "")
+    job_id = str(uuid.uuid4())
+    conn.execute(
+        """
+        INSERT INTO extraction_jobs (
+          id, document_id, version_id, status, current_stage, source_type, document_type, risk_level
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            job_id,
+            document_id,
+            version_id,
+            status,
+            current_stage,
+            source_type,
+            document_type,
+            risk_level,
+        ),
+    )
+    rows = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        rows.append(
+            (
+                str(uuid.uuid4()),
+                job_id,
+                pg_text(artifact.get("stage")),
+                pg_text(artifact.get("artifact_type")),
+                pg_text(json.dumps(artifact.get("payload") or {})),
+                pg_text(artifact.get("status") or "completed"),
+                pg_text(artifact.get("error") or ""),
+            )
+        )
+    if rows:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO extraction_stage_outputs (
+                  id, job_id, stage, artifact_type, payload, status, error
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+                """,
+                rows,
+            )
+    return job_id
+
+
+def artifact_payload_value(artifacts: list[Any], artifact_type: str, key: str) -> Any:
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or artifact.get("artifact_type") != artifact_type:
+            continue
+        payload = artifact.get("payload")
+        if isinstance(payload, dict) and payload.get(key):
+            return payload.get(key)
+    return ""
+
+
+def build_reduce_reconcile_artifact(
+    conn: Connection[Any],
+    *,
+    document_id: str,
+    version_id: str,
+    metadata_payload: dict[str, Any],
+) -> dict[str, Any]:
+    with conn.cursor(row_factory=dict_row) as cur:
+        current = cur.execute(
+            """
+            SELECT id::text AS document_id, external_id, title, metadata
+            FROM ai_documents
+            WHERE id = %s
+            """,
+            (document_id,),
+        ).fetchone()
+        other_docs = cur.execute(
+            """
+            SELECT id::text AS document_id, external_id, title, status, metadata
+            FROM ai_documents
+            WHERE id <> %s
+            ORDER BY updated_at DESC
+            LIMIT 200
+            """,
+            (document_id,),
+        ).fetchall()
+        version_rows = cur.execute(
+            """
+            SELECT id::text AS version_id, version_number, status, review_status, created_at
+            FROM ai_document_versions
+            WHERE document_id = %s AND id <> %s
+            ORDER BY version_number DESC
+            LIMIT 10
+            """,
+            (document_id, version_id),
+        ).fetchall()
+
+    current_title = str((current or {}).get("title") or metadata_payload.get("title") or "")
+    current_title_norm = normalize_phrase(current_title)
+    current_tokens = significant_tokens(current_title_norm)
+    current_tags = normalized_set(metadata_payload.get("tags"))
+    current_case_reasons = normalized_set(metadata_payload.get("case_reasons"))
+    current_category = normalize_phrase(str(metadata_payload.get("category") or ""))
+    current_vertical = normalize_phrase(str(metadata_payload.get("vertical") or ""))
+
+    duplicate_title: list[dict[str, Any]] = []
+    related_sop: list[dict[str, Any]] = []
+    possible_conflict: list[dict[str, Any]] = []
+    for row in other_docs:
+        doc_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        title = str(row.get("title") or "")
+        title_norm = normalize_phrase(title)
+        title_tokens = significant_tokens(title_norm)
+        title_overlap = overlap_score(current_tokens, title_tokens)
+        tags = normalized_set(doc_metadata.get("tags"))
+        case_reasons = normalized_set(doc_metadata.get("case_reasons"))
+        category = normalize_phrase(str(doc_metadata.get("category") or ""))
+        vertical = normalize_phrase(str(doc_metadata.get("vertical") or ""))
+        tag_overlap = len(current_tags & tags)
+        case_reason_overlap = len(current_case_reasons & case_reasons)
+        metadata_overlap = tag_overlap + case_reason_overlap + int(bool(current_category and current_category == category)) + int(bool(current_vertical and current_vertical == vertical))
+
+        if current_title_norm and (current_title_norm == title_norm or title_overlap >= 0.82):
+            duplicate_title.append(
+                {
+                    "document_id": row["document_id"],
+                    "title": title,
+                    "status": row.get("status"),
+                    "reason": "same_or_highly_similar_title",
+                    "score": round(title_overlap, 2),
+                }
+            )
+        if metadata_overlap >= 2:
+            related_sop.append(
+                {
+                    "document_id": row["document_id"],
+                    "title": title,
+                    "status": row.get("status"),
+                    "reason": "metadata_overlap",
+                    "matched_tags": sorted(current_tags & tags)[:8],
+                    "matched_case_reasons": sorted(current_case_reasons & case_reasons)[:8],
+                    "score": metadata_overlap,
+                }
+            )
+        if metadata_overlap >= 2 and title_overlap < 0.35:
+            possible_conflict.append(
+                {
+                    "document_id": row["document_id"],
+                    "title": title,
+                    "status": row.get("status"),
+                    "reason": "same_operational_area_different_title_review_for_conflict",
+                    "score": round(metadata_overlap + title_overlap, 2),
+                }
+            )
+
+    duplicate_title = sorted(duplicate_title, key=lambda item: item["score"], reverse=True)[:5]
+    related_sop = sorted(related_sop, key=lambda item: item["score"], reverse=True)[:8]
+    possible_conflict = sorted(possible_conflict, key=lambda item: item["score"], reverse=True)[:5]
+    possible_newer_version = [
+        {
+            "version_id": row["version_id"],
+            "version_number": row["version_number"],
+            "status": row["status"],
+            "review_status": row["review_status"],
+            "reason": "same_document_existing_version",
+        }
+        for row in version_rows
+    ]
+
+    return {
+        "artifact_type": "reconcile_suggestions",
+        "error": "",
+        "payload": {
+            "auto_apply": False,
+            "duplicate_title": duplicate_title,
+            "possible_newer_version": possible_newer_version,
+            "related_sop": related_sop,
+            "possible_conflict": possible_conflict,
+            "summary": {
+                "duplicate_title_count": len(duplicate_title),
+                "related_sop_count": len(related_sop),
+                "possible_conflict_count": len(possible_conflict),
+                "same_document_version_count": len(possible_newer_version),
+            },
+        },
+        "stage": "reduce",
+        "status": "completed",
+    }
+
+
+def normalized_set(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {normalize_phrase(str(item)) for item in value if normalize_phrase(str(item))}
+
+
+def significant_tokens(value: str) -> set[str]:
+    return {token for token in value.split() if len(token) > 2}
+
+
+def overlap_score(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / max(len(left), len(right))
+
+
+def list_extraction_pipeline(version_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        jobs = conn.execute(
+            """
+            SELECT id::text AS id,
+                   document_id::text AS document_id,
+                   version_id::text AS version_id,
+                   status,
+                   current_stage,
+                   source_type,
+                   document_type,
+                   risk_level,
+                   created_at,
+                   updated_at
+            FROM extraction_jobs
+            WHERE version_id = %s
+            ORDER BY created_at DESC
+            """,
+            (version_id,),
+        ).fetchall()
+        if not jobs:
+            return []
+        job_ids = [row["id"] for row in jobs]
+        outputs = conn.execute(
+            """
+            SELECT id::text AS id,
+                   job_id::text AS job_id,
+                   stage,
+                   artifact_type,
+                   payload,
+                   status,
+                   error,
+                   created_at
+            FROM extraction_stage_outputs
+            WHERE job_id::text = ANY(%s)
+            ORDER BY created_at, stage, artifact_type
+            """,
+            (job_ids,),
+        ).fetchall()
+    outputs_by_job: dict[str, list[dict[str, Any]]] = {}
+    for output in outputs:
+        item = dict(output)
+        outputs_by_job.setdefault(item["job_id"], []).append(item)
+    return [
+        {
+            **dict(job),
+            "outputs": outputs_by_job.get(job["id"], []),
+        }
+        for job in jobs
+    ]
 
 
 def publish_version(version_id: str, actor: str) -> dict[str, Any]:
@@ -651,17 +981,110 @@ def workflow_graph_edge_count(metadata: dict[str, Any]) -> int:
 
 def workflow_graph_quality_failures(metadata: dict[str, Any]) -> list[str]:
     failures: list[str] = []
-    if metadata.get("graph_validation_acknowledged") is True:
-        return failures
     graph_errors = metadata.get("graph_validation_errors")
+    uncertain_edges = metadata.get("uncertain_edges")
+    uncertain_edges_count = int(metadata.get("uncertain_edges_count") or 0)
+    has_quality_issue = (
+        (isinstance(graph_errors, list) and bool(graph_errors))
+        or (isinstance(uncertain_edges, list) and bool(uncertain_edges))
+        or uncertain_edges_count > 0
+    )
+    if metadata.get("graph_validation_acknowledged") is True:
+        if has_quality_issue and not str(metadata.get("graph_validation_acknowledged_reason") or "").strip():
+            failures.append("workflow_graph_acknowledgement_reason_missing")
+        return failures
     if isinstance(graph_errors, list) and graph_errors:
         failures.append(f"workflow_graph_has_{len(graph_errors)}_validation_errors")
-    uncertain_edges = metadata.get("uncertain_edges")
     if isinstance(uncertain_edges, list) and uncertain_edges:
         failures.append(f"workflow_graph_has_{len(uncertain_edges)}_uncertain_edges")
-    if int(metadata.get("uncertain_edges_count") or 0) > 0:
-        failures.append(f"workflow_graph_has_{metadata.get('uncertain_edges_count')}_uncertain_edges")
+    if uncertain_edges_count > 0:
+        failures.append(f"workflow_graph_has_{uncertain_edges_count}_uncertain_edges")
     return list(dict.fromkeys(failures))
+
+
+def workflow_edge_key(edge: dict[str, Any]) -> str:
+    from_node = str(edge.get("from_node") or edge.get("from") or edge.get("source") or "").strip()
+    condition = str(edge.get("condition") or "").strip().lower()
+    to_node = str(edge.get("to_node") or edge.get("to") or edge.get("target") or "").strip()
+    return f"{from_node}|{condition}|{to_node}"
+
+
+def workflow_graph_decision_edge_failures(metadata: dict[str, Any]) -> list[str]:
+    graph = metadata.get("workflow_graph")
+    if not isinstance(graph, dict):
+        return []
+    edges = graph.get("edges")
+    nodes = graph.get("nodes")
+    if not isinstance(edges, list):
+        return []
+    node_map: dict[str, dict[str, Any]] = {}
+    if isinstance(nodes, list):
+        for node in nodes:
+            if isinstance(node, dict):
+                node_id = str(node.get("id") or "").strip()
+                if node_id:
+                    node_map[node_id] = node
+
+    reviews = metadata.get("workflow_edge_reviews")
+    if not isinstance(reviews, dict):
+        reviews = {}
+
+    decision_edges = []
+    missing_review = 0
+    rejected = 0
+    missing_reason = 0
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        if not is_workflow_decision_edge(edge, node_map):
+            continue
+        decision_edges.append(edge)
+        edge_review = reviews.get(workflow_edge_key(edge))
+        if not isinstance(edge_review, dict):
+            edge_review = {}
+        status = str(edge_review.get("status") or edge.get("review_status") or "").strip().lower()
+        reason = str(edge_review.get("reason") or edge.get("review_reason") or "").strip()
+        if status == "rejected":
+            rejected += 1
+            continue
+        if status not in {"confirmed", "acknowledged"}:
+            missing_review += 1
+            continue
+        if status == "acknowledged" and not reason:
+            missing_reason += 1
+
+    if not decision_edges and any(is_workflow_decision_node(node) for node in node_map.values()):
+        return ["workflow_graph_decision_edges_missing"]
+
+    failures: list[str] = []
+    if missing_review:
+        failures.append(f"workflow_graph_has_{missing_review}_decision_edges_need_review")
+    if rejected:
+        failures.append(f"workflow_graph_has_{rejected}_rejected_decision_edges")
+    if missing_reason:
+        failures.append(f"workflow_graph_has_{missing_reason}_edge_acknowledgements_missing_reason")
+    return failures
+
+
+def is_workflow_decision_edge(edge: dict[str, Any], node_map: dict[str, dict[str, Any]]) -> bool:
+    condition = normalize_phrase(str(edge.get("condition") or ""))
+    if condition in {"yes", "no", "co", "khong", "dung", "sai"} or "no response" in condition or "khong phan hoi" in condition:
+        return True
+    from_node_id = str(edge.get("from_node") or edge.get("from") or edge.get("source") or "").strip()
+    node = node_map.get(from_node_id)
+    if node and is_workflow_decision_node(node):
+        return True
+    return "decision" in normalize_phrase(from_node_id)
+
+
+def is_workflow_decision_node(node: dict[str, Any]) -> bool:
+    haystack = normalize_phrase(" ".join([
+        str(node.get("id") or ""),
+        str(node.get("type") or ""),
+        str(node.get("title") or ""),
+        str(node.get("question") or ""),
+    ]))
+    return "decision" in haystack or "quyet dinh" in haystack or bool(node.get("question")) or "?" in haystack
 
 
 def required_unit_types_from_metadata(metadata: dict[str, Any]) -> set[str]:
@@ -817,6 +1240,7 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
                 workflow_graph_confidence = 0
             workflow_graph_edges = workflow_graph_edge_count(metadata)
             workflow_graph_quality_errors.extend(workflow_graph_quality_failures(metadata))
+            workflow_graph_quality_errors.extend(workflow_graph_decision_edge_failures(metadata))
         if version["document_type"] == "workflow_diagram" and workflow_source_ref_ack_missing(metadata):
             workflow_source_ack_missing += 1
         if not has_required_source_ref(version["document_type"], metadata):
@@ -1484,6 +1908,34 @@ def update_extraction_unit(
                     "review_status": review_status,
                 },
             )
+            if metadata.get("graph_validation_acknowledged") is True and existing_metadata.get("graph_validation_acknowledged") is not True:
+                audit_tx(
+                    conn,
+                    actor=actor,
+                    action="workflow_graph_warning_acknowledge",
+                    entity_type="ai_chunk",
+                    entity_id=unit_id,
+                    metadata={
+                        "document_id": row["document_id"],
+                        "version_id": row["version_id"],
+                        "reason": str(metadata.get("graph_validation_acknowledged_reason") or ""),
+                        "validation_errors": metadata.get("graph_validation_errors") or existing_metadata.get("graph_validation_errors") or [],
+                        "uncertain_edges_count": metadata.get("uncertain_edges_count") or existing_metadata.get("uncertain_edges_count") or 0,
+                    },
+                )
+            if "workflow_edge_reviews" in metadata:
+                audit_tx(
+                    conn,
+                    actor=actor,
+                    action="workflow_edge_review_update",
+                    entity_type="ai_chunk",
+                    entity_id=unit_id,
+                    metadata={
+                        "document_id": row["document_id"],
+                        "version_id": row["version_id"],
+                        "edge_review_count": len(metadata.get("workflow_edge_reviews") or {}),
+                    },
+                )
             updated = conn.execute(
                 """
                 SELECT c.id::text AS unit_id,
