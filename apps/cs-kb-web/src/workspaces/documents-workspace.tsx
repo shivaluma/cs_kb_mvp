@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Archive, BookOpen, CheckCircle2, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, MessageSquareText, Network, Plus, RefreshCw, Search, ShieldCheck, TriangleAlert, Upload, WandSparkles } from "lucide-react";
+import { Archive, BookOpen, CheckCircle2, CircleHelp, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, MessageSquareText, Network, Plus, RefreshCw, Search, ShieldCheck, TriangleAlert, Upload, WandSparkles } from "lucide-react";
 
 import { DraftRetrievalPreview, ExtractionPipelineTrace, PublishTaskList, SopQualityAuditPanel, buildPublishTasks, buildSopQualityAudit } from "@/components/documents-review-insights";
 import { DocumentFact, ReadinessCheck } from "@/components/operations";
@@ -908,6 +908,7 @@ export function DocumentsWorkspace({
                 graphUnit={workflowGraphUnit}
                 confidence={workflowGraphConfidence}
                 onAcknowledge={(unit, reason) => onUpdateExtractionUnit(unit, buildWorkflowGraphAcknowledgement(unit, reason))}
+                onReviewOpenEdges={(unit, edges, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowBulkEdgeReviewUpdate(unit, edges, status, reason))}
                 onReviewEdge={(unit, edge, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowEdgeReviewUpdate(unit, edge, status, reason))}
                 saving={savingUnitId === workflowGraphUnit?.unit_id}
               />
@@ -1498,12 +1499,27 @@ function SourceViewer({
   );
 }
 
+function HelpTooltip({ text }: { text: string }) {
+  return (
+    <span
+      aria-label={text}
+      className="inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+      role="img"
+      tabIndex={0}
+      title={text}
+    >
+      <CircleHelp className="size-3.5" />
+    </span>
+  );
+}
+
 function WorkflowGraphPanel({
   canEdit,
   confidence,
   graph,
   graphUnit,
   onAcknowledge,
+  onReviewOpenEdges,
   onReviewEdge,
   saving,
 }: {
@@ -1512,6 +1528,7 @@ function WorkflowGraphPanel({
   graph?: WorkflowGraphMetadata;
   graphUnit?: ExtractionUnit;
   onAcknowledge: (unit: ExtractionUnit, reason: string) => void;
+  onReviewOpenEdges: (unit: ExtractionUnit, edges: WorkflowEdgeMetadata[], status: "acknowledged", reason: string) => void;
   onReviewEdge: (unit: ExtractionUnit, edge: WorkflowEdgeMetadata, status: "acknowledged" | "confirmed" | "rejected", reason: string) => void;
   saving: boolean;
 }) {
@@ -1534,6 +1551,17 @@ function WorkflowGraphPanel({
         ? "Enter at least 8 characters explaining why this warning is acceptable."
         : "";
   const edgeReviewSummary = buildWorkflowEdgeReviewSummary(graph, graphUnit);
+  const blockingDecisionEdges = workflowDecisionEdgesNeedingReview(graph, graphUnit);
+  const canUseSavedReasonForBranches = savedAcknowledgementReason.length >= 8;
+  const bulkAcknowledgeDisabledReason = !canEdit
+    ? "Inspect an editable draft version first."
+    : saving
+      ? "Saving branch reviews..."
+      : !canUseSavedReasonForBranches
+        ? "Acknowledge topology warnings with a reason first."
+        : !blockingDecisionEdges.length
+          ? "All decision branches are already reviewed."
+          : "";
   return (
     <Card className="rounded-xl">
       <CardHeader className="border-b pb-4">
@@ -1559,6 +1587,7 @@ function WorkflowGraphPanel({
               <div className="flex items-center gap-2 text-sm font-semibold">
                 <Network className="size-4" />
                 {graph.title ?? graphUnit.title}
+                <HelpTooltip text="Workflow graph là lớp review topology: nodes, edges, annotations, và các nhánh cần kiểm tra với source diagram trước publish." />
               </div>
               <p className="mt-2 text-xs leading-5 text-muted-foreground">
                 {String(graph.review_reason ?? graphUnit.metadata.review_reason ?? "Review graph branches and arrow direction before publish.")}
@@ -1580,7 +1609,10 @@ function WorkflowGraphPanel({
                 </div>
                 <div className="mt-3 grid gap-2 text-xs leading-5 text-muted-foreground md:grid-cols-2">
                   <div className="rounded-lg border bg-background p-3">
-                    <span className="font-semibold text-foreground">1. Topology warnings</span>
+                    <span className="inline-flex items-center gap-1 font-semibold text-foreground">
+                      1. Topology warnings
+                      <HelpTooltip text="Acknowledge phần này khi reviewer đã xem diagram và chấp nhận các warning tổng thể của graph, ví dụ confidence thấp, uncertain edges, hoặc validation warnings. Đây chưa phải review từng nhánh Yes/No." />
+                    </span>
                     <p className="mt-1">
                       {!acknowledged
                         ? "Compare the diagram/source, enter a reason, then click Acknowledge with reason."
@@ -1588,12 +1620,36 @@ function WorkflowGraphPanel({
                     </p>
                   </div>
                   <div className="rounded-lg border bg-background p-3">
-                    <span className="font-semibold text-foreground">2. Decision branches</span>
+                    <span className="inline-flex items-center gap-1 font-semibold text-foreground">
+                      2. Decision branches
+                      <HelpTooltip text="Review từng cạnh đi ra từ decision node. Confirm nếu nhánh rõ ràng đúng theo diagram. Ack nếu nhánh còn mơ hồ nhưng chấp nhận được sau khi xem source. Reject nếu nhánh sai và cần sửa graph." />
+                    </span>
                     <p className="mt-1">
                       {edgeReviewSummary.blockingCount
-                        ? "Use the branch table to Confirm correct Yes/No edges, or Ack ambiguous edges with a reason."
+                        ? "Confirm clear Yes/No edges, or acknowledge ambiguous edges using the saved topology reason."
                         : "Done. Required decision edges are confirmed or acknowledged."}
                     </p>
+                    {graphUnit && edgeReviewSummary.blockingCount ? (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          className="h-8"
+                          disabled={Boolean(bulkAcknowledgeDisabledReason)}
+                          onClick={() => onReviewOpenEdges(graphUnit, blockingDecisionEdges, "acknowledged", savedAcknowledgementReason)}
+                          size="sm"
+                          title="Acknowledge tất cả decision branches còn open bằng reason đã lưu ở topology. Chỉ dùng sau khi đã spot-check source diagram."
+                          type="button"
+                          variant="secondary"
+                        >
+                          {saving ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <ShieldCheck data-icon="inline-start" className="size-3.5" />}
+                          Ack remaining branches
+                        </Button>
+                        {bulkAcknowledgeDisabledReason ? (
+                          <p className="text-[11px] leading-4">{bulkAcknowledgeDisabledReason}</p>
+                        ) : (
+                          <p className="text-[11px] leading-4">Uses saved reason: {savedAcknowledgementReason}</p>
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -1614,16 +1670,18 @@ function WorkflowGraphPanel({
                     {acknowledged ? <Badge variant="outline">acknowledged</Badge> : null}
                     {graphUnit && !acknowledged ? (
                       <div className="flex flex-col gap-2 sm:min-w-80">
-                        <textarea
-                          className="min-h-16 rounded-md border bg-background px-3 py-2 text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                          onChange={(event) => setAcknowledgementReason(event.target.value)}
-                          placeholder="Required: why this graph warning is acceptable after checking the source."
-                          value={acknowledgementReason}
-                        />
+                      <textarea
+                        className="min-h-16 rounded-md border bg-background px-3 py-2 text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                        onChange={(event) => setAcknowledgementReason(event.target.value)}
+                        placeholder="Required: why this graph warning is acceptable after checking the source."
+                        title="Reason này lưu ở graph-level acknowledgement. Sau đó có thể dùng lại để acknowledge các branch còn mơ hồ."
+                        value={acknowledgementReason}
+                      />
                         <Button
                           disabled={Boolean(acknowledgementDisabledReason)}
                           onClick={() => onAcknowledge(graphUnit, acknowledgementReason.trim())}
                           size="sm"
+                          title="Lưu xác nhận rằng topology warning đã được reviewer kiểm tra và chấp nhận."
                           type="button"
                           variant="secondary"
                         >
@@ -1658,12 +1716,22 @@ function WorkflowGraphPanel({
                 <WorkflowMermaid graph={graph} />
               </div>
               <ScrollArea className="h-[30rem] rounded-xl border">
-                <WorkflowBranchTable canEdit={canEdit} graph={graph} graphUnit={graphUnit} onReviewEdge={onReviewEdge} saving={saving} />
+                <WorkflowBranchTable
+                  canEdit={canEdit}
+                  defaultAcknowledgementReason={savedAcknowledgementReason}
+                  graph={graph}
+                  graphUnit={graphUnit}
+                  onReviewEdge={onReviewEdge}
+                  saving={saving}
+                />
               </ScrollArea>
             </div>
             <div className="rounded-xl border bg-muted/15 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-semibold">Decision branch review</p>
+                <p className="inline-flex items-center gap-1 text-sm font-semibold">
+                  Decision branch review
+                  <HelpTooltip text="Bảng này là publish gate riêng cho workflow diagram. Mỗi nhánh Yes/No từ decision node phải được Confirm hoặc Ack trước khi graph được xem là reviewed." />
+                </p>
                 <div className="flex flex-wrap gap-2">
                   <Badge variant={edgeReviewSummary.blockingCount ? "destructive" : "secondary"}>
                     {edgeReviewSummary.reviewed}/{edgeReviewSummary.total} reviewed
@@ -1756,12 +1824,14 @@ function WorkflowUncertainEdgesPanel({
 
 function WorkflowBranchTable({
   canEdit,
+  defaultAcknowledgementReason,
   graph,
   graphUnit,
   onReviewEdge,
   saving,
 }: {
   canEdit: boolean;
+  defaultAcknowledgementReason: string;
   graph: WorkflowGraphMetadata;
   graphUnit?: ExtractionUnit;
   onReviewEdge: (unit: ExtractionUnit, edge: WorkflowEdgeMetadata, status: "acknowledged" | "confirmed" | "rejected", reason: string) => void;
@@ -1782,6 +1852,7 @@ function WorkflowBranchTable({
       rawFrom: edge.from_node,
       rawTo: edge.to_node,
       review,
+      reviewed: isWorkflowEdgeReviewed(review),
       to: resolver.resolve(edge.to_node),
     };
   });
@@ -1793,7 +1864,10 @@ function WorkflowBranchTable({
         <span>From</span>
         <span>Condition</span>
         <span>Next step</span>
-        <span>Review</span>
+        <span className="inline-flex items-center gap-1">
+          Review
+          <HelpTooltip text="Chỉ decision edges cần action. Non-decision edges hiển thị để tham khảo luồng, không cần Confirm/Ack." />
+        </span>
       </div>
       {branches.length ? branches.map((branch) => (
         <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_7rem_minmax(0,1fr)_12rem] gap-3 px-3 py-3 text-sm" key={`${branch.rawFrom}-${branch.rawTo}-${branch.index}`}>
@@ -1814,20 +1888,25 @@ function WorkflowBranchTable({
                 {branch.review.reason ? (
                   <p className="line-clamp-2 text-[11px] leading-4 text-muted-foreground">{branch.review.reason}</p>
                 ) : null}
-                {graphUnit && canEdit ? (
+                {graphUnit && canEdit && !branch.reviewed ? (
                   <div className="grid gap-1.5">
                     <textarea
                       className="min-h-14 rounded-md border bg-background px-2 py-1.5 text-[11px] leading-4 outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
                       onChange={(event) => setEdgeReasons((current) => ({ ...current, [branch.edgeKey]: event.target.value }))}
-                      placeholder="Reason for acknowledge/reject"
+                      placeholder={defaultAcknowledgementReason ? "Optional: blank uses saved topology reason" : "Reason for acknowledge/reject"}
+                      title="Chỉ cần nhập khi muốn dùng reason riêng cho branch này. Nếu để trống khi Ack, hệ thống dùng saved topology reason."
                       value={edgeReasons[branch.edgeKey] ?? ""}
                     />
+                    {defaultAcknowledgementReason ? (
+                      <p className="text-[11px] leading-4 text-muted-foreground">Blank Ack uses: {defaultAcknowledgementReason}</p>
+                    ) : null}
                     <div className="flex flex-wrap gap-1">
                       <Button
                         className="h-7 px-2 text-[11px]"
                         disabled={saving}
                         onClick={() => onReviewEdge(graphUnit, branch.edge, "confirmed", edgeReasons[branch.edgeKey] ?? "")}
                         size="sm"
+                        title="Confirm: nhánh này rõ ràng đúng theo source diagram, không cần reason."
                         type="button"
                         variant="outline"
                       >
@@ -1835,9 +1914,10 @@ function WorkflowBranchTable({
                       </Button>
                       <Button
                         className="h-7 px-2 text-[11px]"
-                        disabled={saving || (edgeReasons[branch.edgeKey] ?? "").trim().length < 8}
-                        onClick={() => onReviewEdge(graphUnit, branch.edge, "acknowledged", (edgeReasons[branch.edgeKey] ?? "").trim())}
+                        disabled={saving || workflowBranchEffectiveReason(edgeReasons[branch.edgeKey], defaultAcknowledgementReason).length < 8}
+                        onClick={() => onReviewEdge(graphUnit, branch.edge, "acknowledged", workflowBranchEffectiveReason(edgeReasons[branch.edgeKey], defaultAcknowledgementReason))}
                         size="sm"
+                        title="Ack: nhánh này còn mơ hồ nhưng reviewer chấp nhận sau khi xem source. Cần reason, hoặc dùng saved topology reason."
                         type="button"
                         variant="outline"
                       >
@@ -1848,6 +1928,7 @@ function WorkflowBranchTable({
                         disabled={saving || (edgeReasons[branch.edgeKey] ?? "").trim().length < 8}
                         onClick={() => onReviewEdge(graphUnit, branch.edge, "rejected", (edgeReasons[branch.edgeKey] ?? "").trim())}
                         size="sm"
+                        title="Reject: nhánh sai, cần reason để người sau biết graph phải sửa ở đâu."
                         type="button"
                         variant="ghost"
                       >
@@ -2170,16 +2251,12 @@ function buildWorkflowEdgeReviewSummary(graph?: WorkflowGraphMetadata, graphUnit
       rejected += 1;
       return;
     }
-    if (review.status === "confirmed") {
+    if (isWorkflowEdgeReviewed(review)) {
       reviewed += 1;
       return;
     }
-    if (review.status === "acknowledged") {
-      if (review.reason) {
-        reviewed += 1;
-      } else {
-        missingReason += 1;
-      }
+    if (review.status === "acknowledged" && !review.reason) {
+      missingReason += 1;
     }
   });
   return {
@@ -2189,6 +2266,14 @@ function buildWorkflowEdgeReviewSummary(graph?: WorkflowGraphMetadata, graphUnit
     reviewed,
     total,
   };
+}
+
+function workflowDecisionEdgesNeedingReview(graph?: WorkflowGraphMetadata, graphUnit?: ExtractionUnit) {
+  return (graph?.edges ?? []).filter((edge) => isDecisionWorkflowEdge(edge, graph) && !isWorkflowEdgeReviewed(workflowEdgeReview(graphUnit, edge)));
+}
+
+function isWorkflowEdgeReviewed(review: { reason?: string; status?: string }) {
+  return review.status === "confirmed" || (review.status === "acknowledged" && Boolean(review.reason));
 }
 
 function workflowEdgeReview(graphUnit: ExtractionUnit | undefined, edge: WorkflowEdgeMetadata) {
@@ -2204,6 +2289,10 @@ function workflowEdgeReview(graphUnit: ExtractionUnit | undefined, edge: Workflo
 
 function workflowEdgeKey(edge: WorkflowEdgeMetadata) {
   return `${String(edge.from_node ?? "").trim()}|${String(edge.condition ?? "").trim().toLowerCase()}|${String(edge.to_node ?? "").trim()}`;
+}
+
+function workflowBranchEffectiveReason(inputReason: string | undefined, defaultReason: string) {
+  return (inputReason ?? "").trim() || defaultReason.trim();
 }
 
 function isDecisionWorkflowEdge(edge: WorkflowEdgeMetadata, graph?: WorkflowGraphMetadata) {
@@ -2473,6 +2562,47 @@ function buildWorkflowEdgeReviewUpdate(
     status,
     to_node: edge.to_node ?? "",
   };
+  return {
+    title: unit.title,
+    content: unit.content,
+    unit_type: unit.unit_type,
+    confidence: unit.confidence,
+    review_status: unit.review_status === "approved" ? "approved" : "reviewed",
+    actor: "cs-lead-ui",
+    metadata: {
+      ...unit.metadata,
+      review_status: unit.review_status === "approved" ? "approved" : "reviewed",
+      unit_type: unit.unit_type,
+      workflow_edge_reviews: reviews,
+      workflow_edge_reviews_updated_at: now,
+      workflow_edge_reviews_updated_by: "cs-lead-ui",
+    },
+  };
+}
+
+function buildWorkflowBulkEdgeReviewUpdate(
+  unit: ExtractionUnit,
+  edges: WorkflowEdgeMetadata[],
+  status: "acknowledged",
+  reason: string,
+): ExtractionUnitUpdate {
+  const now = new Date().toISOString();
+  const reviews = {
+    ...(typeof unit.metadata.workflow_edge_reviews === "object" && !Array.isArray(unit.metadata.workflow_edge_reviews)
+      ? unit.metadata.workflow_edge_reviews as Record<string, unknown>
+      : {}),
+  };
+  edges.forEach((edge) => {
+    reviews[workflowEdgeKey(edge)] = {
+      condition: edge.condition ?? "",
+      from_node: edge.from_node ?? "",
+      reason,
+      reviewed_at: now,
+      reviewed_by: "cs-lead-ui",
+      status,
+      to_node: edge.to_node ?? "",
+    };
+  });
   return {
     title: unit.title,
     content: unit.content,
