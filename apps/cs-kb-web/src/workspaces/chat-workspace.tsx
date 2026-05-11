@@ -1,11 +1,32 @@
-import { AlertTriangle, BookOpen, Clipboard, Loader2, MessageSquareText, Search, Send, ShieldCheck, SlidersHorizontal, type LucideIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowUp,
+  BookOpen,
+  CheckCircle2,
+  Clipboard,
+  ClipboardList,
+  Clock3,
+  FileText,
+  Gauge,
+  Loader2,
+  MessageSquareText,
+  Route,
+  Search,
+  ShieldCheck,
+  type LucideIcon,
+} from "lucide-react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 
-import { EmptyPanel } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 import type { ChatModelRoute, ChatModelRouteConfig, ChatThreadMessage, RetrievalResult } from "@/types";
 
 const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
@@ -35,6 +56,33 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
   },
 ];
 
+const PROMPT_SUGGESTIONS: Array<{
+  icon: LucideIcon;
+  label: string;
+  prompt: string;
+}> = [
+  {
+    icon: ClipboardList,
+    label: "Check next step",
+    prompt: "case này cần kiểm tra thông tin nào trước?",
+  },
+  {
+    icon: Route,
+    label: "Escalation rule",
+    prompt: "khi nào cần chuyển xử lý cho team liên quan?",
+  },
+  {
+    icon: AlertTriangle,
+    label: "Risk scan",
+    prompt: "có cảnh báo bảo mật hoặc compliance nào không?",
+  },
+  {
+    icon: FileText,
+    label: "Draft macro",
+    prompt: "macro phản hồi phù hợp là gì?",
+  },
+];
+
 export function ChatWorkspace({
   busy,
   fallbackModel,
@@ -59,16 +107,15 @@ export function ChatWorkspace({
   onOpenQuickSource: (source: RetrievalResult) => void;
 }) {
   const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const routeOptions = modelRoutes?.length ? modelRoutes : FALLBACK_CHAT_MODEL_ROUTES;
   const selectedModelRoute = routeOptions.find((route) => route.route === modelRoute) ?? routeOptions[0];
-  const examples = useMemo(
-    () => [
-      "case này cần kiểm tra thông tin nào trước?",
-      "khi nào cần chuyển xử lý cho team liên quan?",
-      "có cảnh báo bảo mật hoặc compliance nào không?",
-      "macro phản hồi phù hợp là gì?",
-    ],
-    [],
+  const latestAssistantResponse = useMemo(
+    () =>
+      [...messages]
+        .reverse()
+        .find((message) => message.role === "assistant" && message.response)?.response,
+    [messages],
   );
 
   function submit(question = draft) {
@@ -80,69 +127,57 @@ export function ChatWorkspace({
     setDraft("");
   }
 
+  function primePrompt(prompt: string) {
+    setDraft(prompt);
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(prompt.length, prompt.length);
+    });
+  }
+
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_21rem]">
-      <section className="min-w-0 rounded-xl border bg-card">
-        <div className="border-b p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]">
+      <section className="min-w-0 overflow-hidden rounded-xl border bg-card shadow-sm">
+        <div className="border-b bg-muted/20 px-4 py-3">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-sm font-semibold">
-                <MessageSquareText className="size-4" />
+                <MessageSquareText className="size-4 text-muted-foreground" />
                 SOP-grounded assistant
               </div>
-              <p className="mt-1 max-w-[76ch] text-sm leading-5 text-muted-foreground">
-                Answers are generated only after retrieving published curated SOP units. No raw uploads, drafts, archived versions, or model memory.
+              <p className="mt-1 max-w-[72ch] text-xs leading-5 text-muted-foreground">
+                Hỏi nhanh từ SOP đã publish. Câu trả lời cần citation, route và confidence rõ ràng.
               </p>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="outline">published only</Badge>
-              <Badge variant="outline">citations required</Badge>
-              <Badge variant="outline">no policy invention</Badge>
-              <Badge variant="default">{selectedModelRoute.label}</Badge>
+            <div className="flex flex-wrap gap-1.5">
+              <StatusPill icon={ShieldCheck} text="published only" />
+              <StatusPill icon={BookOpen} text="citations required" />
+              <StatusPill icon={Gauge} text={selectedModelRoute.route.replace("_", " ")} />
             </div>
           </div>
         </div>
 
-        <ScrollArea className="h-[calc(100svh-22rem)] min-h-[34rem]">
-          <div className="grid gap-4 p-4">
-            {messages.length === 0 ? (
-              <EmptyPanel
-                icon={ShieldCheck}
-                title="Ask from approved SOPs"
-                text="Use this when you need an actionable answer but do not yet know which SOP or rule to open."
+        <ScrollChatArea hasMessages={messages.length > 0}>
+          {messages.length === 0 ? (
+            <EmptyChatState onPromptClick={primePrompt} />
+          ) : (
+            messages.map((message) => (
+              <ChatBubble
+                key={message.id}
+                message={message}
+                onCopy={onCopy}
+                onOpenDocument={onOpenDocument}
+                onOpenQuickSource={onOpenQuickSource}
               />
-            ) : (
-              messages.map((message) => (
-                <ChatBubble
-                  key={message.id}
-                  message={message}
-                  onCopy={onCopy}
-                  onOpenDocument={onOpenDocument}
-                  onOpenQuickSource={onOpenQuickSource}
-                />
-              ))
-            )}
-          </div>
-        </ScrollArea>
+            ))
+          )}
+        </ScrollChatArea>
 
         <div className="border-t bg-background p-3">
-          <div className="mb-2 flex flex-wrap gap-2">
-            {examples.map((example) => (
-              <Button
-                disabled={busy}
-                key={example}
-                onClick={() => submit(example)}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                {example}
-              </Button>
-            ))}
-          </div>
-          <div className="grid gap-2 rounded-xl border bg-card p-2">
+          <div className="rounded-xl border bg-card shadow-sm transition-shadow focus-within:shadow-md">
             <textarea
-              className="min-h-24 resize-none rounded-lg bg-transparent px-2 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-3 focus-visible:ring-ring/30"
+              ref={inputRef}
+              className="min-h-20 max-h-40 w-full resize-none rounded-t-xl bg-transparent px-3 py-3 text-sm leading-6 outline-none placeholder:text-muted-foreground focus-visible:ring-0 disabled:cursor-not-allowed disabled:opacity-60"
               disabled={busy}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
@@ -150,87 +185,220 @@ export function ChatWorkspace({
                   submit();
                 }
               }}
-              placeholder="Ask a CS case question, for example: KH không nhận được email thì CS xử lý sao?"
+              placeholder="Ask a CS case question, ví dụ: KH không nhận được email thì CS xử lý sao?"
               value={draft}
             />
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs text-muted-foreground">⌘ Enter to ask. The assistant will refuse unsupported answers.</p>
-              <Button disabled={!draft.trim() || busy} onClick={() => submit()} type="button">
-                {busy ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Send data-icon="inline-start" className="size-4" />}
-                Ask SOP
+            <div className="flex min-h-11 flex-wrap items-center gap-2 border-t px-2 py-2">
+              <Route className="size-4 text-muted-foreground" />
+              <Select
+                disabled={busy}
+                onValueChange={(value) => onModelRouteChange(value as ChatModelRoute)}
+                value={modelRoute}
+              >
+                <SelectTrigger
+                  aria-label="Select model route"
+                  className="h-7 border-0 bg-transparent px-0 text-muted-foreground shadow-none hover:text-foreground focus-visible:ring-0"
+                  size="sm"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="start" className="w-72">
+                  {routeOptions.map((route) => (
+                    <SelectItem key={route.route} value={route.route}>
+                      {route.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <Badge className="hidden sm:inline-flex" variant="outline">
+                {selectedModelRoute.model}
+              </Badge>
+              <span className="hidden text-xs text-muted-foreground md:inline">⌘ Enter</span>
+
+              <Button
+                aria-label="Send message"
+                className={cn("ml-auto rounded-full", draft.trim() && "shadow-sm")}
+                disabled={!draft.trim() || busy}
+                onClick={() => submit()}
+                size="icon-sm"
+                title="Ask SOP"
+                type="button"
+              >
+                {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
               </Button>
             </div>
+          </div>
+
+          <div className="mt-2 flex flex-wrap gap-2">
+            {PROMPT_SUGGESTIONS.map((suggestion) => (
+              <PromptButton
+                busy={busy}
+                key={suggestion.label}
+                onClick={() => primePrompt(suggestion.prompt)}
+                suggestion={suggestion}
+              />
+            ))}
           </div>
         </div>
       </section>
 
-      <aside className="space-y-4">
-        <Card className="rounded-xl">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <SlidersHorizontal className="size-4" />
-              Model test route
-            </CardTitle>
-            <CardDescription>Override router để so sánh chất lượng model trên cùng một bộ SOP published.</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-3 text-sm">
-            <label className="grid gap-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Route</span>
-              <select
-                className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={busy}
-                onChange={(event) => onModelRouteChange(event.target.value as ChatModelRoute)}
-                value={modelRoute}
-              >
-                {routeOptions.map((route) => (
-                  <option key={route.route} value={route.route}>
-                    {route.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="rounded-lg border bg-background p-3">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Badge variant="default">manual/default</Badge>
-                <Badge variant="outline">{selectedModelRoute.model}</Badge>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedModelRoute.description}</p>
-              {fallbackModel ? <p className="mt-2 text-[11px] text-muted-foreground">Fallback: {fallbackModel}</p> : null}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-xl">
-          <CardHeader>
-            <CardTitle>Guardrails</CardTitle>
-            <CardDescription>Designed as an SOP assistant, not a general chatbot.</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-3 text-sm">
-            <Guardrail icon={ShieldCheck} title="Source scope" text="Only latest published document versions are retrieved." />
-            <Guardrail icon={BookOpen} title="Citation gate" text="No reliable citation means no operational answer." />
-            <Guardrail icon={AlertTriangle} title="Policy safety" text="Refund, compensation, security, and escalation claims must be explicitly sourced." />
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-xl">
-          <CardHeader>
-            <CardTitle>Good prompts</CardTitle>
-            <CardDescription>Use operational wording and include the case context you know.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {examples.map((example) => (
-              <button
-                className="w-full rounded-lg border bg-background px-3 py-2 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
-                key={example}
-                onClick={() => submit(example)}
-                type="button"
-              >
-                {example}
-              </button>
-            ))}
-          </CardContent>
-        </Card>
+      <aside className="space-y-3">
+        <RoutePanel
+          fallbackModel={fallbackModel}
+          latestAssistantResponse={latestAssistantResponse}
+          selectedModelRoute={selectedModelRoute}
+        />
+        <GroundingPanel />
       </aside>
+    </div>
+  );
+}
+
+function ScrollChatArea({ children, hasMessages }: { children: ReactNode; hasMessages: boolean }) {
+  return (
+    <div
+      className={cn(
+        "h-[calc(100svh-23rem)] min-h-[28rem] overflow-y-auto",
+        hasMessages ? "bg-background" : "bg-muted/10",
+      )}
+    >
+      <div className="grid gap-3 p-4">{children}</div>
+    </div>
+  );
+}
+
+function EmptyChatState({ onPromptClick }: { onPromptClick: (prompt: string) => void }) {
+  return (
+    <div className="mx-auto grid min-h-[26rem] max-w-2xl place-items-center px-3 text-center">
+      <div>
+        <div className="mx-auto flex size-10 items-center justify-center rounded-xl border bg-card text-muted-foreground shadow-sm">
+          <ShieldCheck className="size-5" />
+        </div>
+        <h2 className="mt-4 text-base font-semibold">Ask from approved SOPs</h2>
+        <p className="mx-auto mt-2 max-w-[56ch] text-sm leading-6 text-muted-foreground">
+          Dùng cho case cần câu trả lời có thể hành động, nhưng vẫn phải bám source published, citation và rule hiện hành.
+        </p>
+        <div className="mt-4 flex flex-wrap justify-center gap-2">
+          {PROMPT_SUGGESTIONS.slice(0, 3).map((suggestion) => (
+            <PromptButton
+              busy={false}
+              key={suggestion.label}
+              onClick={() => onPromptClick(suggestion.prompt)}
+              suggestion={suggestion}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PromptButton({
+  busy,
+  onClick,
+  suggestion,
+}: {
+  busy: boolean;
+  onClick: () => void;
+  suggestion: {
+    icon: LucideIcon;
+    label: string;
+    prompt: string;
+  };
+}) {
+  const Icon = suggestion.icon;
+  return (
+    <Button
+      className="h-8 rounded-full border bg-background px-3 text-xs text-foreground hover:bg-muted/60"
+      disabled={busy}
+      onClick={onClick}
+      type="button"
+      variant="ghost"
+    >
+      <Icon data-icon="inline-start" className="size-3.5 text-muted-foreground transition-colors group-hover/button:text-foreground" />
+      {suggestion.label}
+    </Button>
+  );
+}
+
+function StatusPill({ icon: Icon, text }: { icon: LucideIcon; text: string }) {
+  return (
+    <span className="inline-flex h-7 items-center gap-1.5 rounded-full border bg-background px-2.5 text-xs font-medium text-muted-foreground">
+      <Icon className="size-3.5" />
+      {text}
+    </span>
+  );
+}
+
+function RoutePanel({
+  fallbackModel,
+  latestAssistantResponse,
+  selectedModelRoute,
+}: {
+  fallbackModel?: string;
+  latestAssistantResponse?: ChatThreadMessage["response"];
+  selectedModelRoute: ChatModelRouteConfig;
+}) {
+  return (
+    <section className="rounded-xl border bg-card p-3 shadow-sm">
+      <div className="flex items-center gap-2">
+        <Route className="size-4 text-muted-foreground" />
+        <h2 className="text-sm font-semibold">Route detail</h2>
+      </div>
+      <div className="mt-3 rounded-lg border bg-muted/20 p-3">
+        <div className="flex flex-wrap gap-1.5">
+          <Badge variant="default">{selectedModelRoute.label}</Badge>
+          <Badge variant="outline">{selectedModelRoute.route}</Badge>
+        </div>
+        <p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedModelRoute.description}</p>
+        <p className="mt-2 truncate text-[11px] text-muted-foreground">{selectedModelRoute.model}</p>
+      </div>
+      {latestAssistantResponse ? (
+        <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+          <MiniStat label="Cites" value={latestAssistantResponse.citations.length} />
+          <MiniStat label="Conf" value={`${Math.round(latestAssistantResponse.confidence * 100)}%`} />
+          <MiniStat label="ms" value={latestAssistantResponse.latency_ms} />
+        </div>
+      ) : null}
+      {fallbackModel ? <p className="mt-3 truncate text-[11px] text-muted-foreground">Fallback: {fallbackModel}</p> : null}
+    </section>
+  );
+}
+
+function GroundingPanel() {
+  return (
+    <section className="rounded-xl border bg-card p-3 shadow-sm">
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="size-4 text-muted-foreground" />
+        <h2 className="text-sm font-semibold">Grounding rules</h2>
+      </div>
+      <div className="mt-3 grid gap-2">
+        <RuleRow icon={CheckCircle2} title="Published only" text="Không dùng draft, archived, raw upload." />
+        <RuleRow icon={BookOpen} title="Citation gate" text="Không có source đáng tin thì phải từ chối." />
+        <RuleRow icon={AlertTriangle} title="High-risk claims" text="Refund, privacy, payment phải được source rõ." />
+      </div>
+    </section>
+  );
+}
+
+function MiniStat({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="rounded-lg border bg-background px-2 py-2">
+      <div className="truncate text-sm font-semibold tabular-nums">{value}</div>
+      <div className="mt-0.5 text-[10px] uppercase text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+function RuleRow({ icon: Icon, text, title }: { icon: LucideIcon; text: string; title: string }) {
+  return (
+    <div className="flex gap-2 rounded-lg border bg-background px-2.5 py-2">
+      <Icon className="mt-0.5 size-3.5 text-muted-foreground" />
+      <div className="min-w-0">
+        <p className="text-xs font-medium">{title}</p>
+        <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{text}</p>
+      </div>
     </div>
   );
 }
@@ -249,66 +417,94 @@ function ChatBubble({
   const isUser = message.role === "user";
   const response = message.response;
   return (
-    <article className={isUser ? "ml-auto max-w-[80%]" : "mr-auto max-w-[92%]"}>
-      <div className={isUser ? "rounded-xl bg-primary px-4 py-3 text-primary-foreground" : "rounded-xl border bg-background px-4 py-3"}>
+    <article className={cn("min-w-0", isUser ? "ml-auto w-fit max-w-[82%]" : "mr-auto w-full max-w-[54rem]")}>
+      <div
+        className={cn(
+          "rounded-xl px-3.5 py-3",
+          isUser ? "bg-primary text-primary-foreground" : "border bg-card shadow-sm",
+        )}
+      >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Badge variant={isUser ? "secondary" : "outline"}>{isUser ? "CS question" : "Grounded answer"}</Badge>
           {message.pending ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
         </div>
         <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{message.content}</p>
         {response ? (
-          <div className="mt-4 grid gap-4">
+          <div className="mt-4 grid gap-3">
+            <ResponseMeta response={response} onCopy={onCopy} />
             {response.steps.length ? (
-              <div className="rounded-lg border bg-muted/15 p-3">
+              <section className="rounded-lg border bg-muted/15 p-3">
                 <p className="text-xs font-semibold text-muted-foreground">Action steps</p>
                 <ol className="mt-2 list-decimal space-y-1 pl-4 text-sm leading-6">
                   {response.steps.map((step, index) => (
                     <li key={`${step}-${index}`}>{step}</li>
                   ))}
                 </ol>
-              </div>
+              </section>
             ) : null}
             {response.warnings.length ? (
-              <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3">
+              <section className="rounded-lg border border-destructive/25 bg-destructive/5 p-3">
                 <p className="text-xs font-semibold text-destructive">Warnings</p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {response.warnings.slice(0, 8).map((warning, index) => (
-                    <Badge key={`${warning}-${index}`} variant="outline">{warning}</Badge>
+                    <Badge key={`${warning}-${index}`} variant="outline">
+                      {warning}
+                    </Badge>
                   ))}
                 </div>
-              </div>
+              </section>
             ) : null}
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={response.citations.length ? "secondary" : "destructive"}>
-                {response.citations.length ? `${response.citations.length} citations` : "no citation"}
-              </Badge>
-              <Badge variant="outline">{Math.round(response.confidence * 100)}% confidence</Badge>
-              {response.model_route ? <Badge variant="outline">{response.model_route}</Badge> : null}
-              {response.model_used ? <Badge variant="outline">{response.model_used}</Badge> : null}
-              <Badge variant="outline">{response.latency_ms}ms</Badge>
-              <Button onClick={() => onCopy(response.answer)} size="sm" type="button" variant="outline">
-                <Clipboard data-icon="inline-start" className="size-4" />
-                Copy answer
-              </Button>
-            </div>
-            {response.model_reason ? <p className="text-xs text-muted-foreground">Model routing: {response.model_reason}</p> : null}
+            {response.model_reason ? (
+              <p className="rounded-lg bg-muted/25 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                Model routing: {response.model_reason}
+              </p>
+            ) : null}
             {response.sources.length ? (
-              <div className="grid gap-2">
+              <section className="grid gap-2">
                 <p className="text-xs font-semibold text-muted-foreground">Published sources used</p>
-                {response.sources.slice(0, 4).map((source) => (
-                  <SourceCard
-                    key={source.chunk_id}
-                    onOpenDocument={onOpenDocument}
-                    onOpenQuickSource={onOpenQuickSource}
-                    source={source}
-                  />
-                ))}
-              </div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  {response.sources.slice(0, 4).map((source) => (
+                    <SourceCard
+                      key={source.chunk_id}
+                      onOpenDocument={onOpenDocument}
+                      onOpenQuickSource={onOpenQuickSource}
+                      source={source}
+                    />
+                  ))}
+                </div>
+              </section>
             ) : null}
           </div>
         ) : null}
       </div>
     </article>
+  );
+}
+
+function ResponseMeta({
+  onCopy,
+  response,
+}: {
+  onCopy: (text: string) => void;
+  response: NonNullable<ChatThreadMessage["response"]>;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Badge variant={response.citations.length ? "secondary" : "destructive"}>
+        {response.citations.length ? `${response.citations.length} citations` : "no citation"}
+      </Badge>
+      <Badge variant="outline">{Math.round(response.confidence * 100)}% confidence</Badge>
+      {response.model_route ? <Badge variant="outline">{response.model_route}</Badge> : null}
+      {response.model_used ? <Badge className="max-w-52 truncate" variant="outline">{response.model_used}</Badge> : null}
+      <Badge variant="outline">
+        <Clock3 data-icon="inline-start" className="size-3" />
+        {response.latency_ms}ms
+      </Badge>
+      <Button className="ml-auto" onClick={() => onCopy(response.answer)} size="sm" type="button" variant="outline">
+        <Clipboard data-icon="inline-start" className="size-4" />
+        Copy
+      </Button>
+    </div>
   );
 }
 
@@ -323,48 +519,24 @@ function SourceCard({
 }) {
   const unitType = String(source.metadata.unit_type ?? source.section);
   return (
-    <div className="rounded-lg border bg-card p-3">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex flex-wrap gap-1.5">
-            <Badge variant="outline">{unitType}</Badge>
-            <Badge variant="outline">v{source.version_number}</Badge>
-            <Badge variant="outline">{source.rank_source.join("+") || "retrieval"}</Badge>
-          </div>
-          <p className="mt-2 text-sm font-semibold leading-5">{source.heading || source.title}</p>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{source.content}</p>
-          <p className="mt-2 truncate text-[11px] text-muted-foreground">{source.source_filename}</p>
-        </div>
+    <div className="min-w-0 rounded-lg border bg-background p-3">
+      <div className="flex flex-wrap gap-1.5">
+        <Badge variant="outline">{unitType}</Badge>
+        <Badge variant="outline">v{source.version_number}</Badge>
+        <Badge variant="outline">{source.rank_source.join("+") || "retrieval"}</Badge>
       </div>
+      <p className="mt-2 line-clamp-2 text-sm font-semibold leading-5">{source.heading || source.title}</p>
+      <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{source.content}</p>
+      <p className="mt-2 truncate text-[11px] text-muted-foreground">{source.source_filename}</p>
       <div className="mt-3 flex flex-wrap gap-2">
         <Button onClick={() => onOpenQuickSource(source)} size="sm" type="button" variant="outline">
           <Search data-icon="inline-start" className="size-4" />
-          Open quick rule
+          Quick rule
         </Button>
         <Button onClick={() => onOpenDocument(source)} size="sm" type="button" variant="ghost">
           <BookOpen data-icon="inline-start" className="size-4" />
-          Open source
+          Source
         </Button>
-      </div>
-    </div>
-  );
-}
-
-function Guardrail({
-  icon: Icon,
-  text,
-  title,
-}: {
-  icon: LucideIcon;
-  text: string;
-  title: string;
-}) {
-  return (
-    <div className="flex gap-3 rounded-lg border bg-background p-3">
-      <Icon className="mt-0.5 size-4 text-muted-foreground" />
-      <div>
-        <p className="text-sm font-medium">{title}</p>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">{text}</p>
       </div>
     </div>
   );
