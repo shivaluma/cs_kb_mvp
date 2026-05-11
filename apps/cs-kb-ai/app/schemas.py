@@ -55,6 +55,12 @@ ExtractionUnitType = Literal[
     "candidate_table_row",
     "candidate_workflow_text",
     "candidate_step",
+    "candidate_action",
+    "candidate_decision",
+    "candidate_annotation",
+    "candidate_sla",
+    "candidate_audit_rule",
+    "candidate_queue_rule",
 ]
 SynonymType = Literal["regular", "one_way", "typo_correction", "placeholder"]
 SynonymStatus = Literal["draft", "in_review", "active", "archived", "rejected"]
@@ -251,11 +257,39 @@ class WorkflowNode(BaseModel):
     question: str = ""
     source_refs: list[SourceRef] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_node_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        for key in ("id", "type", "actor", "phase", "title", "content", "question"):
+            raw = normalized.get(key)
+            normalized[key] = "" if raw in (None, "null") else str(raw)
+        title = normalized.get("title") or normalized.get("question") or normalized.get("content") or normalized.get("id") or "Workflow node"
+        normalized["title"] = str(title)[:240]
+        if not normalized.get("type"):
+            normalized["type"] = "action"
+        if not normalized.get("id"):
+            normalized["id"] = stable_node_id(str(title), 1)
+        return normalized
+
 
 class WorkflowEdge(BaseModel):
     from_node: str = Field(min_length=1, max_length=120)
     to_node: str = Field(min_length=1, max_length=120)
     condition: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_edge_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        normalized["from_node"] = str(normalized.get("from_node") or normalized.get("from") or normalized.get("source") or "")
+        normalized["to_node"] = str(normalized.get("to_node") or normalized.get("to") or normalized.get("target") or "")
+        normalized["condition"] = str(normalized.get("condition") or "next")
+        return normalized
 
 
 class WorkflowAnnotation(BaseModel):
@@ -267,6 +301,20 @@ class WorkflowAnnotation(BaseModel):
     risk_level: str = ""
     source_refs: list[SourceRef] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_annotation_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        content = normalized.get("content") or normalized.get("text") or normalized.get("note") or normalized.get("description") or normalized.get("title") or ""
+        normalized["content"] = str(content)
+        normalized["title"] = str(normalized.get("title") or content or "Workflow annotation")[:180]
+        normalized["type"] = str(normalized.get("type") or normalized.get("unit_type") or "annotation")
+        normalized["id"] = str(normalized.get("id") or stable_node_id(normalized["title"], 1))
+        normalized["attached_to"] = str(normalized.get("attached_to") or normalized.get("attached_to_node_id") or "")
+        return normalized
+
 
 class WorkflowUncertainEdge(BaseModel):
     from_node: str = Field(default="", max_length=120)
@@ -276,13 +324,29 @@ class WorkflowUncertainEdge(BaseModel):
     confidence: float = Field(default=0.0, ge=0, le=1)
     source_refs: list[SourceRef] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_uncertain_edge_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        normalized["from_node"] = str(normalized.get("from_node") or normalized.get("from") or normalized.get("source") or "")
+        normalized["to_node"] = str(normalized.get("to_node") or normalized.get("to") or normalized.get("target") or "")
+        normalized["condition"] = str(normalized.get("condition") or "next")
+        normalized["reason"] = str(normalized.get("reason") or "topology_needs_manual_review")
+        return normalized
+
 
 class WorkflowGraph(BaseModel):
     workflow_id: str = Field(min_length=1, max_length=160)
     title: str = Field(min_length=1, max_length=240)
     start_node_id: str = Field(min_length=1, max_length=120)
+    lanes: list[dict[str, Any]] = Field(default_factory=list)
     nodes: list[WorkflowNode] = Field(min_length=1)
     edges: list[WorkflowEdge] = Field(default_factory=list)
+    annotations: list[WorkflowAnnotation] = Field(default_factory=list)
+    warnings: list[WorkflowAnnotation] = Field(default_factory=list)
+    uncertain_edges: list[WorkflowUncertainEdge] = Field(default_factory=list)
     graph_confidence: float = Field(ge=0, le=1)
     requires_human_review: bool = True
     review_reason: str = ""
@@ -292,6 +356,9 @@ class WorkflowGraph(BaseModel):
     def normalize_graph_payload(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
+        graph_title = str(value.get("title") or value.get("name") or "Workflow graph").strip()
+        value["title"] = graph_title[:240] or "Workflow graph"
+        value["workflow_id"] = str(value.get("workflow_id") or stable_node_id(graph_title, 1))
         nodes = value.get("nodes")
         if isinstance(nodes, list):
             normalized_nodes = []
@@ -371,6 +438,14 @@ class WorkflowExtractionPayload(BaseModel):
                 warnings.append("workflow_graph_missing_from_model_synthesized_for_review")
             value["workflow_graph"] = workflow_graph
             warnings.append("legacy_or_missing_workflow_graph_normalized")
+
+        workflow_graph = value.get("workflow_graph") if isinstance(value.get("workflow_graph"), dict) else {}
+        if not value.get("annotations") and isinstance(workflow_graph.get("annotations"), list):
+            value["annotations"] = workflow_graph.get("annotations")
+            warnings.append("workflow_graph_annotations_promoted")
+        if not value.get("uncertain_edges") and isinstance(workflow_graph.get("uncertain_edges"), list):
+            value["uncertain_edges"] = workflow_graph.get("uncertain_edges")
+            warnings.append("workflow_graph_uncertain_edges_promoted")
 
         value["atomic_units"] = [
             ensure_unit_source_refs(unit)

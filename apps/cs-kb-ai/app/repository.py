@@ -1313,6 +1313,12 @@ def promoted_unit_type(unit_type: str, document_type: str) -> str:
         "candidate_table_row": "policy_rule",
         "candidate_workflow_text": "workflow_overview",
         "candidate_step": "workflow_step",
+        "candidate_action": "workflow_step",
+        "candidate_decision": "decision_point",
+        "candidate_annotation": "operational_note",
+        "candidate_sla": "sla_rule",
+        "candidate_audit_rule": "warning",
+        "candidate_queue_rule": "routing_rule",
     }
     if unit_type in mapping:
         return mapping[unit_type]

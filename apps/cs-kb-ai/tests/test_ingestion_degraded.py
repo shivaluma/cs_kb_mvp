@@ -7,7 +7,7 @@ from docx import Document
 from openpyxl import Workbook
 
 from app import ingestion
-from app.schemas import DocumentMetadata, ExtractedUnitsPayload
+from app.schemas import DocumentMetadata, ExtractedUnitsPayload, WorkflowExtractionPayload
 
 
 class IngestionDegradedDraftTest(unittest.TestCase):
@@ -252,6 +252,140 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertFalse(visual_candidate.metadata["source_ref_acknowledged"])
         self.assertEqual(visual_candidate.metadata["source_refs"][0]["bbox"], [10, 20, 120, 80])
 
+    def test_workflow_semantic_refine_merges_duplicate_nodes_and_keeps_uncertain_edges(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        refinement = ingestion.build_workflow_semantic_refinement(
+            filename="workflow.pdf",
+            visual_layout=workflow_visual_layout_fixture(),
+            source_blocks=[],
+            classification=classification,
+        )
+
+        self.assertGreaterEqual(refinement["summary"]["deduped_count"], 1)
+        graph_nodes = refinement["workflow_graph_candidate"]["nodes"]
+        transfer_nodes = [node for node in graph_nodes if "Food Order" in node.get("content", "")]
+        self.assertEqual(len(transfer_nodes), 1)
+        decision = next(node for node in graph_nodes if node["type"] == "decision")
+        self.assertEqual(decision["semantic_node_type"], "decision")
+        self.assertTrue(decision["question"].endswith("?"))
+        self.assertGreaterEqual(refinement["summary"]["uncertain_edge_count"], 1)
+        self.assertEqual(refinement["workflow_graph_candidate"]["topology_source"], "visual_connector_candidates_only")
+
+    def test_workflow_semantic_refine_classifies_annotations_sla_and_audit(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        refinement = ingestion.build_workflow_semantic_refinement(
+            filename="workflow.pdf",
+            visual_layout=workflow_visual_layout_fixture(),
+            source_blocks=[],
+            classification=classification,
+        )
+
+        page = refinement["pages"][0]
+        semantic_types = {node["semantic_node_type"] for node in page["semantic_nodes"]}
+        annotation_types = {node["semantic_node_type"] for node in page["annotations"]}
+        self.assertIn("queue_rule", semantic_types)
+        self.assertIn("sla_rule", semantic_types)
+        self.assertIn("annotation", annotation_types)
+        self.assertIn("audit_rule", annotation_types)
+        annotation_ids = {node["id"] for node in page["annotations"]}
+        outgoing_from_annotations = [
+            edge for edge in [*page["edges"], *page["uncertain_edges"]]
+            if edge["from_node"] in annotation_ids
+        ]
+        self.assertEqual(outgoing_from_annotations, [])
+
+    def test_workflow_semantic_refine_does_not_infer_edges_from_text_order(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        layout = workflow_visual_layout_fixture()
+        layout["pages"][0]["graph_candidate"]["edge_candidates"] = []
+        refinement = ingestion.build_workflow_semantic_refinement(
+            filename="workflow.pdf",
+            visual_layout=layout,
+            source_blocks=[],
+            classification=classification,
+        )
+
+        graph = refinement["workflow_graph_candidate"]
+        self.assertEqual(graph["edges"], [])
+        self.assertEqual(graph["uncertain_edges"], [])
+        self.assertEqual(graph["topology_source"], "visual_connector_candidates_only")
+
+    def test_workflow_degraded_fallback_uses_semantic_candidate_types(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        visual_layout = workflow_visual_layout_fixture()
+        semantic_refinement = ingestion.build_workflow_semantic_refinement(
+            filename="workflow.pdf",
+            visual_layout=visual_layout,
+            source_blocks=[],
+            classification=classification,
+        )
+        chunks = ingestion.build_degraded_workflow_draft(
+            filename="workflow.pdf",
+            raw_text="1. Hướng dẫn KH cung cấp hình ảnh\n2. KH có gửi hình ảnh?",
+            blocks=[],
+            raw_context={"visual_layout": visual_layout, "workflow_semantic_refinement": semantic_refinement},
+            classification=classification,
+            ai_error="ai_workflow_structuring_failed:invalid_json",
+        )
+
+        sections = [chunk.section for chunk in chunks]
+        self.assertIn("candidate_action", sections)
+        self.assertIn("candidate_decision", sections)
+        self.assertIn("candidate_annotation", sections)
+        self.assertIn("candidate_sla", sections)
+        self.assertIn("candidate_audit_rule", sections)
+        self.assertNotIn("candidate_step", sections)
+        semantic_candidate = next(chunk for chunk in chunks if chunk.section == "candidate_decision")
+        self.assertEqual(semantic_candidate.metadata["source_ref_quality"], "bbox")
+        self.assertTrue(semantic_candidate.metadata["topology_review_required"])
+
+    def test_workflow_semantic_validation_flags_orphan_annotations(self) -> None:
+        graph = {
+            "workflow_id": "test",
+            "title": "Test",
+            "start_node_id": "start",
+            "nodes": [{"id": "start", "type": "start", "title": "Start", "semantic_node_type": "start"}],
+            "edges": [],
+            "annotations": [{"id": "ann_1", "type": "annotation", "content": "Lưu ý"}],
+            "uncertain_edges": [],
+            "topology_source": "visual_connector_candidates_only",
+        }
+
+        errors = ingestion.validate_semantic_workflow_graph_candidate(graph)
+        self.assertIn("orphan_annotation:ann_1", errors)
+
+    def test_workflow_schema_normalizes_null_node_fields(self) -> None:
+        payload = WorkflowExtractionPayload.model_validate(
+            {
+                "document_metadata": {"document_type": "workflow_diagram"},
+                "full_sop": {
+                    "unit_type": "full_sop",
+                    "title": "Workflow",
+                    "content": "Full SOP",
+                    "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1}],
+                },
+                "workflow_graph": {
+                    "workflow_id": "wf",
+                    "title": "Workflow",
+                    "start_node_id": "node_1",
+                    "nodes": [
+                        {
+                            "id": "node_1",
+                            "type": "decision",
+                            "title": "KH có gửi hình ảnh?",
+                            "content": None,
+                            "question": None,
+                        }
+                    ],
+                    "edges": [],
+                    "graph_confidence": 0.5,
+                },
+            }
+        )
+
+        self.assertEqual(payload.workflow_graph.nodes[0].content, "")
+        self.assertEqual(payload.workflow_graph.nodes[0].question, "")
+
     def test_workflow_ai_structuring_receives_visual_context(self) -> None:
         captured: dict[str, object] = {}
 
@@ -474,6 +608,121 @@ def docx_email_verification_bytes() -> bytes:
             "Không gửi mail theo quy trình: lỗi ZT",
         ]
     )
+
+
+def workflow_visual_layout_fixture() -> dict:
+    return {
+        "filename": "workflow.pdf",
+        "source_type": "pdf_visual_layout",
+        "summary": {
+            "page_count": 1,
+            "shape_candidate_count": 7,
+            "connector_candidate_count": 2,
+            "edge_candidate_count": 2,
+            "confidence": 0.62,
+        },
+        "pages": [
+            {
+                "page": 1,
+                "image_size": [1200, 900],
+                "text_blocks": [
+                    {
+                        "id": "p1_text_audit",
+                        "page": 1,
+                        "text": "Quy định audit:\n- CS_A chuyển trễ: ZT",
+                        "bbox": [700, 500, 980, 580],
+                    }
+                ],
+                "graph_candidate": {
+                    "nodes": [
+                        {
+                            "id": "p1_node_1",
+                            "page": 1,
+                            "type": "start",
+                            "title": "KH khiếu nại các vấn đề liên quan đến đơn hàng beFood",
+                            "bbox": [40, 80, 220, 170],
+                            "confidence": 0.68,
+                        },
+                        {
+                            "id": "p1_node_2",
+                            "page": 1,
+                            "type": "decision",
+                            "title": "3. KH có gửi\nhình ảnh?",
+                            "bbox": [280, 80, 420, 190],
+                            "confidence": 0.76,
+                        },
+                        {
+                            "id": "p1_node_3",
+                            "page": 1,
+                            "type": "action",
+                            "title": "3.2. Chuyển case vào\nqueue \"Food Order",
+                            "bbox": [480, 95, 610, 230],
+                            "confidence": 0.68,
+                        },
+                        {
+                            "id": "p1_node_4",
+                            "page": 1,
+                            "type": "action",
+                            "title": "3.2. Chuyển case vào\nqueue \"Food Order Issue\" & note thêm thông tin",
+                            "bbox": [560, 95, 740, 230],
+                            "confidence": 0.68,
+                        },
+                        {
+                            "id": "p1_node_5",
+                            "page": 1,
+                            "type": "action",
+                            "title": "(a) Quy định note description: tóm tắt vấn đề_thời hạn hết hạn gửi hình của KH",
+                            "bbox": [760, 100, 980, 220],
+                            "confidence": 0.68,
+                        },
+                        {
+                            "id": "p1_node_6",
+                            "page": 1,
+                            "type": "action",
+                            "title": "9.2 CS_B thực hiện bước tiếp theo và đảm bảo case chuyển MSC trễ nhất là 30 phút",
+                            "bbox": [480, 320, 780, 430],
+                            "confidence": 0.68,
+                        },
+                        {
+                            "id": "p1_node_7",
+                            "page": 1,
+                            "type": "end",
+                            "title": "End",
+                            "bbox": [1000, 320, 1120, 390],
+                            "confidence": 0.68,
+                        },
+                    ],
+                    "edge_candidates": [
+                        {
+                            "id": "p1_connector_1",
+                            "page": 1,
+                            "from_node": "p1_node_2",
+                            "to_node": "p1_node_4",
+                            "condition": "yes",
+                            "bbox": [420, 140, 560, 140],
+                            "confidence": 0.54,
+                            "direction_reason": "left_to_right_geometric_guess",
+                            "review_status": "needs_review",
+                        },
+                        {
+                            "id": "p1_connector_2",
+                            "page": 1,
+                            "from_node": "p1_node_4",
+                            "to_node": "p1_node_6",
+                            "condition": "next",
+                            "bbox": [650, 230, 650, 320],
+                            "confidence": 0.5,
+                            "direction_reason": "top_to_bottom_geometric_guess",
+                            "review_status": "needs_review",
+                        },
+                    ],
+                    "graph_confidence": 0.55,
+                    "requires_human_review": True,
+                    "review_reason": "Needs review",
+                },
+            }
+        ],
+    }
 
 
 def workbook_bytes(sheets: dict[str, list[list[str]]]) -> bytes:

@@ -331,21 +331,33 @@ def build_visual_graph_candidate(
 
 def compact_visual_context(visual_layout: dict[str, Any], *, max_nodes: int = 80, max_edges: int = 120) -> dict[str, Any]:
     pages = []
+    semantic_refinement = visual_layout.get("semantic_refinement") if isinstance(visual_layout.get("semantic_refinement"), dict) else {}
+    semantic_pages = semantic_refinement.get("pages") if isinstance(semantic_refinement.get("pages"), list) else []
     for page in visual_layout.get("pages", [])[:3]:
         graph = page.get("graph_candidate") if isinstance(page, dict) else {}
         if not isinstance(graph, dict):
             graph = {}
+        semantic_page = next(
+            (
+                item for item in semantic_pages
+                if isinstance(item, dict) and item.get("page") == page.get("page")
+            ),
+            {},
+        )
         pages.append(
             {
                 "page": page.get("page"),
                 "image_size": page.get("image_size"),
                 "nodes": graph.get("nodes", [])[:max_nodes],
                 "edge_candidates": graph.get("edge_candidates", [])[:max_edges],
+                "semantic_nodes": (semantic_page.get("semantic_nodes", []) if isinstance(semantic_page, dict) else [])[:max_nodes],
+                "semantic_annotations": (semantic_page.get("annotations", []) if isinstance(semantic_page, dict) else [])[:max_nodes],
+                "semantic_uncertain_edges": (semantic_page.get("uncertain_edges", []) if isinstance(semantic_page, dict) else [])[:max_edges],
                 "graph_confidence": graph.get("graph_confidence", 0),
                 "review_reason": graph.get("review_reason", ""),
             }
         )
-    return {
+    payload = {
         "source_type": visual_layout.get("source_type", "pdf_visual_layout"),
         "summary": visual_layout.get("summary", {}),
         "pages": pages,
@@ -356,6 +368,23 @@ def compact_visual_context(visual_layout: dict[str, Any], *, max_nodes: int = 80
             "Notes/scripts/warnings should be annotations unless they are actual flow steps.",
         ],
     }
+    if semantic_refinement:
+        graph_candidate = semantic_refinement.get("workflow_graph_candidate") if isinstance(semantic_refinement.get("workflow_graph_candidate"), dict) else {}
+        payload["semantic_refinement"] = {
+            "summary": semantic_refinement.get("summary", {}),
+            "workflow_graph_candidate": {
+                "lanes": graph_candidate.get("lanes", []),
+                "nodes": graph_candidate.get("nodes", [])[:max_nodes],
+                "edges": graph_candidate.get("edges", [])[:max_edges],
+                "annotations": graph_candidate.get("annotations", [])[:max_nodes],
+                "warnings": graph_candidate.get("warnings", [])[:max_nodes],
+                "uncertain_edges": graph_candidate.get("uncertain_edges", [])[:max_edges],
+                "graph_confidence": graph_candidate.get("graph_confidence", 0),
+                "topology_review_required": graph_candidate.get("topology_review_required", True),
+            },
+            "validation_errors": semantic_refinement.get("validation_errors", [])[:40],
+        }
+    return payload
 
 
 def compact_text_blocks(text_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:

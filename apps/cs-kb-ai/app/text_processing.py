@@ -745,6 +745,12 @@ def vietnamese_unit_title(unit_type: str) -> str:
     titles = {
         "workflow_overview": "Tổng quan quy trình",
         "workflow_graph": "Workflow graph",
+        "candidate_action": "Candidate action",
+        "candidate_decision": "Candidate decision",
+        "candidate_annotation": "Candidate annotation",
+        "candidate_sla": "Candidate SLA",
+        "candidate_audit_rule": "Candidate audit rule",
+        "candidate_queue_rule": "Candidate queue rule",
         "verification_dependency": "Tài liệu xác minh liên quan",
         "workflow_step": "Bước xử lý",
         "decision_point": "Điểm quyết định",

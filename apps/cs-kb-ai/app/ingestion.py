@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.embedding import embed_text
@@ -24,7 +25,13 @@ from app.text_processing import (
     tokenize,
     workflow_units_to_chunks,
 )
-from app.visual_layout import compact_visual_context, extract_pdf_visual_layout
+from app.visual_layout import (
+    bbox_distance,
+    compact_visual_context,
+    extract_pdf_visual_layout,
+    iou_bbox,
+    union_bboxes,
+)
 
 
 CONDITION_ACTION_SIGNALS = [
@@ -105,6 +112,21 @@ def prepare_document_version(
     if visual_layout:
         pipeline_artifacts.append(stage_artifact("map", "visual_layout_blocks", visual_layout_payload(visual_layout)))
         pipeline_artifacts.append(stage_artifact("map", "visual_graph_candidates", visual_graph_payload(visual_layout)))
+        semantic_refinement = build_workflow_semantic_refinement(
+            filename=filename,
+            visual_layout=visual_layout,
+            source_blocks=blocks,
+            classification=classification,
+        )
+        visual_layout["semantic_refinement"] = semantic_refinement
+        raw_context["workflow_semantic_refinement"] = semantic_refinement
+        pipeline_artifacts.append(
+            stage_artifact(
+                "workflow_semantic_refine",
+                "workflow_semantic_refinement",
+                semantic_refinement,
+            )
+        )
 
     source_chunks: list[Any] = []
     ai_error = ""
@@ -831,12 +853,750 @@ def build_degraded_spreadsheet_draft(filename: str, raw_text: str, blocks: list[
                     classification,
                     ai_error,
                 )
-            )
+        )
     return chunks
+
+
+GRAPH_SEMANTIC_NODE_TYPES = {"start", "end", "action", "decision", "queue_rule", "sla_rule"}
+ANNOTATION_SEMANTIC_NODE_TYPES = {"annotation", "warning", "audit_rule", "macro_script"}
+WORKFLOW_EDGE_CONDITIONS = {"yes", "no", "next", "timeout", "escalation", "fallback", "handoff", "return", "retry"}
+SEMANTIC_CANDIDATE_UNIT_TYPES = {
+    "start": "candidate_action",
+    "end": "candidate_action",
+    "action": "candidate_action",
+    "decision": "candidate_decision",
+    "annotation": "candidate_annotation",
+    "warning": "candidate_warning",
+    "sla_rule": "candidate_sla",
+    "audit_rule": "candidate_audit_rule",
+    "queue_rule": "candidate_queue_rule",
+    "macro_script": "macro_script",
+}
+
+
+def build_workflow_semantic_refinement(
+    *,
+    filename: str,
+    visual_layout: dict[str, Any],
+    source_blocks: list[dict[str, Any]],
+    classification: Any,
+) -> dict[str, Any]:
+    pages: list[dict[str, Any]] = []
+    all_graph_nodes: list[dict[str, Any]] = []
+    all_annotations: list[dict[str, Any]] = []
+    all_edges: list[dict[str, Any]] = []
+    all_uncertain_edges: list[dict[str, Any]] = []
+    all_validation_errors: list[str] = []
+    raw_node_count = 0
+    deduped_count = 0
+
+    for page in visual_layout.get("pages", []) if isinstance(visual_layout.get("pages"), list) else []:
+        if not isinstance(page, dict):
+            continue
+        page_number = int(page.get("page") or 1)
+        graph = page.get("graph_candidate") if isinstance(page.get("graph_candidate"), dict) else {}
+        raw_nodes = semantic_nodes_from_visual_page(filename, page, graph)
+        raw_nodes.extend(semantic_annotations_from_visual_text_blocks(filename, page, raw_nodes))
+        raw_node_count += len(raw_nodes)
+
+        semantic_nodes, id_map, page_deduped_count = dedupe_semantic_nodes(raw_nodes)
+        deduped_count += page_deduped_count
+        attach_semantic_annotations(semantic_nodes)
+
+        edges, uncertain_edges, edge_warnings = normalize_semantic_edges(graph, semantic_nodes, id_map, filename, page_number)
+        graph_nodes = [node for node in semantic_nodes if node["semantic_node_type"] in GRAPH_SEMANTIC_NODE_TYPES]
+        annotations = [node for node in semantic_nodes if node["semantic_node_type"] in ANNOTATION_SEMANTIC_NODE_TYPES]
+        page_payload = {
+            "page": page_number,
+            "image_size": page.get("image_size", []),
+            "semantic_nodes": [public_semantic_node(node) for node in graph_nodes],
+            "annotations": [public_semantic_node(node) for node in annotations],
+            "edges": edges,
+            "uncertain_edges": uncertain_edges,
+            "deduped_count": page_deduped_count,
+            "warnings": edge_warnings,
+        }
+        page_errors = validate_semantic_page(page_payload)
+        page_payload["validation_errors"] = page_errors
+        pages.append(page_payload)
+        all_graph_nodes.extend(graph_nodes)
+        all_annotations.extend(annotations)
+        all_edges.extend(edges)
+        all_uncertain_edges.extend(uncertain_edges)
+        all_validation_errors.extend(page_errors)
+
+    graph_candidate = build_semantic_workflow_graph_candidate(
+        filename=filename,
+        title=path_title(filename),
+        nodes=all_graph_nodes,
+        annotations=all_annotations,
+        edges=all_edges,
+        uncertain_edges=all_uncertain_edges,
+        visual_layout=visual_layout,
+    )
+    graph_errors = validate_semantic_workflow_graph_candidate(graph_candidate)
+    all_validation_errors.extend(graph_errors)
+
+    semantic_node_count = len(all_graph_nodes) + len(all_annotations)
+    topology_review_required = bool(all_uncertain_edges or graph_errors or deduped_count)
+    graph_confidence = semantic_graph_confidence(
+        visual_layout.get("summary") if isinstance(visual_layout.get("summary"), dict) else {},
+        semantic_node_count,
+        len(all_edges),
+        len(all_uncertain_edges),
+        all_validation_errors,
+    )
+    graph_candidate["graph_confidence"] = graph_confidence
+    graph_candidate["topology_review_required"] = topology_review_required
+
+    return {
+        "source_type": "workflow_semantic_refinement",
+        "filename": filename,
+        "document_type": classification.document_type,
+        "source_type_document": classification.source_type,
+        "summary": {
+            "raw_visual_node_count": raw_node_count,
+            "semantic_node_count": semantic_node_count,
+            "workflow_node_count": len(all_graph_nodes),
+            "annotation_count": len(all_annotations),
+            "deduped_count": deduped_count,
+            "confirmed_edge_count": len(all_edges),
+            "uncertain_edge_count": len(all_uncertain_edges),
+            "graph_confidence": graph_confidence,
+            "topology_review_required": topology_review_required,
+            "topology_source": "visual_connector_candidates_only",
+            "source_block_count": len(source_blocks),
+        },
+        "pages": pages,
+        "workflow_graph_candidate": graph_candidate,
+        "validation_errors": list(dict.fromkeys(all_validation_errors)),
+        "rules": [
+            "Semantic nodes are derived from visual candidates and bbox/layout evidence.",
+            "Graph edges are derived only from visual connector candidates, never raw OCR text order.",
+            "Annotation, warning, audit, and macro/script blocks cannot have outgoing workflow edges.",
+            "Uncertain topology must be reviewed manually before publish.",
+        ],
+    }
+
+
+def semantic_nodes_from_visual_page(filename: str, page: dict[str, Any], graph: dict[str, Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    page_number = int(page.get("page") or 1)
+    for index, node in enumerate(graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else [], start=1):
+        if not isinstance(node, dict):
+            continue
+        text = str(node.get("title") or node.get("text") or "").strip()
+        if not text:
+            continue
+        bbox = normalize_bbox_list(node.get("bbox"))
+        semantic_type = classify_semantic_node_type(text, str(node.get("type") or "action"))
+        semantic_id = f"sem_{node.get('id') or f'p{page_number}_node_{index}'}"
+        source_ref = {"source_type": "pdf_diagram", "source_file": filename, "page": page_number, "bbox": bbox}
+        output.append(
+            {
+                "id": semantic_id,
+                "page": page_number,
+                "title": semantic_title(text),
+                "content": text,
+                "text_key": semantic_text_key(text),
+                "semantic_node_type": semantic_type,
+                "graph_node_type": graph_node_type_for_semantic(semantic_type),
+                "actor": infer_workflow_actor(text),
+                "bbox": bbox,
+                "confidence": float(node.get("confidence") or 0.55),
+                "source_refs": [source_ref],
+                "source_node_ids": [str(node.get("id") or semantic_id)],
+                "visual_node_type": str(node.get("type") or ""),
+                "dedupe_status": "unique",
+                "attached_annotations": [],
+            }
+        )
+    return output
+
+
+def semantic_annotations_from_visual_text_blocks(filename: str, page: dict[str, Any], existing_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    page_number = int(page.get("page") or 1)
+    existing_keys = {node.get("text_key") for node in existing_nodes}
+    for block in page.get("text_blocks", []) if isinstance(page.get("text_blocks"), list) else []:
+        if not isinstance(block, dict):
+            continue
+        text = str(block.get("text") or "").strip()
+        if not text or not is_annotation_like_text(text):
+            continue
+        key = semantic_text_key(text)
+        if key in existing_keys:
+            continue
+        bbox = normalize_bbox_list(block.get("bbox"))
+        semantic_type = classify_semantic_node_type(text, "annotation")
+        if semantic_type not in ANNOTATION_SEMANTIC_NODE_TYPES:
+            semantic_type = "annotation"
+        semantic_id = f"sem_{block.get('id') or f'p{page_number}_annotation_{len(output) + 1}'}"
+        output.append(
+            {
+                "id": semantic_id,
+                "page": page_number,
+                "title": semantic_title(text),
+                "content": text,
+                "text_key": key,
+                "semantic_node_type": semantic_type,
+                "graph_node_type": "annotation",
+                "actor": infer_workflow_actor(text),
+                "bbox": bbox,
+                "confidence": 0.58,
+                "source_refs": [{"source_type": "pdf_diagram", "source_file": filename, "page": page_number, "bbox": bbox}],
+                "source_node_ids": [str(block.get("id") or semantic_id)],
+                "visual_node_type": "text_block",
+                "dedupe_status": "unique",
+                "attached_annotations": [],
+            }
+        )
+    return output
+
+
+def classify_semantic_node_type(text: str, visual_type: str) -> str:
+    normalized = normalized_search_text(text)
+    stripped = text.strip()
+    visual_type = visual_type.lower()
+    if visual_type == "decision" or stripped.endswith("?") or "?" in stripped:
+        return "decision"
+    if visual_type == "start":
+        return "start"
+    if visual_type == "end" or normalized == "end":
+        return "end"
+    if is_audit_text(normalized):
+        return "audit_rule"
+    if is_warning_text(normalized):
+        return "warning"
+    if is_macro_text(normalized):
+        return "macro_script"
+    if is_annotation_like_text(text):
+        return "annotation"
+    if is_queue_text(normalized):
+        return "queue_rule"
+    if is_sla_text(normalized):
+        return "sla_rule"
+    return "action"
+
+
+def is_annotation_like_text(text: str) -> bool:
+    normalized = normalized_search_text(text)
+    stripped = text.strip().lower()
+    return (
+        stripped.startswith(("(a)", "(b)", "(c)"))
+        or normalized.startswith(("luu y", "ghi chu", "note"))
+        or "quy dinh note" in normalized
+        or "quy dinh audit" in normalized
+        or "zt" in normalized
+        or "script" in normalized
+    )
+
+
+def is_audit_text(normalized: str) -> bool:
+    return "quy dinh audit" in normalized or "audit" in normalized or "zt" in normalized
+
+
+def is_warning_text(normalized: str) -> bool:
+    return any(signal in normalized for signal in ["canh bao", "rủi ro", "rui ro", "loi zt", "khong duoc"])
+
+
+def is_macro_text(normalized: str) -> bool:
+    return bool(re.search(r"\b(script|macro)\b", normalized)) or "noi dung phan hoi" in normalized
+
+
+def is_queue_text(normalized: str) -> bool:
+    return "queue" in normalized or "food order issue" in normalized or "all staff" in normalized
+
+
+def is_sla_text(normalized: str) -> bool:
+    return "sla" in normalized or "tre nhat" in normalized or bool(re.search(r"\b\d+\s*(phut|gio)\b", normalized))
+
+
+def graph_node_type_for_semantic(semantic_type: str) -> str:
+    if semantic_type == "decision":
+        return "decision"
+    if semantic_type in {"start", "end"}:
+        return semantic_type
+    if semantic_type in GRAPH_SEMANTIC_NODE_TYPES:
+        return "action"
+    return "annotation"
+
+
+def infer_workflow_actor(text: str) -> str:
+    upper = text.upper()
+    if "CS_L2" in upper or re.search(r"\bL2\b", upper):
+        return "CS_L2"
+    if "CS_A" in upper:
+        return "CS_A"
+    if "CS_B" in upper:
+        return "CS_B"
+    if "MSC" in upper:
+        return "MSC"
+    if "KHÁCH HÀNG" in upper or re.search(r"\bKH\b", upper):
+        return "KH"
+    if "CS" in upper:
+        return "CS"
+    return ""
+
+
+def semantic_title(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    first_line = lines[0] if lines else text.strip()
+    return first_line[:180] or "Workflow semantic node"
+
+
+def semantic_text_key(text: str) -> str:
+    return normalized_search_text(re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", text))
+
+
+def normalize_bbox_list(value: Any) -> list[float]:
+    if not isinstance(value, list) or len(value) != 4:
+        return []
+    output: list[float] = []
+    for item in value:
+        try:
+            output.append(float(item))
+        except (TypeError, ValueError):
+            return []
+    return output
+
+
+def dedupe_semantic_nodes(nodes: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str], int]:
+    output: list[dict[str, Any]] = []
+    id_map: dict[str, str] = {}
+    deduped_count = 0
+    for node in nodes:
+        existing_index = next((index for index, existing in enumerate(output) if should_merge_semantic_nodes(existing, node)), None)
+        if existing_index is None:
+            output.append(node)
+            id_map[node["id"]] = node["id"]
+            for source_id in node.get("source_node_ids", []):
+                id_map[str(source_id)] = node["id"]
+            continue
+        merged = merge_semantic_nodes(output[existing_index], node)
+        output[existing_index] = merged
+        id_map[node["id"]] = merged["id"]
+        for source_id in node.get("source_node_ids", []):
+            id_map[str(source_id)] = merged["id"]
+        deduped_count += 1
+    return output, id_map, deduped_count
+
+
+def should_merge_semantic_nodes(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if int(left.get("page") or 0) != int(right.get("page") or 0):
+        return False
+    if not compatible_semantic_types(str(left.get("semantic_node_type") or ""), str(right.get("semantic_node_type") or "")):
+        return False
+    left_text = str(left.get("text_key") or "")
+    right_text = str(right.get("text_key") or "")
+    if not left_text or not right_text:
+        return False
+    text_similarity = max(SequenceMatcher(None, left_text, right_text).ratio(), token_jaccard(left_text, right_text))
+    left_bbox = left.get("bbox") if isinstance(left.get("bbox"), list) else []
+    right_bbox = right.get("bbox") if isinstance(right.get("bbox"), list) else []
+    overlap = bbox_overlap_strength(left_bbox, right_bbox)
+    distance = bbox_distance(left_bbox, right_bbox) if len(left_bbox) == 4 and len(right_bbox) == 4 else 99999.0
+    if overlap > 0.35 and text_similarity > 0.68:
+        return True
+    if text_similarity > 0.88 and distance < 380:
+        return True
+    if text_similarity > 0.96:
+        return True
+    return False
+
+
+def compatible_semantic_types(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    graph_action_family = {"action", "queue_rule", "sla_rule"}
+    annotation_family = {"annotation", "warning", "audit_rule", "macro_script"}
+    return left in graph_action_family and right in graph_action_family or left in annotation_family and right in annotation_family
+
+
+def token_jaccard(left: str, right: str) -> float:
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def bbox_overlap_strength(left: list[float], right: list[float]) -> float:
+    if len(left) != 4 or len(right) != 4:
+        return 0.0
+    iou = iou_bbox(left, right)
+    x1 = max(left[0], right[0])
+    y1 = max(left[1], right[1])
+    x2 = min(left[2], right[2])
+    y2 = min(left[3], right[3])
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    min_area = min(max(1.0, (left[2] - left[0]) * (left[3] - left[1])), max(1.0, (right[2] - right[0]) * (right[3] - right[1])))
+    return max(iou, intersection / min_area)
+
+
+def merge_semantic_nodes(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    left_content = str(left.get("content") or "")
+    right_content = str(right.get("content") or "")
+    content = left_content if len(left_content) >= len(right_content) else right_content
+    bboxes = [bbox for bbox in [left.get("bbox"), right.get("bbox")] if isinstance(bbox, list) and len(bbox) == 4]
+    semantic_type = preferred_semantic_type(str(left.get("semantic_node_type") or ""), str(right.get("semantic_node_type") or ""))
+    source_refs = [*(left.get("source_refs") or []), *(right.get("source_refs") or [])]
+    source_node_ids = list(dict.fromkeys([*(left.get("source_node_ids") or []), *(right.get("source_node_ids") or [])]))
+    return {
+        **left,
+        "title": semantic_title(content),
+        "content": content,
+        "text_key": semantic_text_key(content),
+        "semantic_node_type": semantic_type,
+        "graph_node_type": graph_node_type_for_semantic(semantic_type),
+        "actor": left.get("actor") or right.get("actor") or infer_workflow_actor(content),
+        "bbox": union_bboxes(bboxes) if bboxes else left.get("bbox", []),
+        "confidence": max(float(left.get("confidence") or 0), float(right.get("confidence") or 0)),
+        "source_refs": dedupe_source_refs(source_refs),
+        "source_node_ids": source_node_ids,
+        "dedupe_status": "merged",
+        "merged_node_count": int(left.get("merged_node_count") or 1) + int(right.get("merged_node_count") or 1),
+    }
+
+
+def preferred_semantic_type(left: str, right: str) -> str:
+    priority = {
+        "decision": 90,
+        "queue_rule": 80,
+        "sla_rule": 70,
+        "audit_rule": 68,
+        "warning": 65,
+        "macro_script": 62,
+        "annotation": 60,
+        "start": 55,
+        "end": 55,
+        "action": 50,
+    }
+    return left if priority.get(left, 0) >= priority.get(right, 0) else right
+
+
+def dedupe_source_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    output: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        key = json.dumps(ref, sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(ref)
+    return output
+
+
+def attach_semantic_annotations(nodes: list[dict[str, Any]]) -> None:
+    graph_nodes = [node for node in nodes if node["semantic_node_type"] in GRAPH_SEMANTIC_NODE_TYPES]
+    annotations = [node for node in nodes if node["semantic_node_type"] in ANNOTATION_SEMANTIC_NODE_TYPES]
+    for annotation in annotations:
+        target = nearest_semantic_node(annotation, graph_nodes)
+        if not target:
+            annotation["attached_to_node_id"] = ""
+            annotation["orphan"] = True
+            continue
+        annotation["attached_to_node_id"] = target["id"]
+        annotation["attached_to"] = target["id"]
+        annotation["orphan"] = False
+        target.setdefault("attached_annotations", []).append(annotation["id"])
+
+
+def nearest_semantic_node(annotation: dict[str, Any], graph_nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = [node for node in graph_nodes if int(node.get("page") or 0) == int(annotation.get("page") or 0)]
+    if not candidates:
+        return None
+    bbox = annotation.get("bbox") if isinstance(annotation.get("bbox"), list) else []
+    if len(bbox) != 4:
+        return candidates[0]
+    return sorted(
+        candidates,
+        key=lambda node: bbox_distance(bbox, node.get("bbox", [])) if isinstance(node.get("bbox"), list) and len(node.get("bbox", [])) == 4 else 99999.0,
+    )[0]
+
+
+def normalize_semantic_edges(
+    graph: dict[str, Any],
+    semantic_nodes: list[dict[str, Any]],
+    id_map: dict[str, str],
+    filename: str,
+    page_number: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    semantic_by_id = {node["id"]: node for node in semantic_nodes}
+    edges: list[dict[str, Any]] = []
+    uncertain_edges: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for edge in graph.get("edge_candidates", []) if isinstance(graph.get("edge_candidates"), list) else []:
+        if not isinstance(edge, dict):
+            continue
+        from_id = id_map.get(str(edge.get("from_node") or ""), str(edge.get("from_node") or ""))
+        to_id = id_map.get(str(edge.get("to_node") or ""), str(edge.get("to_node") or ""))
+        from_node = semantic_by_id.get(from_id)
+        to_node = semantic_by_id.get(to_id)
+        if not from_node or not to_node or from_id == to_id:
+            continue
+        if from_node["semantic_node_type"] in ANNOTATION_SEMANTIC_NODE_TYPES or to_node["semantic_node_type"] in ANNOTATION_SEMANTIC_NODE_TYPES:
+            warnings.append("annotation_edge_candidate_ignored")
+            continue
+        condition = normalize_edge_condition(str(edge.get("condition") or "next"))
+        edge_key = (from_id, to_id, condition)
+        if edge_key in seen:
+            continue
+        seen.add(edge_key)
+        confidence = clamp_float(edge.get("confidence"), 0.0, 1.0, default=0.0)
+        source_ref = {"source_type": "pdf_diagram", "source_file": filename, "page": page_number, "bbox": normalize_bbox_list(edge.get("bbox"))}
+        payload = {
+            "from_node": from_id,
+            "to_node": to_id,
+            "condition": condition,
+            "confidence": confidence,
+            "source_refs": [source_ref],
+            "review_status": "needs_review",
+            "direction_reason": str(edge.get("direction_reason") or ""),
+        }
+        if semantic_edge_is_confirmed(payload):
+            edges.append(payload)
+        else:
+            uncertain_edges.append(
+                {
+                    **payload,
+                    "reason": uncertain_edge_reason(payload),
+                }
+            )
+    return edges, uncertain_edges, list(dict.fromkeys(warnings))
+
+
+def semantic_edge_is_confirmed(edge: dict[str, Any]) -> bool:
+    confidence = float(edge.get("confidence") or 0.0)
+    direction_reason = str(edge.get("direction_reason") or "")
+    condition = str(edge.get("condition") or "")
+    if confidence >= 0.66 and "geometric_guess" not in direction_reason:
+        return True
+    return condition in {"yes", "no"} and confidence >= 0.7 and "geometric_guess" not in direction_reason
+
+
+def uncertain_edge_reason(edge: dict[str, Any]) -> str:
+    direction_reason = str(edge.get("direction_reason") or "visual_connector_low_confidence")
+    confidence = float(edge.get("confidence") or 0.0)
+    if confidence < 0.62:
+        return "low_confidence_visual_connector"
+    if "geometric_guess" in direction_reason:
+        return "geometric_direction_needs_review"
+    return "topology_needs_manual_review"
+
+
+def normalize_edge_condition(value: str) -> str:
+    normalized = normalized_search_text(value)
+    if normalized in {"yes", "y", "co", "dung"}:
+        return "yes"
+    if normalized in {"no", "n", "khong", "sai"}:
+        return "no"
+    if any(signal in normalized for signal in ["qua han", "het han", "timeout"]):
+        return "timeout"
+    if any(signal in normalized for signal in ["escalation", "team lead", "msc"]):
+        return "escalation"
+    if any(signal in normalized for signal in ["handoff", "chuyen", "chia case"]):
+        return "handoff"
+    return normalized if normalized in WORKFLOW_EDGE_CONDITIONS else "next"
+
+
+def clamp_float(value: Any, minimum: float, maximum: float, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def public_semantic_node(node: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": node.get("id"),
+        "page": node.get("page"),
+        "title": node.get("title"),
+        "content": node.get("content"),
+        "semantic_node_type": node.get("semantic_node_type"),
+        "graph_node_type": node.get("graph_node_type"),
+        "actor": node.get("actor", ""),
+        "bbox": node.get("bbox", []),
+        "source_refs": node.get("source_refs", []),
+        "source_node_ids": node.get("source_node_ids", []),
+        "dedupe_status": node.get("dedupe_status", "unique"),
+        "attached_to_node_id": node.get("attached_to_node_id", ""),
+        "attached_annotations": node.get("attached_annotations", []),
+        "orphan": bool(node.get("orphan")),
+        "confidence": node.get("confidence", 0.0),
+    }
+
+
+def build_semantic_workflow_graph_candidate(
+    *,
+    filename: str,
+    title: str,
+    nodes: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    uncertain_edges: list[dict[str, Any]],
+    visual_layout: dict[str, Any],
+) -> dict[str, Any]:
+    graph_nodes = [workflow_graph_node_payload(node) for node in nodes]
+    graph_annotations = [workflow_annotation_payload(node) for node in annotations]
+    lanes = workflow_lanes_from_nodes(nodes)
+    start_node_id = next((node["id"] for node in graph_nodes if node.get("type") == "start"), graph_nodes[0]["id"] if graph_nodes else "start")
+    warnings = [annotation for annotation in graph_annotations if annotation.get("type") in {"warning", "audit_rule"}]
+    summary = visual_layout.get("summary") if isinstance(visual_layout.get("summary"), dict) else {}
+    return {
+        "workflow_id": normalized_key(title) or "workflow_graph",
+        "title": title,
+        "start_node_id": start_node_id,
+        "lanes": lanes,
+        "nodes": graph_nodes,
+        "edges": [{key: edge[key] for key in ("from_node", "to_node", "condition") if key in edge} | {"source_refs": edge.get("source_refs", [])} for edge in edges],
+        "annotations": graph_annotations,
+        "warnings": warnings,
+        "uncertain_edges": uncertain_edges,
+        "graph_confidence": float(summary.get("confidence") or 0.0),
+        "requires_human_review": True,
+        "review_status": "needs_review",
+        "review_reason": "Semantic workflow graph was normalized from visual candidates and requires manual topology review.",
+        "topology_source": "visual_connector_candidates_only",
+        "topology_review_required": True,
+        "source_refs": [{"source_type": "pdf_diagram", "source_file": filename, "page": 1, "bbox": []}],
+    }
+
+
+def workflow_graph_node_payload(node: dict[str, Any]) -> dict[str, Any]:
+    graph_type = graph_node_type_for_semantic(str(node.get("semantic_node_type") or "action"))
+    title = str(node.get("title") or node.get("content") or "Workflow node").strip()
+    content = str(node.get("content") or title).strip()
+    return {
+        "id": node["id"],
+        "type": graph_type,
+        "semantic_node_type": node.get("semantic_node_type"),
+        "actor": node.get("actor", ""),
+        "phase": "",
+        "title": title[:240],
+        "content": "" if graph_type == "decision" else content,
+        "question": normalize_decision_question(content) if graph_type == "decision" else "",
+        "source_refs": node.get("source_refs", []),
+        "attached_annotations": node.get("attached_annotations", []),
+        "dedupe_status": node.get("dedupe_status", "unique"),
+        "bbox": node.get("bbox", []),
+        "page": node.get("page"),
+    }
+
+
+def normalize_decision_question(text: str) -> str:
+    cleaned = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", " ".join(line.strip() for line in text.splitlines() if line.strip())).strip()
+    if cleaned and not cleaned.endswith("?"):
+        cleaned += "?"
+    return cleaned or "Điểm quyết định cần review?"
+
+
+def workflow_annotation_payload(node: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": node["id"],
+        "type": node.get("semantic_node_type") or "annotation",
+        "attached_to": node.get("attached_to_node_id", ""),
+        "attached_to_node_id": node.get("attached_to_node_id", ""),
+        "title": node.get("title", ""),
+        "content": node.get("content", ""),
+        "risk_level": "high" if node.get("semantic_node_type") in {"warning", "audit_rule"} else "",
+        "source_refs": node.get("source_refs", []),
+        "bbox": node.get("bbox", []),
+        "orphan": bool(node.get("orphan")),
+        "dedupe_status": node.get("dedupe_status", "unique"),
+    }
+
+
+def workflow_lanes_from_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    lanes: list[dict[str, Any]] = []
+    for actor in dict.fromkeys(str(node.get("actor") or "") for node in nodes if node.get("actor")):
+        lane_nodes = [node["id"] for node in nodes if node.get("actor") == actor]
+        lanes.append({"id": normalized_key(actor) or actor.lower(), "actor": actor, "node_ids": lane_nodes})
+    return lanes
+
+
+def validate_semantic_page(page_payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    annotation_ids = {node.get("id") for node in page_payload.get("annotations", []) if isinstance(node, dict)}
+    for edge in [*page_payload.get("edges", []), *page_payload.get("uncertain_edges", [])]:
+        if edge.get("from_node") in annotation_ids:
+            errors.append(f"annotation_has_outgoing_edge:{edge.get('from_node')}")
+    for annotation in page_payload.get("annotations", []):
+        if isinstance(annotation, dict) and annotation.get("orphan"):
+            errors.append(f"orphan_annotation:{annotation.get('id')}")
+    return list(dict.fromkeys(errors))
+
+
+def validate_semantic_workflow_graph_candidate(graph: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    annotations = graph.get("annotations") if isinstance(graph.get("annotations"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    uncertain_edges = graph.get("uncertain_edges") if isinstance(graph.get("uncertain_edges"), list) else []
+    annotation_ids = {annotation.get("id") for annotation in annotations if isinstance(annotation, dict)}
+    seen_node_keys: set[tuple[str, str]] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        key = (semantic_text_key(str(node.get("title") or node.get("question") or node.get("content") or "")), str(node.get("semantic_node_type") or node.get("type") or ""))
+        if key in seen_node_keys and key[0]:
+            errors.append(f"duplicate_semantic_node:{node.get('id')}")
+        seen_node_keys.add(key)
+    for edge in edges:
+        condition = str(edge.get("condition") or "next")
+        if edge.get("from_node") in annotation_ids:
+            errors.append(f"annotation_has_outgoing_edge:{edge.get('from_node')}")
+        if condition not in WORKFLOW_EDGE_CONDITIONS:
+            errors.append(f"invalid_edge_condition:{condition}")
+    for annotation in annotations:
+        if isinstance(annotation, dict) and not annotation.get("attached_to"):
+            errors.append(f"orphan_annotation:{annotation.get('id')}")
+    incoming = {edge.get("to_node") for edge in edges}
+    outgoing = {}
+    uncertain_outgoing = {}
+    for edge in edges:
+        outgoing.setdefault(edge.get("from_node"), []).append(edge)
+    for edge in uncertain_edges:
+        uncertain_outgoing.setdefault(edge.get("from_node"), []).append(edge)
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("id")
+        node_type = node.get("type")
+        if node_type == "start" and node_id in incoming:
+            errors.append(f"start_has_incoming_edge:{node_id}")
+        if node_type == "end" and outgoing.get(node_id):
+            errors.append(f"end_has_outgoing_edge:{node_id}")
+        if node_type == "decision":
+            branch_conditions = {edge.get("condition") for edge in outgoing.get(node_id, [])}
+            has_confirmed_branches = {"yes", "no"}.issubset(branch_conditions)
+            if not has_confirmed_branches and not uncertain_outgoing.get(node_id):
+                errors.append(f"decision_missing_branches_or_uncertain_edges:{node_id}")
+    if graph.get("topology_source") == "raw_text_order":
+        errors.append("workflow_graph_built_from_raw_text_order")
+    return list(dict.fromkeys(errors))
+
+
+def semantic_graph_confidence(summary: dict[str, Any], node_count: int, edge_count: int, uncertain_count: int, validation_errors: list[str]) -> float:
+    base = clamp_float(summary.get("confidence"), 0.2, 0.75, default=0.45)
+    if node_count >= 4:
+        base += 0.08
+    if edge_count:
+        base += 0.05
+    if uncertain_count:
+        base -= 0.06
+    if validation_errors:
+        base -= 0.08
+    return round(max(0.15, min(0.82, base)), 2)
 
 
 def build_degraded_workflow_draft(filename: str, raw_text: str, blocks: list[dict[str, Any]], raw_context: dict[str, Any], classification: Any, ai_error: str) -> list[Any]:
     visual_layout = raw_context.get("visual_layout") if isinstance(raw_context.get("visual_layout"), dict) else {}
+    semantic_refinement = raw_context.get("workflow_semantic_refinement") if isinstance(raw_context.get("workflow_semantic_refinement"), dict) else {}
     visual_summary = visual_layout.get("summary") if isinstance(visual_layout, dict) and isinstance(visual_layout.get("summary"), dict) else {}
     graph_status = "visual_layout_candidates_need_review" if visual_summary.get("shape_candidate_count") else "not_reliable_without_layout_review"
     chunks: list[Any] = [
@@ -873,29 +1633,88 @@ def build_degraded_workflow_draft(filename: str, raw_text: str, blocks: list[dic
             ai_error or "workflow_graph_requires_review",
         ),
     ]
-    for visual_chunk in visual_node_candidate_chunks(filename, visual_layout, len(chunks), classification, ai_error):
-        chunks.append(visual_chunk)
-    step_candidates = workflow_step_candidates(raw_text)
-    for index, text in enumerate(step_candidates, start=1):
-        unit_type = "candidate_warning" if contains_signal(text, [*WARNING_SIGNALS, "script", "sla"]) else "candidate_step"
-        chunks.append(
-            degraded_chunk(
-                len(chunks),
-                unit_type,
-                candidate_heading(text, unit_type, index),
-                text,
-                {
-                    "unit_type": unit_type,
-                    "retrieval_scope": "unit",
-                    "source_refs": [default_pdf_source_ref(filename)],
-                    "graph_extraction_status": "not_reliable_without_layout_review",
-                    "publish_blocked_reason": "workflow_graph_requires_review",
-                },
-                classification,
-                ai_error or "workflow_graph_requires_review",
+    semantic_chunks = semantic_workflow_candidate_chunks(filename, semantic_refinement, len(chunks), classification, ai_error)
+    if semantic_chunks:
+        chunks.extend(semantic_chunks)
+    else:
+        for visual_chunk in visual_node_candidate_chunks(filename, visual_layout, len(chunks), classification, ai_error):
+            chunks.append(visual_chunk)
+        step_candidates = workflow_step_candidates(raw_text)
+        for index, text in enumerate(step_candidates, start=1):
+            unit_type = "candidate_warning" if contains_signal(text, [*WARNING_SIGNALS, "script", "sla"]) else "candidate_step"
+            chunks.append(
+                degraded_chunk(
+                    len(chunks),
+                    unit_type,
+                    candidate_heading(text, unit_type, index),
+                    text,
+                    {
+                        "unit_type": unit_type,
+                        "retrieval_scope": "unit",
+                        "source_refs": [default_pdf_source_ref(filename)],
+                        "graph_extraction_status": "not_reliable_without_layout_review",
+                        "publish_blocked_reason": "workflow_graph_requires_review",
+                    },
+                    classification,
+                    ai_error or "workflow_graph_requires_review",
+                )
             )
-        )
     return chunks
+
+
+def semantic_workflow_candidate_chunks(filename: str, semantic_refinement: dict[str, Any], start_index: int, classification: Any, ai_error: str) -> list[Any]:
+    if not semantic_refinement:
+        return []
+    output: list[Any] = []
+    graph_candidate = semantic_refinement.get("workflow_graph_candidate") if isinstance(semantic_refinement.get("workflow_graph_candidate"), dict) else {}
+    graph_confidence = graph_candidate.get("graph_confidence") or semantic_refinement.get("summary", {}).get("graph_confidence")
+    topology_review_required = bool(graph_candidate.get("topology_review_required", True))
+    uncertain_edges = graph_candidate.get("uncertain_edges") if isinstance(graph_candidate.get("uncertain_edges"), list) else []
+    pages = semantic_refinement.get("pages") if isinstance(semantic_refinement.get("pages"), list) else []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        for node in [*(page.get("semantic_nodes") or []), *(page.get("annotations") or [])]:
+            if not isinstance(node, dict):
+                continue
+            semantic_type = str(node.get("semantic_node_type") or "action")
+            unit_type = SEMANTIC_CANDIDATE_UNIT_TYPES.get(semantic_type, "candidate_action")
+            title = str(node.get("title") or node.get("content") or unit_type).strip()
+            content = str(node.get("content") or title).strip()
+            if not content:
+                continue
+            attached_uncertain_edges = [
+                edge for edge in uncertain_edges
+                if edge.get("from_node") == node.get("id") or edge.get("to_node") == node.get("id")
+            ][:6]
+            output.append(
+                degraded_chunk(
+                    start_index + len(output),
+                    unit_type,
+                    candidate_heading(title, unit_type, len(output) + 1),
+                    content,
+                    {
+                        "unit_type": unit_type,
+                        "retrieval_scope": "unit",
+                        "semantic_node_id": node.get("id"),
+                        "semantic_node_type": semantic_type,
+                        "dedupe_status": node.get("dedupe_status", "unique"),
+                        "attached_to_node_id": node.get("attached_to_node_id", ""),
+                        "attached_annotations": node.get("attached_annotations", []),
+                        "uncertain_edges": attached_uncertain_edges,
+                        "graph_confidence": graph_confidence,
+                        "topology_review_required": topology_review_required,
+                        "graph_extraction_status": "semantic_workflow_refinement_needs_review",
+                        "source_ref_quality": source_ref_quality_from_refs(node.get("source_refs") or []),
+                        "source_ref_acknowledged": False,
+                        "source_refs": node.get("source_refs") or [default_pdf_source_ref(filename)],
+                        "publish_blocked_reason": "workflow_graph_requires_review",
+                    },
+                    classification,
+                    ai_error or "workflow_graph_requires_review",
+                )
+            )
+    return output[:100]
 
 
 def visual_node_candidate_chunks(filename: str, visual_layout: dict[str, Any], start_index: int, classification: Any, ai_error: str) -> list[Any]:
@@ -1723,7 +2542,13 @@ def candidate_heading(text: str, unit_type: str, index: int) -> str:
     if first_line and len(first_line) <= 90:
         return first_line
     prefix = {
+        "candidate_action": "Candidate action",
+        "candidate_annotation": "Candidate annotation",
+        "candidate_audit_rule": "Candidate audit rule",
+        "candidate_decision": "Candidate decision",
+        "candidate_queue_rule": "Candidate queue rule",
         "candidate_rule": "Candidate rule",
+        "candidate_sla": "Candidate SLA",
         "candidate_warning": "Candidate warning",
         "candidate_step": "Candidate step",
         "candidate_workflow_text": "Candidate workflow text",
