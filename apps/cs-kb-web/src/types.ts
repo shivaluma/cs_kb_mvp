@@ -201,6 +201,31 @@ export type DocumentSummary = {
   metadata: Record<string, unknown>;
 };
 
+export type RelationType = "requires" | "references";
+
+export type RelationStatus = "unresolved" | "approved" | "rejected";
+
+export type DocumentRelation = {
+  id: string;
+  source_document_id: string;
+  source_version_id: string;
+  source_chunk_id?: string | null;
+  source_title: string;
+  target_title: string;
+  target_document_id?: string | null;
+  target_version_id?: string | null;
+  target_title_resolved: string;
+  relation_type: RelationType;
+  status: RelationStatus;
+  created_by: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  rejection_reason: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
 export type DocumentMetadataPreview = {
   title: string;
   suggested_metadata: {
@@ -214,6 +239,10 @@ export type DocumentMetadataPreview = {
     source_type: string;
     review_status: string;
     extraction_confidence: number;
+    risk_level: string;
+    review_frequency: string;
+    last_reviewed_at: string;
+    next_review_due: string;
   };
   document_type: string;
   source_type: string;
@@ -407,6 +436,10 @@ export type UploadState = {
   tags: string;
   caseReasons: string;
   ownerTeam: string;
+  riskLevel: string;
+  reviewFrequency: string;
+  lastReviewedAt: string;
+  nextReviewDue: string;
   asyncExtraction: boolean;
 };
 

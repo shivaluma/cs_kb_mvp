@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import unittest
 
 from app import repository
@@ -47,6 +48,67 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertEqual(repository.promoted_unit_type("candidate_workflow_text", "workflow_diagram"), "workflow_overview")
         self.assertEqual(repository.promoted_unit_type("candidate_section", "policy_rule"), "text_section")
         self.assertEqual(repository.promoted_unit_type("full_sop", "policy_rule"), "full_sop")
+
+    def test_related_document_chunk_creates_unresolved_relation_candidate(self) -> None:
+        candidates = repository.relation_candidates_from_chunk(
+            {
+                "chunk_id": "chunk-1",
+                "section": "related_document",
+                "heading": "Quy định sử dụng tasklist",
+                "content": "bat buoc xem truoc khi xu ly task.",
+                "metadata": {"unit_type": "related_document"},
+            },
+            repository.normalize_phrase("Quy định chuyển Tech"),
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["target_title"], "Quy định sử dụng tasklist")
+        self.assertEqual(candidates[0]["relation_type"], "requires")
+
+    def test_high_risk_governance_requires_owner_review_sla_and_future_due_date(self) -> None:
+        tomorrow = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+        failures = repository.high_risk_governance_failures(
+            {"risk_level": "high"},
+            {},
+            "payment compliance rule",
+            "policy_rule",
+        )
+
+        self.assertIn("missing_owner_team", failures)
+        self.assertIn("missing_review_frequency", failures)
+        self.assertIn("missing_last_reviewed_at", failures)
+        self.assertIn("missing_next_review_due", failures)
+
+        ready_failures = repository.high_risk_governance_failures(
+            {
+                "risk_level": "high",
+                "owner_team": "CS Ops",
+                "review_frequency": "quarterly",
+                "last_reviewed_at": datetime.now(timezone.utc).date().isoformat(),
+                "next_review_due": tomorrow,
+            },
+            {},
+            "payment compliance rule",
+            "policy_rule",
+        )
+        self.assertEqual(ready_failures, [])
+
+    def test_high_risk_governance_blocks_overdue_review(self) -> None:
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        failures = repository.high_risk_governance_failures(
+            {
+                "risk_level": "critical",
+                "owner_team": "CS Ops",
+                "review_frequency": "annual",
+                "last_reviewed_at": "2026-01-01",
+                "next_review_due": yesterday,
+            },
+            {},
+            "security rule",
+            "policy_rule",
+        )
+
+        self.assertEqual(failures, ["high_risk_review_due_in_past"])
 
 
 if __name__ == "__main__":

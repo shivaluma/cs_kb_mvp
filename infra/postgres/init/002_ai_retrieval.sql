@@ -61,6 +61,31 @@ CREATE TABLE IF NOT EXISTS ai_chunks (
   UNIQUE (version_id, chunk_index)
 );
 
+CREATE TABLE IF NOT EXISTS ai_document_relations (
+  id uuid PRIMARY KEY,
+  source_document_id uuid NOT NULL REFERENCES ai_documents(id) ON DELETE CASCADE,
+  source_version_id uuid NOT NULL REFERENCES ai_document_versions(id) ON DELETE CASCADE,
+  source_chunk_id uuid REFERENCES ai_chunks(id) ON DELETE SET NULL,
+  target_title text NOT NULL,
+  target_title_normalized text NOT NULL,
+  target_document_id uuid REFERENCES ai_documents(id) ON DELETE SET NULL,
+  target_version_id uuid REFERENCES ai_document_versions(id) ON DELETE SET NULL,
+  relation_type text NOT NULL DEFAULT 'references',
+  status text NOT NULL DEFAULT 'unresolved',
+  created_by text NOT NULL DEFAULT 'system',
+  reviewed_by text,
+  reviewed_at timestamptz,
+  rejection_reason text NOT NULL DEFAULT '',
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ai_document_relations_type_check
+    CHECK (relation_type IN ('requires', 'references')),
+  CONSTRAINT ai_document_relations_status_check
+    CHECK (status IN ('unresolved', 'approved', 'rejected')),
+  UNIQUE (source_version_id, source_chunk_id, target_title_normalized, relation_type)
+);
+
 CREATE TABLE IF NOT EXISTS ai_retrieval_events (
   id uuid PRIMARY KEY,
   query text NOT NULL,
@@ -84,6 +109,9 @@ CREATE TABLE IF NOT EXISTS ai_audit_events (
 CREATE INDEX IF NOT EXISTS idx_ai_documents_status ON ai_documents(status);
 CREATE INDEX IF NOT EXISTS idx_ai_document_versions_status ON ai_document_versions(status);
 CREATE INDEX IF NOT EXISTS idx_ai_chunks_document_version ON ai_chunks(document_id, version_id);
+CREATE INDEX IF NOT EXISTS idx_ai_document_relations_status ON ai_document_relations(status);
+CREATE INDEX IF NOT EXISTS idx_ai_document_relations_source ON ai_document_relations(source_document_id, source_version_id);
+CREATE INDEX IF NOT EXISTS idx_ai_document_relations_target ON ai_document_relations(target_document_id, target_version_id);
 CREATE INDEX IF NOT EXISTS idx_ai_chunks_embedding_hnsw ON ai_chunks USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_ai_chunks_content_unaccent_fts ON ai_chunks USING gin (to_tsvector('simple', immutable_unaccent(content)));
 CREATE INDEX IF NOT EXISTS idx_ai_chunks_metadata ON ai_chunks USING gin (metadata);

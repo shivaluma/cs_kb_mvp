@@ -61,6 +61,13 @@ def retrieve(request: RetrievalRequest) -> RetrievalResponse:
 
     fused_rows = rerank_by_query_intent(normalized_query, fused_rows)[: request.limit]
     fused_rows = [row for row in fused_rows if is_reliable(row)]
+    relation_rows = repository.approved_relation_target_rows(
+        [str(row.get("document_id") or "") for row in fused_rows],
+        [str(row.get("chunk_id") or "") for row in fused_rows],
+        min(2, request.limit),
+    )
+    if relation_rows:
+        fused_rows = [*fused_rows, *relation_rows]
     if not fused_rows:
         warnings.append("no_reliable_source")
 

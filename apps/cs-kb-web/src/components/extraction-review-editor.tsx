@@ -49,6 +49,9 @@ type Draft = {
   confidence: string;
   reviewStatus: ExtractionUnit["review_status"];
   riskLevel: string;
+  reviewFrequency: string;
+  lastReviewedAt: string;
+  nextReviewDue: string;
   effectiveFrom: string;
   sourceRefAcknowledged: boolean;
   workflowGraphJson: string;
@@ -56,12 +59,19 @@ type Draft = {
 
 export function ExtractionReviewEditor({
   defaultEffectiveFrom,
+  documentGovernance,
   disabled,
   onSave,
   saving,
   unit,
 }: {
   defaultEffectiveFrom?: string;
+  documentGovernance?: {
+    riskLevel: string;
+    reviewFrequency: string;
+    lastReviewedAt: string;
+    nextReviewDue: string;
+  };
   disabled: boolean;
   onSave: (unit: ExtractionUnit, update: ExtractionUnitUpdate) => void;
   saving: boolean;
@@ -94,6 +104,9 @@ export function ExtractionReviewEditor({
       metadata: {
         ...unit.metadata,
         risk_level: draft.riskLevel,
+        review_frequency: draft.reviewFrequency,
+        last_reviewed_at: draft.lastReviewedAt,
+        next_review_due: draft.nextReviewDue,
         effective_from: effectiveFrom,
         source_ref_acknowledged: autoReviewing && unit.metadata.source_ref_quality === "page_only" ? true : draft.sourceRefAcknowledged,
         ...workflowGraphPatch,
@@ -241,12 +254,22 @@ export function ExtractionReviewEditor({
         </label>
         <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
           Risk level
-          <Input
+          <Select
             disabled={disabled}
-            onChange={(event) => setDraft((current) => ({ ...current, riskLevel: event.target.value }))}
-            placeholder="low, medium, high"
-            value={draft.riskLevel}
-          />
+            onValueChange={(riskLevel) => setDraft((current) => ({ ...current, riskLevel: riskLevel === "inherit" ? "" : riskLevel }))}
+            value={draft.riskLevel || "inherit"}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit">{inheritedLabel(documentGovernance?.riskLevel)}</SelectItem>
+              <SelectItem value="low">low</SelectItem>
+              <SelectItem value="medium">medium</SelectItem>
+              <SelectItem value="high">high</SelectItem>
+              <SelectItem value="critical">critical</SelectItem>
+            </SelectContent>
+          </Select>
         </label>
         <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
           Effective from
@@ -255,6 +278,45 @@ export function ExtractionReviewEditor({
             onChange={(event) => setDraft((current) => ({ ...current, effectiveFrom: event.target.value }))}
             placeholder="2025-04-22"
             value={draft.effectiveFrom}
+          />
+        </label>
+      </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+          Review frequency
+          <Select
+            disabled={disabled}
+            onValueChange={(reviewFrequency) => setDraft((current) => ({ ...current, reviewFrequency: reviewFrequency === "inherit" ? "" : reviewFrequency }))}
+            value={draft.reviewFrequency || "inherit"}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit">{inheritedLabel(documentGovernance?.reviewFrequency)}</SelectItem>
+              <SelectItem value="quarterly">quarterly</SelectItem>
+              <SelectItem value="semiannual">semiannual</SelectItem>
+              <SelectItem value="annual">annual</SelectItem>
+            </SelectContent>
+          </Select>
+        </label>
+        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+          Last reviewed
+          <Input
+            disabled={disabled}
+            onChange={(event) => setDraft((current) => ({ ...current, lastReviewedAt: event.target.value }))}
+            placeholder={documentGovernance?.lastReviewedAt ? `inherits ${documentGovernance.lastReviewedAt}` : "YYYY-MM-DD"}
+            value={draft.lastReviewedAt}
+          />
+        </label>
+        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+          Next review due
+          <Input
+            disabled={disabled}
+            onChange={(event) => setDraft((current) => ({ ...current, nextReviewDue: event.target.value }))}
+            placeholder={documentGovernance?.nextReviewDue ? `inherits ${documentGovernance.nextReviewDue}` : "YYYY-MM-DD"}
+            value={draft.nextReviewDue}
           />
         </label>
       </div>
@@ -333,10 +395,17 @@ function unitToDraft(unit: ExtractionUnit): Draft {
     confidence: String(unit.confidence || 0),
     reviewStatus: unit.review_status,
     riskLevel: String(unit.metadata.risk_level ?? ""),
+    reviewFrequency: String(unit.metadata.review_frequency ?? ""),
+    lastReviewedAt: String(unit.metadata.last_reviewed_at ?? ""),
+    nextReviewDue: String(unit.metadata.next_review_due ?? ""),
     effectiveFrom: String(unit.metadata.effective_from ?? ""),
     sourceRefAcknowledged: unit.metadata.source_ref_acknowledged === true,
     workflowGraphJson: unit.metadata.workflow_graph ? JSON.stringify(unit.metadata.workflow_graph, null, 2) : "",
   };
+}
+
+function inheritedLabel(value?: string) {
+  return value ? `inherit: ${value}` : "inherit from document";
 }
 
 function parseWorkflowGraphJson(value: string) {

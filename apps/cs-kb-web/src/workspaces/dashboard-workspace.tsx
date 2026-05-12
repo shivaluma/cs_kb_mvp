@@ -63,6 +63,7 @@ export function DashboardWorkspace({
   );
   const publishedDocuments = activeDocuments.filter((document) => document.latest_version_status === "published");
   const highRiskDocuments = activeDocuments.filter(isHighRiskDocument);
+  const overdueReviewDocuments = publishedDocuments.filter(isReviewOverdueDocument);
   const staleDocuments = activeDocuments.filter(isStaleDocument);
   const aiReviewDocuments = activeDocuments.filter((document) => document.latest_review_status !== "approved");
   const activeSynonyms = synonyms.filter((group) => group.status === "active");
@@ -157,6 +158,7 @@ export function DashboardWorkspace({
             activeDocuments={activeDocuments}
             highRiskDocuments={highRiskDocuments}
             onWorkspaceChange={onWorkspaceChange}
+            overdueReviewDocuments={overdueReviewDocuments}
             staleDocuments={staleDocuments}
           />
         </TabsContent>
@@ -526,11 +528,13 @@ function ContentHealth({
   activeDocuments,
   highRiskDocuments,
   onWorkspaceChange,
+  overdueReviewDocuments,
   staleDocuments,
 }: {
   activeDocuments: DocumentSummary[];
   highRiskDocuments: DocumentSummary[];
   onWorkspaceChange: (workspace: Workspace) => void;
+  overdueReviewDocuments: DocumentSummary[];
   staleDocuments: DocumentSummary[];
 }) {
   const lowHealthDocs = [...activeDocuments]
@@ -540,9 +544,10 @@ function ContentHealth({
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(22rem,0.8fr)]">
       <section className="space-y-4">
-        <div className="grid gap-3 md:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-5">
           <KpiCard icon={BookOpen} label="Active SOP docs" value={activeDocuments.length} />
           <KpiCard icon={ShieldCheck} label="High-risk" tone={highRiskDocuments.length ? "warning" : "default"} value={highRiskDocuments.length} />
+          <KpiCard icon={AlertTriangle} label="Overdue review" tone={overdueReviewDocuments.length ? "warning" : "default"} value={overdueReviewDocuments.length} />
           <KpiCard icon={FileClock} label="Stale docs" tone={staleDocuments.length ? "warning" : "default"} value={staleDocuments.length} />
           <KpiCard icon={CheckCircle2} label="Avg health" value={`${averageHealth(activeDocuments)}%`} />
         </div>
@@ -586,6 +591,15 @@ function ContentHealth({
             <CardDescription>Operational content actions, not BI decoration.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 pt-4">
+            {overdueReviewDocuments.length ? (
+              <ActionItem
+                action="Open documents"
+                icon={AlertTriangle}
+                onClick={() => onWorkspaceChange("documents")}
+                title="High-risk SOP overdue review"
+                text={`${overdueReviewDocuments.length} published high-risk SOP${overdueReviewDocuments.length === 1 ? "" : "s"} past next_review_due.`}
+              />
+            ) : null}
             <ActionItem
               action="Review docs"
               icon={FileClock}
@@ -732,10 +746,13 @@ function deriveSearchSignals(activeDocCount: number, reviewDocCount: number, act
 
 function isHighRiskDocument(document: DocumentSummary) {
   const metadata = document.metadata ?? {};
+  const riskLevel = String(metadata.risk_level ?? metadata.riskLevel ?? "").toLowerCase();
   const serialized = JSON.stringify(metadata).toLowerCase();
   return (
-    serialized.includes("high") ||
-    serialized.includes("risk") ||
+    riskLevel === "high" ||
+    riskLevel === "critical" ||
+    serialized.includes("high-risk") ||
+    serialized.includes("high risk") ||
     serialized.includes("compliance") ||
     serialized.includes("security") ||
     document.latest_document_type === "policy_rule" ||
@@ -746,6 +763,31 @@ function isHighRiskDocument(document: DocumentSummary) {
 function isStaleDocument(document: DocumentSummary) {
   const ageMs = Date.now() - new Date(document.updated_at).getTime();
   return ageMs > 1000 * 60 * 60 * 24 * 60;
+}
+
+function isReviewOverdueDocument(document: DocumentSummary) {
+  if (!isHighRiskDocument(document)) {
+    return false;
+  }
+  const due = parseMetadataDate(document.metadata?.next_review_due);
+  if (!due) {
+    return false;
+  }
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return due.getTime() < today.getTime();
+}
+
+function parseMetadataDate(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  date.setHours(0, 0, 0, 0);
+  return date;
 }
 
 function healthScore(document: DocumentSummary) {

@@ -18,9 +18,11 @@ from app.ingestion import prepare_document_version, preview_document_metadata
 from app.retrieval import retrieve
 from app.schemas import (
     BulkReviewVersionRequest,
+    AssignRelationRequest,
     DocumentMetadata,
     DocumentMetadataPreviewResponse,
     DocumentChunkSummary,
+    DocumentRelation,
     DocumentSummary,
     DocumentVersionResponse,
     ExtractionJobSummary,
@@ -32,6 +34,7 @@ from app.schemas import (
     GroundedChatResponse,
     IndexSOPVersionRequest,
     PublishVersionRequest,
+    RejectRelationRequest,
     RetrievalFilters,
     RetrievalRequest,
     RetrievalResponse,
@@ -648,6 +651,30 @@ async def preview_document_upload_metadata(file: UploadFile = File(...)) -> Docu
 @app.get("/ai/v1/documents", response_model=list[DocumentSummary])
 def list_documents() -> list[DocumentSummary]:
     return [DocumentSummary(**row) for row in repository.list_documents()]
+
+
+@app.get("/ai/v1/relations", response_model=list[DocumentRelation])
+def list_relations(status: str = "unresolved") -> list[DocumentRelation]:
+    return [DocumentRelation(**row) for row in repository.list_document_relations(status)]
+
+
+@app.post("/ai/v1/relations/{relation_id}/assign", response_model=DocumentRelation)
+def assign_relation(relation_id: str, payload: AssignRelationRequest) -> DocumentRelation:
+    try:
+        return DocumentRelation(**repository.assign_document_relation(relation_id, payload.target_document_id, payload.actor))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/relations/{relation_id}/reject", response_model=DocumentRelation)
+def reject_relation(relation_id: str, payload: RejectRelationRequest | None = None) -> DocumentRelation:
+    data = payload or RejectRelationRequest()
+    try:
+        return DocumentRelation(**repository.reject_document_relation(relation_id, data.actor, data.rejection_reason))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/ai/v1/documents/{document_id}/versions", response_model=list[VersionSummary])

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EmptyPanel, Field, StatusBadge } from "@/components/common";
@@ -138,6 +139,7 @@ export function DocumentsWorkspace({
   const uploadReady = Boolean(selectedFile && validType && validSize);
   const uploadSteps = ["Upload", "Extract", "Chunk", "Embed", "Index"];
   const selectedVersion = versions.find((version) => version.version_id === selectedChunkVersionId);
+  const selectedDocumentGovernance = selectedDocument ? documentGovernanceDefaults(selectedDocument) : undefined;
   const selectedDocumentTitle = selectedDocument?.title || upload.title || "published SOP";
   const [sourceMode, setSourceMode] = useState<"file" | "text">("file");
   const [confirmingPublishVersionId, setConfirmingPublishVersionId] = useState("");
@@ -534,6 +536,30 @@ export function DocumentsWorkspace({
               <Field label="Category" value={upload.category} onChange={(category) => setUpload((current) => ({ ...current, category }))} />
               <Field label="Owner team" value={upload.ownerTeam} onChange={(ownerTeam) => setUpload((current) => ({ ...current, ownerTeam }))} />
             </div>
+            <div className="rounded-lg border bg-muted/20 p-3">
+              <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-foreground">
+                <ShieldCheck className="size-4" />
+                Owner review SLA
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
+                <GovernanceSelect
+                  label="Risk level"
+                  onChange={(riskLevel) => setUpload((current) => ({ ...current, riskLevel }))}
+                  options={["low", "medium", "high", "critical"]}
+                  placeholder="Unset risk"
+                  value={upload.riskLevel}
+                />
+                <GovernanceSelect
+                  label="Review frequency"
+                  onChange={(reviewFrequency) => setUpload((current) => ({ ...current, reviewFrequency }))}
+                  options={["quarterly", "semiannual", "annual"]}
+                  placeholder="Unset frequency"
+                  value={upload.reviewFrequency}
+                />
+                <Field label="Last reviewed" value={upload.lastReviewedAt} onChange={(lastReviewedAt) => setUpload((current) => ({ ...current, lastReviewedAt }))} placeholder="YYYY-MM-DD" />
+                <Field label="Next review due" value={upload.nextReviewDue} onChange={(nextReviewDue) => setUpload((current) => ({ ...current, nextReviewDue }))} placeholder="YYYY-MM-DD" />
+              </div>
+            </div>
             <Field label="Tags" value={upload.tags} onChange={(tags) => setUpload((current) => ({ ...current, tags }))} />
             <Field label="Case reasons" value={upload.caseReasons} onChange={(caseReasons) => setUpload((current) => ({ ...current, caseReasons }))} />
 
@@ -881,6 +907,7 @@ export function DocumentsWorkspace({
                             {filteredDocumentLayerUnits.map((unit) => (
                               <ExtractionReviewEditor
                                 defaultEffectiveFrom={defaultEffectiveFrom}
+                                documentGovernance={selectedDocumentGovernance}
                                 disabled={!canEditSelectedVersion}
                                 key={unit.unit_id}
                                 onSave={onUpdateExtractionUnit}
@@ -899,6 +926,7 @@ export function DocumentsWorkspace({
                             {filteredWorkflowGraphUnits.map((unit) => (
                               <ExtractionReviewEditor
                                 defaultEffectiveFrom={defaultEffectiveFrom}
+                                documentGovernance={selectedDocumentGovernance}
                                 disabled={!canEditSelectedVersion}
                                 key={unit.unit_id}
                                 onSave={onUpdateExtractionUnit}
@@ -922,6 +950,7 @@ export function DocumentsWorkspace({
                           {sortUnitsForRequirementFocus(filteredAtomicUnits, requiredUnitFocus).map((unit) => (
                             <ExtractionReviewEditor
                               defaultEffectiveFrom={defaultEffectiveFrom}
+                              documentGovernance={selectedDocumentGovernance}
                               disabled={!canEditSelectedVersion}
                               key={unit.unit_id}
                               onSave={onUpdateExtractionUnit}
@@ -2974,6 +3003,11 @@ function readablePublishFailure(failure: string) {
     missing_full_sop_layer: "Full SOP layer is missing",
     missing_owner_team: "Owner team is missing",
     missing_production_atomic_units: "Production atomic units are missing",
+    missing_review_frequency: "Review frequency is missing",
+    missing_last_reviewed_at: "Last reviewed date is missing",
+    missing_next_review_due: "Next review due date is missing",
+    missing_risk_level: "Risk level is missing",
+    high_risk_review_due_in_past: "High-risk review due date is overdue",
     missing_workflow_graph: "Workflow graph is missing",
     no_extraction_units: "No extraction units",
     workflow_graph_acknowledgement_reason_missing: "Graph acknowledgement needs a reason",
@@ -2983,6 +3017,47 @@ function readablePublishFailure(failure: string) {
     workflow_graph_needs_review: "Workflow graph unit needs review",
   };
   return known[failure] ?? failure.replace(/_/g, " ");
+}
+
+function GovernanceSelect({
+  label,
+  onChange,
+  options,
+  placeholder,
+  value,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  options: string[];
+  placeholder: string;
+  value: string;
+}) {
+  return (
+    <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+      {label}
+      <Select onValueChange={(nextValue) => onChange(nextValue === "unset" ? "" : nextValue)} value={value || "unset"}>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="unset">{placeholder}</SelectItem>
+          {options.map((option) => (
+            <SelectItem key={option} value={option}>{option}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </label>
+  );
+}
+
+function documentGovernanceDefaults(document: DocumentSummary) {
+  const metadata = document.metadata ?? {};
+  return {
+    riskLevel: String(metadata.risk_level ?? ""),
+    reviewFrequency: String(metadata.review_frequency ?? ""),
+    lastReviewedAt: String(metadata.last_reviewed_at ?? ""),
+    nextReviewDue: String(metadata.next_review_due ?? ""),
+  };
 }
 
 function requiredUnitTypesFromExtraction(...units: Array<ExtractionUnit | undefined>) {

@@ -53,6 +53,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/search/synonym-suggestions/{id}/accept", h.proxyAISynonymSuggestionAccept)
 	mux.HandleFunc("POST /api/v1/ai/suggest", h.aiSuggest)
 	mux.HandleFunc("GET /api/v1/ai/documents", h.proxyAI("/ai/v1/documents"))
+	mux.HandleFunc("GET /api/v1/ai/relations", h.proxyAI("/ai/v1/relations"))
+	mux.HandleFunc("POST /api/v1/ai/relations/{id}/assign", h.proxyAIRelationAction("assign"))
+	mux.HandleFunc("POST /api/v1/ai/relations/{id}/reject", h.proxyAIRelationAction("reject"))
 	mux.HandleFunc("POST /api/v1/ai/documents/metadata-preview", h.proxyAIDocumentMetadataPreview)
 	mux.HandleFunc("POST /api/v1/ai/documents/upload", h.proxyAIDocumentUpload)
 	mux.HandleFunc("POST /api/v1/ai/documents/upload-async", h.proxyAIDocumentUploadAsync)
@@ -464,6 +467,12 @@ func (h *Handler) proxyAISynonymAction(action string) http.HandlerFunc {
 
 func (h *Handler) proxyAISynonymSuggestionAccept(w http.ResponseWriter, r *http.Request) {
 	h.proxyAI("/ai/v1/search/synonym-suggestions/"+r.PathValue("id")+"/accept")(w, r)
+}
+
+func (h *Handler) proxyAIRelationAction(action string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		h.proxyAI("/ai/v1/relations/"+r.PathValue("id")+"/"+action)(w, r)
+	}
 }
 
 func (h *Handler) syncMeilisearchSynonyms(w http.ResponseWriter, r *http.Request) {

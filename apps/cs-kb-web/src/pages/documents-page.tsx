@@ -35,6 +35,8 @@ export function DocumentsPage() {
   const [upload, setUpload] = useState<UploadState>(defaultUpload);
   const selectedDocumentId = getParam("document", "");
   const selectedChunkVersionId = getParam("version", "");
+  const uploadTitlePrefill = getParam("upload_title", "");
+  const relationPrefill = getParam("relation", "");
   const documentsQuery = useDocuments();
   const documents = useMemo(
     () =>
@@ -84,6 +86,17 @@ export function DocumentsPage() {
     }
   }, [selectedDocument, selectedDocumentId, selectedChunkVersionId, setParams]);
 
+  useEffect(() => {
+    if (!uploadTitlePrefill) {
+      return;
+    }
+    setUpload((current) => ({
+      ...current,
+      externalId: current.externalId || fileExternalId(uploadTitlePrefill),
+      title: current.title || uploadTitlePrefill,
+    }));
+  }, [uploadTitlePrefill]);
+
   function selectDocument(documentId: string) {
     const document = documents.find((item) => item.document_id === documentId);
     if (!document) {
@@ -102,14 +115,18 @@ export function DocumentsPage() {
       ...current,
       file,
       status: "draft",
-      title: "",
-      externalId: "",
+      title: uploadTitlePrefill || "",
+      externalId: uploadTitlePrefill ? fileExternalId(uploadTitlePrefill) : "",
       vertical: "",
       category: "",
       audience: "",
       tags: "",
       caseReasons: "",
       ownerTeam: current.ownerTeam || "CS Ops",
+      riskLevel: current.riskLevel,
+      reviewFrequency: current.reviewFrequency,
+      lastReviewedAt: current.lastReviewedAt,
+      nextReviewDue: current.nextReviewDue,
     }));
     if (!file) {
       return;
@@ -126,7 +143,7 @@ export function DocumentsPage() {
           }
           return {
             ...current,
-            title: preview.title || current.title || file.name,
+            title: current.title || preview.title || file.name,
             externalId: current.externalId || fileExternalId(file.name),
             vertical: metadata.vertical || current.vertical,
             category: metadata.category || current.category,
@@ -134,6 +151,10 @@ export function DocumentsPage() {
             tags: metadata.tags?.join(", ") || current.tags,
             caseReasons: metadata.case_reasons?.join(", ") || current.caseReasons,
             ownerTeam: metadata.owner_team || current.ownerTeam || "CS Ops",
+            riskLevel: metadata.risk_level || current.riskLevel,
+            reviewFrequency: metadata.review_frequency || current.reviewFrequency,
+            lastReviewedAt: metadata.last_reviewed_at || current.lastReviewedAt,
+            nextReviewDue: metadata.next_review_due || current.nextReviewDue,
             status: "draft",
           };
         });
@@ -179,6 +200,11 @@ export function DocumentsPage() {
         tags: splitList(upload.tags),
         case_reasons: splitList(upload.caseReasons),
         owner_team: upload.ownerTeam,
+        risk_level: upload.riskLevel,
+        review_frequency: upload.reviewFrequency,
+        last_reviewed_at: upload.lastReviewedAt,
+        next_review_due: upload.nextReviewDue,
+        unresolved_relation_id: relationPrefill,
         source: "web_upload",
       }),
     );
@@ -213,7 +239,7 @@ export function DocumentsPage() {
           reportError(
             force
               ? "Force publish failed. Confirm this is an editable draft version and retry."
-              : "Publish blocked. Finish readiness checks first: full SOP, reviewed units, source refs, workflow graph, owner, effective date, and high-risk warnings.",
+              : "Publish blocked. Finish readiness checks first: full SOP, reviewed units, source refs, workflow graph, owner, effective date, and high-risk review SLA.",
           ),
       },
     );

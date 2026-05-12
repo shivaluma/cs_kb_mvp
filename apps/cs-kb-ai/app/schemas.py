@@ -23,6 +23,8 @@ DocumentType = Literal[
 ]
 ReviewStatus = Literal["needs_review", "reviewed", "approved"]
 BulkReviewScope = Literal["all", "atomic"]
+RelationType = Literal["requires", "references"]
+RelationStatus = Literal["unresolved", "approved", "rejected"]
 ExtractionUnitType = Literal[
     "full_sop",
     "routing_rule",
@@ -107,6 +109,9 @@ class DocumentMetadata(BaseModel):
     effective_from: str = ""
     required_unit_types: list[str] = Field(default_factory=list)
     risk_level: str = ""
+    review_frequency: str = ""
+    last_reviewed_at: str = ""
+    next_review_due: str = ""
     pipeline_job_status: str = ""
     pipeline_current_stage: str = ""
     pipeline_artifacts: list[dict[str, Any]] = Field(default_factory=list)
@@ -836,6 +841,37 @@ class VersionRawTextResponse(BaseModel):
     raw_text: str
     chunk_count: int
     created_at: datetime
+
+
+class DocumentRelation(BaseModel):
+    id: str
+    source_document_id: str
+    source_version_id: str
+    source_chunk_id: Optional[str] = None
+    source_title: str = ""
+    target_title: str
+    target_document_id: Optional[str] = None
+    target_version_id: Optional[str] = None
+    target_title_resolved: str = ""
+    relation_type: RelationType
+    status: RelationStatus
+    created_by: str = "system"
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    rejection_reason: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssignRelationRequest(BaseModel):
+    target_document_id: str = Field(min_length=1)
+    actor: str = "cs-ops-ui"
+
+
+class RejectRelationRequest(BaseModel):
+    actor: str = "cs-ops-ui"
+    rejection_reason: str = ""
 
 
 class RetrievalFilters(BaseModel):

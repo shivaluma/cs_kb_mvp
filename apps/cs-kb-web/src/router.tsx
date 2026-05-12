@@ -6,6 +6,7 @@ import { ChatPage } from "@/pages/chat-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { DocumentsPage } from "@/pages/documents-page";
 import { LookupPage } from "@/pages/lookup-page";
+import { RelationsPage } from "@/pages/relations-page";
 import { RetrievalPage } from "@/pages/retrieval-page";
 import { SynonymsPage } from "@/pages/synonyms-page";
 
@@ -38,6 +39,12 @@ const documentsRoute = createRoute({
   component: DocumentsPage,
 });
 
+const relationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.relations,
+  component: RelationsPage,
+});
+
 const synonymsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: workspacePaths.synonyms,
@@ -55,6 +62,7 @@ const routeTree = rootRoute.addChildren([
   lookupRoute,
   chatRoute,
   documentsRoute,
+  relationsRoute,
   synonymsRoute,
   retrievalRoute,
 ]);

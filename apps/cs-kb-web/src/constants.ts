@@ -1,4 +1,4 @@
-import { Bot, FileText, LayoutDashboard, MessageSquareText, Search, WandSparkles } from "lucide-react";
+import { Bot, FileText, GitBranch, LayoutDashboard, MessageSquareText, Search, WandSparkles } from "lucide-react";
 
 import type { FilterState, SynonymDraft, UploadState } from "@/types";
 
@@ -7,6 +7,7 @@ export const workspacePaths = {
   lookup: "/lookup",
   chat: "/chat",
   documents: "/documents",
+  relations: "/relations",
   synonyms: "/synonyms",
   retrieval: "/retrieval",
 } as const;
@@ -30,6 +31,10 @@ export const defaultUpload: UploadState = {
   tags: "",
   caseReasons: "",
   ownerTeam: "CS Ops",
+  riskLevel: "",
+  reviewFrequency: "",
+  lastReviewedAt: "",
+  nextReviewDue: "",
   asyncExtraction: true,
 };
 
@@ -76,6 +81,13 @@ export const navItems = [
     label: "Documents",
     icon: FileText,
     description: "Upload, extract, review, publish, and archive source files.",
+  },
+  {
+    id: "relations",
+    path: workspacePaths.relations,
+    label: "Unresolved Relations",
+    icon: GitBranch,
+    description: "Resolve SOP dependencies before AI can expand answers across documents.",
   },
   {
     id: "synonyms",
