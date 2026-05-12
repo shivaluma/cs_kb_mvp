@@ -132,9 +132,10 @@ export function useDocumentMetadataPreview() {
 export function usePublishVersion() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (payload: { versionId: string; actor: string }) =>
+    mutationFn: (payload: { versionId: string; actor: string; force?: boolean }) =>
       apiPost(`/api/v1/ai/versions/${payload.versionId}/publish`, {
         actor: payload.actor,
+        force: payload.force ?? false,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.documents });

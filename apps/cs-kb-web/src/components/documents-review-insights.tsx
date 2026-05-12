@@ -493,7 +493,7 @@ export function buildPublishTasks({
 
   if (pageOnlySourceRefUnacknowledged > 0 && !tasks.some((task) => task.id === "source-refs")) {
     tasks.push({
-      action: "For each page-only PDF/diagram unit, verify against the source viewer and tick source acknowledgement.",
+      action: "Use the Source refs filter in Review, verify each page-only PDF/diagram unit against the source viewer, then tick source acknowledgement.",
       detail: `${pageOnlySourceRefUnacknowledged} unit(s) only have page-level traceability.`,
       id: "source-refs",
       severity: "blocker",
@@ -1051,7 +1051,7 @@ function readinessActionForCheck(label: string) {
     "Owner assigned": "Set owner_team so future changes have operational ownership.",
     "Required workflow units": "Complete required workflow units from the dedicated workflow panel.",
     "Selected version": "Inspect the draft version that should be published.",
-    "Source refs acknowledged": "Verify page-only source refs in the source viewer and acknowledge them.",
+    "Source refs acknowledged": "Open Review, use the Source refs filter, then acknowledge each page-only source ref after source review.",
     "Workflow graph reviewed": "Open Workflow graph, use Decision branch review for Yes/No edges, use Uncertain edges to acknowledge topology warnings, then approve the graph unit.",
   };
   return actions[label] ?? "Resolve this readiness check before publishing.";

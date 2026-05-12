@@ -197,17 +197,23 @@ export function DocumentsPage() {
     });
   }
 
-  function publishVersion(versionId: string) {
+  function publishVersion(versionId: string, force = false) {
     publishMutation.mutate(
-      { versionId, actor: "cs-lead-ui" },
+      { versionId, actor: force ? "cs-lead-ui-force" : "cs-lead-ui", force },
       {
         onSuccess: () => {
           setParams({ version: versionId });
-          reportNotice("Version published. Previous published version was archived and Meilisearch was updated.");
+          reportNotice(
+            force
+              ? "Version force published for MVP testing. Previous published version was archived and Meilisearch was updated."
+              : "Version published. Previous published version was archived and Meilisearch was updated.",
+          );
         },
         onError: () =>
           reportError(
-            "Publish blocked. Finish readiness checks first: full SOP, reviewed units, source refs, workflow graph, owner, effective date, and high-risk warnings.",
+            force
+              ? "Force publish failed. Confirm this is an editable draft version and retry."
+              : "Publish blocked. Finish readiness checks first: full SOP, reviewed units, source refs, workflow graph, owner, effective date, and high-risk warnings.",
           ),
       },
     );

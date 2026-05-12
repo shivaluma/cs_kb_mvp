@@ -35,7 +35,7 @@ type WorkflowEdgeMetadata = NonNullable<WorkflowGraphMetadata["edges"]>[number];
 type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
 type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
 type DocumentStep = "view" | "gate" | "workflow" | "sop" | "publish" | "review" | "chunks";
-type ReviewFilter = "needs_review" | "reviewed" | "approved" | "atomic" | "all";
+type ReviewFilter = "needs_review" | "reviewed" | "approved" | "source_refs" | "atomic" | "all";
 type RequiredWorkflowUnit = {
   key: string;
   label: string;
@@ -106,7 +106,7 @@ export function DocumentsWorkspace({
   onCreateExtractionUnit: (versionId: string, unit: ExtractionUnitCreate) => void;
   onInspectVersion: (versionId: string) => void;
   onFileSelected: (file: File | null) => void;
-  onPublishVersion: (versionId: string) => void;
+  onPublishVersion: (versionId: string, force?: boolean) => void;
   onRefreshDocuments: () => void;
   onSelectDocument: (documentId: string) => void;
   onUpload: () => void;
@@ -141,6 +141,7 @@ export function DocumentsWorkspace({
   const selectedDocumentTitle = selectedDocument?.title || upload.title || "published SOP";
   const [sourceMode, setSourceMode] = useState<"file" | "text">("file");
   const [confirmingPublishVersionId, setConfirmingPublishVersionId] = useState("");
+  const [confirmingForcePublishVersionId, setConfirmingForcePublishVersionId] = useState("");
   const [rawTextError, setRawTextError] = useState("");
   const [rawTextName, setRawTextName] = useState("raw-sop-draft.md");
   const [rawTextStats, setRawTextStats] = useState({ bytes: 0, chars: 0, lines: 0 });
@@ -156,14 +157,16 @@ export function DocumentsWorkspace({
     }
     return document.status === sourceFilter;
   });
-  const fullSopUnit = extractionUnits.find((unit) => isDocumentLayer(unit));
-  const workflowGraphUnit = extractionUnits.find((unit) => unit.unit_type === "workflow_graph" || Boolean(unit.metadata.workflow_graph));
+  const documentLayerUnits = extractionUnits.filter(isDocumentLayer);
+  const fullSopUnit = documentLayerUnits.find((unit) => unit.unit_type === "full_sop") ?? documentLayerUnits[0];
+  const workflowGraphUnit = extractionUnits.find(isWorkflowGraphUnit);
+  const workflowGraphUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && isWorkflowGraphUnit(unit));
   const workflowGraph = workflowGraphUnit?.metadata.workflow_graph as WorkflowGraphMetadata | undefined;
   const sourceEvidenceView = useMemo(() => sourceEvidenceViewPayload(extractionPipeline), [extractionPipeline]);
   const workflowGraphValidationErrors = workflowGraph?.validation_errors ?? workflowGraphUnit?.metadata.graph_validation_errors ?? [];
   const workflowGraphUncertainEdges = workflowGraph?.uncertain_edges ?? workflowGraphUnit?.metadata.uncertain_edges ?? [];
   const workflowEdgeReviewSummary = buildWorkflowEdgeReviewSummary(workflowGraph, workflowGraphUnit);
-  const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && unit.unit_type !== "workflow_graph" && !unit.metadata.workflow_graph);
+  const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && !isWorkflowGraphUnit(unit));
   const selectedIsArchived = selectedDocument?.status === "archived";
   const pendingReviewCount = extractionUnits.filter((unit) => unit.review_status === "needs_review").length;
   const pendingAtomicReviewCount = atomicUnits.filter((unit) => unit.review_status === "needs_review").length;
@@ -223,6 +226,7 @@ export function DocumentsWorkspace({
     needs_review: extractionUnits.filter((unit) => unit.review_status === "needs_review").length,
     reviewed: extractionUnits.filter((unit) => unit.review_status === "reviewed").length,
     approved: extractionUnits.filter((unit) => unit.review_status === "approved").length,
+    source_refs: pageOnlySourceRefUnacknowledged,
     atomic: atomicUnits.length,
     all: extractionUnits.length,
   };
@@ -324,12 +328,14 @@ export function DocumentsWorkspace({
     Number(selectedVersion?.extraction_confidence ?? 1) < 0.85;
   const selectedVersionCanBulkReview = Boolean(selectedVersion) && canEditSelectedVersion && pendingReviewCount > 0 && !bulkReviewBlocked;
   const selectedVersionCanBulkReviewAtomic = Boolean(selectedVersion) && canEditSelectedVersion && pendingAtomicReviewCount > 0 && !bulkReviewBlocked;
-  const filteredDocumentLayer = fullSopUnit && unitMatchesReviewFilter(fullSopUnit, reviewFilter, false) ? fullSopUnit : null;
+  const filteredDocumentLayerUnits = documentLayerUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, false));
+  const filteredWorkflowGraphUnits = workflowGraphUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, false));
   const filteredAtomicUnits = atomicUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, true));
   const focusedRequiredUnits = requiredUnitFocus
     ? filteredAtomicUnits.filter((unit) => requiredUnitFocus.types.includes(unit.unit_type))
     : [];
-  const filteredUnitsCount = (filteredDocumentLayer ? 1 : 0) + filteredAtomicUnits.length;
+  const filteredUnitsCount = filteredDocumentLayerUnits.length + filteredWorkflowGraphUnits.length + filteredAtomicUnits.length;
+  const reviewEmptyState = reviewFilterEmptyState(reviewFilter);
   const canBulkApproveVisible = Boolean(selectedVersion) && canEditSelectedVersion && filteredUnitsCount > 0 && !bulkReviewBlocked;
   const bulkApproveScope: "all" | "atomic" = reviewFilter === "atomic" ? "atomic" : "all";
   const bulkApproveLabel = bulkApproveScope === "atomic" ? "Approve all atomic units" : "Approve all units";
@@ -861,24 +867,45 @@ export function DocumentsWorkspace({
                         {filteredUnitsCount === 0 ? (
                           <EmptyPanel
                             icon={CheckCircle2}
-                            title={reviewFilter === "needs_review" ? "No units need review" : "No units in this filter"}
-                            text={reviewFilter === "needs_review" ? "Switch to All or Approved to audit completed units." : "Change the review filter to inspect another group."}
+                            title={reviewEmptyState.title}
+                            text={reviewEmptyState.text}
                             compact
                           />
                         ) : null}
-                        {filteredDocumentLayer ? (
+                        {filteredDocumentLayerUnits.length ? (
                           <section className="space-y-2">
                             <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                               <BookOpen className="size-4" />
                               Document layer
                             </div>
-                            <ExtractionReviewEditor
-                              defaultEffectiveFrom={defaultEffectiveFrom}
-                              disabled={!canEditSelectedVersion}
-                              onSave={onUpdateExtractionUnit}
-                              saving={savingUnitId === filteredDocumentLayer.unit_id}
-                              unit={filteredDocumentLayer}
-                            />
+                            {filteredDocumentLayerUnits.map((unit) => (
+                              <ExtractionReviewEditor
+                                defaultEffectiveFrom={defaultEffectiveFrom}
+                                disabled={!canEditSelectedVersion}
+                                key={unit.unit_id}
+                                onSave={onUpdateExtractionUnit}
+                                saving={savingUnitId === unit.unit_id}
+                                unit={unit}
+                              />
+                            ))}
+                          </section>
+                        ) : null}
+                        {filteredWorkflowGraphUnits.length ? (
+                          <section className="space-y-2">
+                            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                              <Network className="size-4" />
+                              Workflow graph unit
+                            </div>
+                            {filteredWorkflowGraphUnits.map((unit) => (
+                              <ExtractionReviewEditor
+                                defaultEffectiveFrom={defaultEffectiveFrom}
+                                disabled={!canEditSelectedVersion}
+                                key={unit.unit_id}
+                                onSave={onUpdateExtractionUnit}
+                                saving={savingUnitId === unit.unit_id}
+                                unit={unit}
+                              />
+                            ))}
                           </section>
                         ) : null}
                         {filteredAtomicUnits.length ? (
@@ -1151,7 +1178,7 @@ export function DocumentsWorkspace({
               </CardContent>
             </Card>
 
-            <PublishTaskList tasks={publishTasks} ready={readinessPassed && !selectedIsArchived} />
+            <PublishTaskList tasks={publishTasks} ready={readinessPassed && !selectedIsArchived && !publishReadinessLoading && publishReadiness?.ready !== false} />
 
             <SopQualityAuditPanel audit={sopQualityAudit} />
           </TabsContent>
@@ -1169,14 +1196,24 @@ export function DocumentsWorkspace({
                 <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
                   {versions.map((version) => {
                     const isInspectedVersion = selectedChunkVersionId === version.version_id;
-                    const publishBlocked = selectedIsArchived || !isInspectedVersion || !readinessPassed;
-                    const publishBlockReason = selectedIsArchived
-                      ? "Archived sources cannot be republished from this audit view."
-                      : !isInspectedVersion
-                        ? "Inspect this version before publishing it."
-                        : !readinessPassed
-                          ? "Publishing is blocked until the Verify checklist passes."
-                          : "";
+                    const versionArchived = version.status === "archived";
+                    const backendPublishChecking = isInspectedVersion && publishReadinessLoading;
+                    const backendPublishBlocked = isInspectedVersion && publishReadiness?.ready === false;
+                    const publishBlocked = selectedIsArchived || versionArchived || !isInspectedVersion || !readinessPassed || backendPublishChecking || backendPublishBlocked;
+                    let publishBlockReason = "";
+                    if (selectedIsArchived) {
+                      publishBlockReason = "Archived sources cannot be republished from this audit view.";
+                    } else if (versionArchived) {
+                      publishBlockReason = "Archived versions cannot be republished from this audit view.";
+                    } else if (!isInspectedVersion) {
+                      publishBlockReason = "Inspect this version before publishing it.";
+                    } else if (backendPublishChecking) {
+                      publishBlockReason = "Backend publish gate is still checking this version.";
+                    } else if (backendPublishBlocked) {
+                      publishBlockReason = `Backend publish gate still has ${publishReadiness?.failure_count ?? 0} blocker(s).`;
+                    } else if (!readinessPassed) {
+                      publishBlockReason = "Publishing is blocked until the Verify checklist passes.";
+                    }
                     return (
                     <div className={cn("rounded-lg border p-3", selectedChunkVersionId === version.version_id ? "bg-muted/35" : "bg-card")} key={version.version_id}>
                       <div className="flex items-start justify-between gap-3">
@@ -1192,32 +1229,65 @@ export function DocumentsWorkspace({
                           </p>
                         </div>
                         {version.status !== "published" ? (
-                          <Button
-                            data-testid={`version-${version.version_id}-publish`}
-                            disabled={busyKey === "publishing" || publishBlocked}
-                            onClick={() => {
-                              if (confirmingPublishVersionId !== version.version_id) {
-                                setConfirmingPublishVersionId(version.version_id);
-                                return;
-                              }
-                              setConfirmingPublishVersionId("");
-                              onPublishVersion(version.version_id);
-                            }}
-                            size="sm"
-                            type="button"
-                          >
-                            {selectedIsArchived
-                              ? "Archived"
-                              : !isInspectedVersion
-                                ? "Inspect first"
-                              : !readinessPassed
-                                ? "Not ready"
-                              : busyKey === "publishing"
-                              ? "Publishing"
-                              : confirmingPublishVersionId === version.version_id
-                                ? "Confirm publish"
-                                : "Publish"}
-                          </Button>
+                          <div className="flex shrink-0 flex-col items-end gap-2">
+                            <Button
+                              data-testid={`version-${version.version_id}-publish`}
+                              disabled={busyKey === "publishing" || publishBlocked}
+                              onClick={() => {
+                                if (confirmingPublishVersionId !== version.version_id) {
+                                  setConfirmingForcePublishVersionId("");
+                                  setConfirmingPublishVersionId(version.version_id);
+                                  return;
+                                }
+                                setConfirmingPublishVersionId("");
+                                onPublishVersion(version.version_id);
+                              }}
+                              size="sm"
+                              type="button"
+                            >
+                              {selectedIsArchived
+                                ? "Archived"
+                                : versionArchived
+                                  ? "Archived"
+                                : !isInspectedVersion
+                                  ? "Inspect first"
+                                : !readinessPassed || backendPublishChecking || backendPublishBlocked
+                                  ? "Not ready"
+                                : busyKey === "publishing"
+                                ? "Publishing"
+                                : confirmingPublishVersionId === version.version_id
+                                  ? "Confirm publish"
+                                  : "Publish"}
+                            </Button>
+                            <Button
+                              className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                              data-testid={`version-${version.version_id}-force-publish`}
+                              disabled={busyKey === "publishing" || selectedIsArchived || versionArchived || !isInspectedVersion}
+                              onClick={() => {
+                                if (confirmingForcePublishVersionId !== version.version_id) {
+                                  setConfirmingPublishVersionId("");
+                                  setConfirmingForcePublishVersionId(version.version_id);
+                                  return;
+                                }
+                                setConfirmingForcePublishVersionId("");
+                                onPublishVersion(version.version_id, true);
+                              }}
+                              size="sm"
+                              type="button"
+                              variant="outline"
+                            >
+                              <TriangleAlert data-icon="inline-start" className="size-3.5" />
+                              {busyKey === "publishing"
+                                ? "Publishing"
+                                : selectedIsArchived || versionArchived
+                                  ? "Archived"
+                                : !isInspectedVersion
+                                  ? "Inspect first"
+                                  : confirmingForcePublishVersionId === version.version_id
+                                    ? "Confirm force"
+                                    : "Force publish"}
+                            </Button>
+                          </div>
                         ) : (
                           <Badge variant="secondary">indexed</Badge>
                         )}
@@ -1255,7 +1325,7 @@ export function DocumentsWorkspace({
                       ) : publishBlocked ? (
                         <div className="mt-3 rounded-lg border bg-muted/15 p-3">
                           <p className="text-xs leading-5 text-muted-foreground">{publishBlockReason}</p>
-                          {isInspectedVersion && !readinessPassed ? (
+                          {isInspectedVersion && (!readinessPassed || backendPublishBlocked) ? (
                             <Button className="mt-2 h-8 px-3" onClick={() => setDocumentStep("gate")} size="sm" type="button" variant="secondary">
                               <ShieldCheck data-icon="inline-start" className="size-3.5" />
                               Open Verify checklist
@@ -1266,6 +1336,11 @@ export function DocumentsWorkspace({
                       {confirmingPublishVersionId === version.version_id ? (
                         <p className="mt-2 text-xs leading-5 text-muted-foreground">
                           Confirming will lock this version, archive the previous published version, and sync search indexes.
+                        </p>
+                      ) : null}
+                      {confirmingForcePublishVersionId === version.version_id ? (
+                        <p className="mt-2 text-xs leading-5 text-destructive">
+                          MVP force publish bypasses readiness blockers, locks this version, archives the previous published version, and syncs search indexes.
                         </p>
                       ) : null}
                     </div>
@@ -1333,6 +1408,7 @@ const REVIEW_FILTERS: Array<{ label: string; value: ReviewFilter }> = [
   { label: "Needs review", value: "needs_review" },
   { label: "Reviewed", value: "reviewed" },
   { label: "Approved", value: "approved" },
+  { label: "Source refs", value: "source_refs" },
   { label: "Atomic", value: "atomic" },
   { label: "All", value: "all" },
 ];
@@ -1344,7 +1420,29 @@ function unitMatchesReviewFilter(unit: ExtractionUnit, filter: ReviewFilter, isA
   if (filter === "atomic") {
     return isAtomic;
   }
+  if (filter === "source_refs") {
+    return unit.metadata.source_ref_quality === "page_only" && unit.metadata.source_ref_acknowledged !== true;
+  }
   return unit.review_status === filter;
+}
+
+function reviewFilterEmptyState(filter: ReviewFilter) {
+  if (filter === "needs_review") {
+    return {
+      text: "Switch to All or Approved to audit completed units.",
+      title: "No units need review",
+    };
+  }
+  if (filter === "source_refs") {
+    return {
+      text: "Every page-only source reference is acknowledged.",
+      title: "No source refs need acknowledgement",
+    };
+  }
+  return {
+    text: "Change the review filter to inspect another group.",
+    title: "No units in this filter",
+  };
 }
 
 function sortUnitsForRequirementFocus(units: ExtractionUnit[], requirement: RequiredWorkflowUnit | null) {
@@ -2826,6 +2924,10 @@ function normalizeWorkflowKey(value: string) {
 
 function isDocumentLayer(unit: ExtractionUnit) {
   return unit.unit_type === "full_sop" || unit.metadata.retrieval_scope === "document";
+}
+
+function isWorkflowGraphUnit(unit: ExtractionUnit) {
+  return unit.unit_type === "workflow_graph" || Boolean(unit.metadata.workflow_graph);
 }
 
 function hasRiskSignal(unit: ExtractionUnit) {

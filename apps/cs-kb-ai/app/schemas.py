@@ -668,6 +668,11 @@ class BulkReviewVersionRequest(BaseModel):
     force: bool = False
 
 
+class PublishVersionRequest(BaseModel):
+    actor: str = "system"
+    force: bool = False
+
+
 class DocumentMetadataPreviewResponse(BaseModel):
     title: str
     suggested_metadata: DocumentMetadata

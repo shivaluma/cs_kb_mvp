@@ -31,6 +31,7 @@ from app.schemas import (
     GroundedChatRequest,
     GroundedChatResponse,
     IndexSOPVersionRequest,
+    PublishVersionRequest,
     RetrievalFilters,
     RetrievalRequest,
     RetrievalResponse,
@@ -748,9 +749,10 @@ def get_version_source_page(version_id: str, page_number: int) -> Response:
 
 
 @app.post("/ai/v1/versions/{version_id}/publish")
-def publish_version(version_id: str, payload: dict[str, str] | None = None) -> dict[str, Any]:
+def publish_version(version_id: str, payload: PublishVersionRequest | None = None) -> dict[str, Any]:
     try:
-        return repository.publish_version(version_id, (payload or {}).get("actor", "system"))
+        data = payload or PublishVersionRequest()
+        return repository.publish_version(version_id, data.actor, data.force)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

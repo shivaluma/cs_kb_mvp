@@ -885,18 +885,19 @@ def list_extraction_pipeline(version_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def publish_version(version_id: str, actor: str) -> dict[str, Any]:
+def publish_version(version_id: str, actor: str, force: bool = False) -> dict[str, Any]:
     with connection() as conn:
         with conn.transaction():
-            validate_publish_readiness_tx(conn, version_id)
-            row = publish_version_tx(conn, version_id, actor)
+            if not force:
+                validate_publish_readiness_tx(conn, version_id)
+            row = publish_version_tx(conn, version_id, actor, force=force)
             audit_tx(
                 conn,
                 actor=actor,
-                action="document_version_publish",
+                action="document_version_force_publish" if force else "document_version_publish",
                 entity_type="ai_document_version",
                 entity_id=version_id,
-                metadata={"document_id": str(row["document_id"]), "version_number": row["version_number"]},
+                metadata={"document_id": str(row["document_id"]), "force": force, "version_number": row["version_number"]},
             )
             return dict(row)
 
@@ -1530,11 +1531,11 @@ def inferred_effective_from(rows: list[dict[str, Any]], version_effective_from: 
     return datetime.now(timezone.utc).date().isoformat()
 
 
-def publish_version_tx(conn: Connection[Any], version_id: str, actor: str) -> dict[str, Any]:
+def publish_version_tx(conn: Connection[Any], version_id: str, actor: str, force: bool = False) -> dict[str, Any]:
     conn.row_factory = dict_row
     row = conn.execute(
         """
-        SELECT id, document_id, version_number
+        SELECT id, document_id, version_number, status
         FROM ai_document_versions
         WHERE id = %s
         FOR UPDATE
@@ -1543,6 +1544,8 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str) -> di
     ).fetchone()
     if not row:
         raise LookupError("version_not_found")
+    if row["status"] == "archived":
+        raise ValueError("archived_version")
 
     conn.execute(
         """
@@ -1588,19 +1591,59 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str) -> di
         """,
         (version_id,),
     ).fetchone()
-    conn.execute(
-        """
-        UPDATE ai_chunks
-        SET metadata = jsonb_set(
-          jsonb_set(metadata, '{review_status}', '"approved"'::jsonb, true),
-          '{document_type}',
-          to_jsonb(%s::text),
-          true
+    if force:
+        conn.execute(
+            """
+            UPDATE ai_chunks
+            SET metadata = jsonb_set(
+              jsonb_set(
+                jsonb_set(
+                  jsonb_set(
+                    jsonb_set(
+                      jsonb_set(
+                        metadata,
+                        '{review_status}',
+                        '"approved"'::jsonb,
+                        true
+                      ),
+                      '{document_type}',
+                      to_jsonb(%s::text),
+                      true
+                    ),
+                    '{publish_blocked}',
+                    'false'::jsonb,
+                    true
+                  ),
+                  '{publish_blocked_reason}',
+                  '""'::jsonb,
+                  true
+                ),
+                '{publish_forced}',
+                'true'::jsonb,
+                true
+              ),
+              '{publish_forced_by}',
+              to_jsonb(%s::text),
+              true
+            )
+            WHERE version_id = %s
+            """,
+            (published["document_type"], actor, version_id),
         )
-        WHERE version_id = %s
-        """,
-        (published["document_type"], version_id),
-    )
+    else:
+        conn.execute(
+            """
+            UPDATE ai_chunks
+            SET metadata = jsonb_set(
+              jsonb_set(metadata, '{review_status}', '"approved"'::jsonb, true),
+              '{document_type}',
+              to_jsonb(%s::text),
+              true
+            )
+            WHERE version_id = %s
+            """,
+            (published["document_type"], version_id),
+        )
     return dict(published)
 
 
