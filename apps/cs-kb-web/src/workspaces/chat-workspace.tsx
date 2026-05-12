@@ -1,21 +1,23 @@
 import {
-  AlertTriangle,
   ArrowUp,
   BookOpen,
-  CheckCircle2,
   Clipboard,
-  ClipboardList,
   Clock3,
-  FileText,
-  Gauge,
   Loader2,
-  MessageSquareText,
-  Route,
+  Mic,
+  Plus,
   Search,
   ShieldCheck,
-  type LucideIcon,
 } from "lucide-react";
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,33 +58,6 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
   },
 ];
 
-const PROMPT_SUGGESTIONS: Array<{
-  icon: LucideIcon;
-  label: string;
-  prompt: string;
-}> = [
-  {
-    icon: ClipboardList,
-    label: "Check next step",
-    prompt: "case này cần kiểm tra thông tin nào trước?",
-  },
-  {
-    icon: Route,
-    label: "Escalation rule",
-    prompt: "khi nào cần chuyển xử lý cho team liên quan?",
-  },
-  {
-    icon: AlertTriangle,
-    label: "Risk scan",
-    prompt: "có cảnh báo bảo mật hoặc compliance nào không?",
-  },
-  {
-    icon: FileText,
-    label: "Draft macro",
-    prompt: "macro phản hồi phù hợp là gì?",
-  },
-];
-
 export function ChatWorkspace({
   busy,
   fallbackModel,
@@ -107,16 +82,19 @@ export function ChatWorkspace({
   onOpenQuickSource: (source: RetrievalResult) => void;
 }) {
   const [draft, setDraft] = useState("");
+  const [isExpanded, setIsExpanded] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const routeOptions = modelRoutes?.length ? modelRoutes : FALLBACK_CHAT_MODEL_ROUTES;
   const selectedModelRoute = routeOptions.find((route) => route.route === modelRoute) ?? routeOptions[0];
-  const latestAssistantResponse = useMemo(
-    () =>
-      [...messages]
-        .reverse()
-        .find((message) => message.role === "assistant" && message.response)?.response,
-    [messages],
-  );
+  const hasMessages = messages.length > 0;
+
+  function resetComposer() {
+    setDraft("");
+    setIsExpanded(false);
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
+  }
 
   function submit(question = draft) {
     const trimmed = question.trim();
@@ -124,44 +102,37 @@ export function ChatWorkspace({
       return;
     }
     onAsk(trimmed);
-    setDraft("");
+    resetComposer();
   }
 
-  function primePrompt(prompt: string) {
-    setDraft(prompt);
-    window.requestAnimationFrame(() => {
-      inputRef.current?.focus();
-      inputRef.current?.setSelectionRange(prompt.length, prompt.length);
-    });
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    submit();
+  }
+
+  function handleDraftChange(event: ChangeEvent<HTMLTextAreaElement>) {
+    const value = event.target.value;
+    setDraft(value);
+    setIsExpanded(value.length > 120 || value.includes("\n"));
+
+    const target = event.currentTarget;
+    target.style.height = "auto";
+    target.style.height = `${Math.min(target.scrollHeight, 220)}px`;
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
   }
 
   return (
-    <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]">
-      <section className="min-w-0 overflow-hidden rounded-xl border bg-card shadow-sm">
-        <div className="border-b bg-muted/20 px-4 py-3">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-sm font-semibold">
-                <MessageSquareText className="size-4 text-muted-foreground" />
-                SOP-grounded assistant
-              </div>
-              <p className="mt-1 max-w-[72ch] text-xs leading-5 text-muted-foreground">
-                Hỏi nhanh từ SOP đã publish. Câu trả lời cần citation, route và confidence rõ ràng.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              <StatusPill icon={ShieldCheck} text="published only" />
-              <StatusPill icon={BookOpen} text="citations required" />
-              <StatusPill icon={Gauge} text={selectedModelRoute.route.replace("_", " ")} />
-            </div>
-          </div>
-        </div>
-
-        <ScrollChatArea hasMessages={messages.length > 0}>
-          {messages.length === 0 ? (
-            <EmptyChatState onPromptClick={primePrompt} />
-          ) : (
-            messages.map((message) => (
+    <div className="-m-4 flex min-h-[calc(100svh-9.5rem)] flex-col overflow-hidden bg-background md:-m-5">
+      <div className={cn("flex-1 overflow-y-auto", hasMessages ? "px-4 py-5" : "grid place-items-center px-4 py-10")}>
+        {hasMessages ? (
+          <div className="mx-auto grid w-full max-w-4xl gap-7 pb-8">
+            {messages.map((message) => (
               <ChatBubble
                 key={message.id}
                 message={message}
@@ -169,27 +140,135 @@ export function ChatWorkspace({
                 onOpenDocument={onOpenDocument}
                 onOpenQuickSource={onOpenQuickSource}
               />
-            ))
-          )}
-        </ScrollChatArea>
+            ))}
+          </div>
+        ) : (
+          <div className="w-full">
+            <EmptyChatState />
+            <div className="mt-8">
+              <Composer
+                busy={busy}
+                draft={draft}
+                fallbackModel={fallbackModel}
+                inputRef={inputRef}
+                isExpanded={isExpanded}
+                onDraftChange={handleDraftChange}
+                onKeyDown={handleKeyDown}
+                onModelRouteChange={onModelRouteChange}
+                onSubmit={handleSubmit}
+                routeOptions={routeOptions}
+                selectedModelRoute={selectedModelRoute}
+                modelRoute={modelRoute}
+              />
+            </div>
+          </div>
+        )}
+      </div>
 
-        <div className="border-t bg-background p-3">
-          <div className="rounded-xl border bg-card shadow-sm transition-shadow focus-within:shadow-md">
+      {hasMessages ? (
+        <div className="shrink-0 border-t bg-background/95 px-4 py-3">
+          <Composer
+            busy={busy}
+            draft={draft}
+            fallbackModel={fallbackModel}
+            inputRef={inputRef}
+            isExpanded={isExpanded}
+            onDraftChange={handleDraftChange}
+            onKeyDown={handleKeyDown}
+            onModelRouteChange={onModelRouteChange}
+            onSubmit={handleSubmit}
+            routeOptions={routeOptions}
+            selectedModelRoute={selectedModelRoute}
+            modelRoute={modelRoute}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function EmptyChatState() {
+  return (
+    <section className="w-full">
+      <h2 className="mx-auto max-w-2xl text-center text-2xl font-semibold leading-8 text-foreground">
+        Where should we begin?
+      </h2>
+      <p className="mx-auto mt-2 max-w-xl text-center text-sm leading-6 text-muted-foreground">
+        Ask a case question. SOP Chat only answers from published SOP units with citations.
+      </p>
+    </section>
+  );
+}
+
+function Composer({
+  busy,
+  draft,
+  fallbackModel,
+  inputRef,
+  isExpanded,
+  modelRoute,
+  onDraftChange,
+  onKeyDown,
+  onModelRouteChange,
+  onSubmit,
+  routeOptions,
+  selectedModelRoute,
+}: {
+  busy: boolean;
+  draft: string;
+  fallbackModel?: string;
+  inputRef: RefObject<HTMLTextAreaElement | null>;
+  isExpanded: boolean;
+  modelRoute: ChatModelRoute;
+  onDraftChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onModelRouteChange: (route: ChatModelRoute) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  routeOptions: ChatModelRouteConfig[];
+  selectedModelRoute: ChatModelRouteConfig;
+}) {
+  return (
+    <div className="mx-auto w-full max-w-3xl">
+      <form className="group/composer w-full" onSubmit={onSubmit}>
+        <div
+          className={cn(
+            "grid w-full border bg-card p-2.5 shadow-lg transition-[border-radius,box-shadow] duration-200 ease-out focus-within:border-ring/50 focus-within:shadow-xl",
+            isExpanded
+              ? "rounded-3xl [grid-template-areas:'primary'_'footer'] [grid-template-columns:1fr] [grid-template-rows:auto_auto]"
+              : "rounded-3xl [grid-template-areas:'leading_primary_trailing'] [grid-template-columns:auto_1fr_auto] [grid-template-rows:auto]",
+          )}
+        >
+          <div className={cn("flex items-end", isExpanded && "hidden")} style={{ gridArea: "leading" }}>
+            <Button
+              aria-label="Published SOP scope"
+              className="size-10 rounded-full text-muted-foreground hover:text-foreground"
+              onClick={() => inputRef.current?.focus()}
+              title="Answers are limited to published SOPs"
+              type="button"
+              variant="ghost"
+            >
+              <Plus className="size-5" />
+            </Button>
+          </div>
+
+          <div className="min-w-0 px-2 py-1" style={{ gridArea: "primary" }}>
             <textarea
               ref={inputRef}
-              className="min-h-20 max-h-40 w-full resize-none rounded-t-xl bg-transparent px-3 py-3 text-sm leading-6 outline-none placeholder:text-muted-foreground focus-visible:ring-0 disabled:cursor-not-allowed disabled:opacity-60"
+              className="max-h-56 min-h-10 w-full resize-none overflow-y-auto bg-transparent py-2 text-sm leading-6 outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 md:text-base"
               disabled={busy}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  submit();
-                }
-              }}
-              placeholder="Ask a CS case question, ví dụ: KH không nhận được email thì CS xử lý sao?"
+              onChange={onDraftChange}
+              onKeyDown={onKeyDown}
+              placeholder="Ask anything"
+              rows={1}
               value={draft}
             />
-            <div className="flex min-h-11 flex-wrap items-center gap-2 border-t px-2 py-2">
-              <Route className="size-4 text-muted-foreground" />
+          </div>
+
+          <div
+            className={cn("flex min-w-0 items-center gap-1.5", isExpanded && "justify-end border-t pt-2")}
+            style={{ gridArea: isExpanded ? "footer" : "trailing" }}
+          >
+            <div className="hidden min-w-0 sm:block">
               <Select
                 disabled={busy}
                 onValueChange={(value) => onModelRouteChange(value as ChatModelRoute)}
@@ -197,12 +276,12 @@ export function ChatWorkspace({
               >
                 <SelectTrigger
                   aria-label="Select model route"
-                  className="h-7 border-0 bg-transparent px-0 text-muted-foreground shadow-none hover:text-foreground focus-visible:ring-0"
+                  className="h-9 max-w-[11rem] rounded-full border-0 bg-transparent px-2 text-muted-foreground shadow-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
                   size="sm"
                 >
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent align="start" className="w-72">
+                <SelectContent align="end" className="w-80">
                   {routeOptions.map((route) => (
                     <SelectItem key={route.route} value={route.route}>
                       {route.label}
@@ -210,194 +289,38 @@ export function ChatWorkspace({
                   ))}
                 </SelectContent>
               </Select>
+            </div>
 
-              <Badge className="hidden sm:inline-flex" variant="outline">
-                {selectedModelRoute.model}
-              </Badge>
-              <span className="hidden text-xs text-muted-foreground md:inline">⌘ Enter</span>
-
+            {!draft.trim() ? (
+              <Button
+                aria-label="Voice input unavailable"
+                className="size-10 rounded-full text-muted-foreground hover:text-foreground"
+                disabled={busy}
+                title="Voice input is not connected yet"
+                type="button"
+                variant="ghost"
+              >
+                <Mic className="size-5" />
+              </Button>
+            ) : (
               <Button
                 aria-label="Send message"
-                className={cn("ml-auto rounded-full", draft.trim() && "shadow-sm")}
-                disabled={!draft.trim() || busy}
-                onClick={() => submit()}
-                size="icon-sm"
-                title="Ask SOP"
-                type="button"
+                className="size-10 rounded-full"
+                disabled={busy}
+                title="Send"
+                type="submit"
               >
-                {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+                {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-5" />}
               </Button>
-            </div>
-          </div>
-
-          <div className="mt-2 flex flex-wrap gap-2">
-            {PROMPT_SUGGESTIONS.map((suggestion) => (
-              <PromptButton
-                busy={busy}
-                key={suggestion.label}
-                onClick={() => primePrompt(suggestion.prompt)}
-                suggestion={suggestion}
-              />
-            ))}
+            )}
           </div>
         </div>
-      </section>
+      </form>
 
-      <aside className="space-y-3">
-        <RoutePanel
-          fallbackModel={fallbackModel}
-          latestAssistantResponse={latestAssistantResponse}
-          selectedModelRoute={selectedModelRoute}
-        />
-        <GroundingPanel />
-      </aside>
-    </div>
-  );
-}
-
-function ScrollChatArea({ children, hasMessages }: { children: ReactNode; hasMessages: boolean }) {
-  return (
-    <div
-      className={cn(
-        "h-[calc(100svh-23rem)] min-h-[28rem] overflow-y-auto",
-        hasMessages ? "bg-background" : "bg-muted/10",
-      )}
-    >
-      <div className="grid gap-3 p-4">{children}</div>
-    </div>
-  );
-}
-
-function EmptyChatState({ onPromptClick }: { onPromptClick: (prompt: string) => void }) {
-  return (
-    <div className="mx-auto grid min-h-[26rem] max-w-2xl place-items-center px-3 text-center">
-      <div>
-        <div className="mx-auto flex size-10 items-center justify-center rounded-xl border bg-card text-muted-foreground shadow-sm">
-          <ShieldCheck className="size-5" />
-        </div>
-        <h2 className="mt-4 text-base font-semibold">Ask from approved SOPs</h2>
-        <p className="mx-auto mt-2 max-w-[56ch] text-sm leading-6 text-muted-foreground">
-          Dùng cho case cần câu trả lời có thể hành động, nhưng vẫn phải bám source published, citation và rule hiện hành.
-        </p>
-        <div className="mt-4 flex flex-wrap justify-center gap-2">
-          {PROMPT_SUGGESTIONS.slice(0, 3).map((suggestion) => (
-            <PromptButton
-              busy={false}
-              key={suggestion.label}
-              onClick={() => onPromptClick(suggestion.prompt)}
-              suggestion={suggestion}
-            />
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PromptButton({
-  busy,
-  onClick,
-  suggestion,
-}: {
-  busy: boolean;
-  onClick: () => void;
-  suggestion: {
-    icon: LucideIcon;
-    label: string;
-    prompt: string;
-  };
-}) {
-  const Icon = suggestion.icon;
-  return (
-    <Button
-      className="h-8 rounded-full border bg-background px-3 text-xs text-foreground hover:bg-muted/60"
-      disabled={busy}
-      onClick={onClick}
-      type="button"
-      variant="ghost"
-    >
-      <Icon data-icon="inline-start" className="size-3.5 text-muted-foreground transition-colors group-hover/button:text-foreground" />
-      {suggestion.label}
-    </Button>
-  );
-}
-
-function StatusPill({ icon: Icon, text }: { icon: LucideIcon; text: string }) {
-  return (
-    <span className="inline-flex h-7 items-center gap-1.5 rounded-full border bg-background px-2.5 text-xs font-medium text-muted-foreground">
-      <Icon className="size-3.5" />
-      {text}
-    </span>
-  );
-}
-
-function RoutePanel({
-  fallbackModel,
-  latestAssistantResponse,
-  selectedModelRoute,
-}: {
-  fallbackModel?: string;
-  latestAssistantResponse?: ChatThreadMessage["response"];
-  selectedModelRoute: ChatModelRouteConfig;
-}) {
-  return (
-    <section className="rounded-xl border bg-card p-3 shadow-sm">
-      <div className="flex items-center gap-2">
-        <Route className="size-4 text-muted-foreground" />
-        <h2 className="text-sm font-semibold">Route detail</h2>
-      </div>
-      <div className="mt-3 rounded-lg border bg-muted/20 p-3">
-        <div className="flex flex-wrap gap-1.5">
-          <Badge variant="default">{selectedModelRoute.label}</Badge>
-          <Badge variant="outline">{selectedModelRoute.route}</Badge>
-        </div>
-        <p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedModelRoute.description}</p>
-        <p className="mt-2 truncate text-[11px] text-muted-foreground">{selectedModelRoute.model}</p>
-      </div>
-      {latestAssistantResponse ? (
-        <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-          <MiniStat label="Cites" value={latestAssistantResponse.citations.length} />
-          <MiniStat label="Conf" value={`${Math.round(latestAssistantResponse.confidence * 100)}%`} />
-          <MiniStat label="ms" value={latestAssistantResponse.latency_ms} />
-        </div>
-      ) : null}
-      {fallbackModel ? <p className="mt-3 truncate text-[11px] text-muted-foreground">Fallback: {fallbackModel}</p> : null}
-    </section>
-  );
-}
-
-function GroundingPanel() {
-  return (
-    <section className="rounded-xl border bg-card p-3 shadow-sm">
-      <div className="flex items-center gap-2">
-        <ShieldCheck className="size-4 text-muted-foreground" />
-        <h2 className="text-sm font-semibold">Grounding rules</h2>
-      </div>
-      <div className="mt-3 grid gap-2">
-        <RuleRow icon={CheckCircle2} title="Published only" text="Không dùng draft, archived, raw upload." />
-        <RuleRow icon={BookOpen} title="Citation gate" text="Không có source đáng tin thì phải từ chối." />
-        <RuleRow icon={AlertTriangle} title="High-risk claims" text="Refund, privacy, payment phải được source rõ." />
-      </div>
-    </section>
-  );
-}
-
-function MiniStat({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="rounded-lg border bg-background px-2 py-2">
-      <div className="truncate text-sm font-semibold tabular-nums">{value}</div>
-      <div className="mt-0.5 text-[10px] uppercase text-muted-foreground">{label}</div>
-    </div>
-  );
-}
-
-function RuleRow({ icon: Icon, text, title }: { icon: LucideIcon; text: string; title: string }) {
-  return (
-    <div className="flex gap-2 rounded-lg border bg-background px-2.5 py-2">
-      <Icon className="mt-0.5 size-3.5 text-muted-foreground" />
-      <div className="min-w-0">
-        <p className="text-xs font-medium">{title}</p>
-        <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{text}</p>
+      <div className="mt-2 flex min-h-5 flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+        <span className="truncate">Route: {selectedModelRoute.label}</span>
+        {fallbackModel ? <span className="hidden truncate sm:inline">Fallback: {fallbackModel}</span> : null}
+        <span className="hidden sm:inline">Enter to send, Shift Enter for new line</span>
       </div>
     </div>
   );
@@ -417,52 +340,39 @@ function ChatBubble({
   const isUser = message.role === "user";
   const response = message.response;
   return (
-    <article className={cn("min-w-0", isUser ? "ml-auto w-fit max-w-[82%]" : "mr-auto w-full max-w-[54rem]")}>
+    <article className={cn("min-w-0", isUser ? "ml-auto max-w-[78%]" : "mr-auto w-full max-w-3xl")}>
       <div
         className={cn(
-          "rounded-xl px-3.5 py-3",
-          isUser ? "bg-primary text-primary-foreground" : "border bg-card shadow-sm",
+          "min-w-0 break-words text-sm leading-6",
+          isUser
+            ? "rounded-[1.65rem] bg-primary px-4 py-2.5 text-primary-foreground"
+            : "px-1 text-foreground",
         )}
       >
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Badge variant={isUser ? "secondary" : "outline"}>{isUser ? "CS question" : "Grounded answer"}</Badge>
-          {message.pending ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
-        </div>
-        <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{message.content}</p>
+        {!isUser ? (
+          <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <ShieldCheck className="size-3.5" />
+            Grounded answer
+            {message.pending ? <Loader2 className="size-3.5 animate-spin" /> : null}
+          </div>
+        ) : null}
+
+        <p className="whitespace-pre-wrap break-words">{message.content}</p>
+
         {response ? (
-          <div className="mt-4 grid gap-3">
+          <div className="mt-3 grid min-w-0 gap-3">
             <ResponseMeta response={response} onCopy={onCopy} />
-            {response.steps.length ? (
-              <section className="rounded-lg border bg-muted/15 p-3">
-                <p className="text-xs font-semibold text-muted-foreground">Action steps</p>
-                <ol className="mt-2 list-decimal space-y-1 pl-4 text-sm leading-6">
-                  {response.steps.map((step, index) => (
-                    <li key={`${step}-${index}`}>{step}</li>
-                  ))}
-                </ol>
-              </section>
-            ) : null}
-            {response.warnings.length ? (
-              <section className="rounded-lg border border-destructive/25 bg-destructive/5 p-3">
-                <p className="text-xs font-semibold text-destructive">Warnings</p>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {response.warnings.slice(0, 8).map((warning, index) => (
-                    <Badge key={`${warning}-${index}`} variant="outline">
-                      {warning}
-                    </Badge>
-                  ))}
-                </div>
-              </section>
-            ) : null}
+            {response.steps.length ? <ActionSteps steps={response.steps} /> : null}
+            {response.warnings.length ? <Warnings warnings={response.warnings} /> : null}
             {response.model_reason ? (
-              <p className="rounded-lg bg-muted/25 px-3 py-2 text-xs leading-5 text-muted-foreground">
+              <p className="max-w-full rounded-xl bg-muted/35 px-3 py-2 text-xs leading-5 text-muted-foreground">
                 Model routing: {response.model_reason}
               </p>
             ) : null}
             {response.sources.length ? (
-              <section className="grid gap-2">
+              <section className="min-w-0">
                 <p className="text-xs font-semibold text-muted-foreground">Published sources used</p>
-                <div className="grid gap-2 md:grid-cols-2">
+                <div className="mt-2 grid min-w-0 gap-2">
                   {response.sources.slice(0, 4).map((source) => (
                     <SourceCard
                       key={source.chunk_id}
@@ -489,22 +399,50 @@ function ResponseMeta({
   response: NonNullable<ChatThreadMessage["response"]>;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <Badge variant={response.citations.length ? "secondary" : "destructive"}>
+    <div className="flex max-w-full flex-wrap items-center gap-1.5">
+      <CompactBadge variant={response.citations.length ? "secondary" : "destructive"}>
         {response.citations.length ? `${response.citations.length} citations` : "no citation"}
-      </Badge>
-      <Badge variant="outline">{Math.round(response.confidence * 100)}% confidence</Badge>
-      {response.model_route ? <Badge variant="outline">{response.model_route}</Badge> : null}
-      {response.model_used ? <Badge className="max-w-52 truncate" variant="outline">{response.model_used}</Badge> : null}
-      <Badge variant="outline">
+      </CompactBadge>
+      <CompactBadge>{Math.round(response.confidence * 100)}% confidence</CompactBadge>
+      {response.model_route ? <CompactBadge>{response.model_route}</CompactBadge> : null}
+      {response.model_used ? <CompactBadge className="max-w-[13rem]">{response.model_used}</CompactBadge> : null}
+      <CompactBadge>
         <Clock3 data-icon="inline-start" className="size-3" />
         {response.latency_ms}ms
-      </Badge>
-      <Button className="ml-auto" onClick={() => onCopy(response.answer)} size="sm" type="button" variant="outline">
-        <Clipboard data-icon="inline-start" className="size-4" />
+      </CompactBadge>
+      <Button className="ml-auto h-7 rounded-full px-2" onClick={() => onCopy(response.answer)} size="sm" type="button" variant="outline">
+        <Clipboard data-icon="inline-start" className="size-3.5" />
         Copy
       </Button>
     </div>
+  );
+}
+
+function ActionSteps({ steps }: { steps: string[] }) {
+  return (
+    <section className="min-w-0 rounded-xl border bg-muted/15 px-3 py-2.5">
+      <p className="text-xs font-semibold text-muted-foreground">Action steps</p>
+      <ol className="mt-2 list-decimal space-y-1 pl-4 text-sm leading-6">
+        {steps.map((step, index) => (
+          <li className="break-words" key={`${step}-${index}`}>{step}</li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function Warnings({ warnings }: { warnings: string[] }) {
+  return (
+    <section className="min-w-0 rounded-xl border border-destructive/25 bg-destructive/5 px-3 py-2.5">
+      <p className="text-xs font-semibold text-destructive">Warnings</p>
+      <div className="mt-2 flex max-w-full flex-wrap gap-1.5">
+        {warnings.slice(0, 8).map((warning, index) => (
+          <CompactBadge className="max-w-full text-destructive" key={`${warning}-${index}`}>
+            {warning}
+          </CompactBadge>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -519,25 +457,41 @@ function SourceCard({
 }) {
   const unitType = String(source.metadata.unit_type ?? source.section);
   return (
-    <div className="min-w-0 rounded-lg border bg-background p-3">
-      <div className="flex flex-wrap gap-1.5">
-        <Badge variant="outline">{unitType}</Badge>
-        <Badge variant="outline">v{source.version_number}</Badge>
-        <Badge variant="outline">{source.rank_source.join("+") || "retrieval"}</Badge>
+    <div className="min-w-0 rounded-xl border bg-card px-3 py-2.5">
+      <div className="flex max-w-full flex-wrap gap-1.5">
+        <CompactBadge>{unitType}</CompactBadge>
+        <CompactBadge>v{source.version_number}</CompactBadge>
+        <CompactBadge>{source.rank_source.join("+") || "retrieval"}</CompactBadge>
       </div>
-      <p className="mt-2 line-clamp-2 text-sm font-semibold leading-5">{source.heading || source.title}</p>
-      <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{source.content}</p>
+      <p className="mt-2 line-clamp-2 break-words text-sm font-semibold leading-5">{source.heading || source.title}</p>
+      <p className="mt-1 line-clamp-2 break-words text-xs leading-5 text-muted-foreground">{source.content}</p>
       <p className="mt-2 truncate text-[11px] text-muted-foreground">{source.source_filename}</p>
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Button onClick={() => onOpenQuickSource(source)} size="sm" type="button" variant="outline">
-          <Search data-icon="inline-start" className="size-4" />
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Button className="h-7 rounded-full px-2" onClick={() => onOpenQuickSource(source)} size="sm" type="button" variant="outline">
+          <Search data-icon="inline-start" className="size-3.5" />
           Quick rule
         </Button>
-        <Button onClick={() => onOpenDocument(source)} size="sm" type="button" variant="ghost">
-          <BookOpen data-icon="inline-start" className="size-4" />
+        <Button className="h-7 rounded-full px-2" onClick={() => onOpenDocument(source)} size="sm" type="button" variant="ghost">
+          <BookOpen data-icon="inline-start" className="size-3.5" />
           Source
         </Button>
       </div>
     </div>
+  );
+}
+
+function CompactBadge({
+  children,
+  className,
+  variant = "outline",
+}: {
+  children: ReactNode;
+  className?: string;
+  variant?: "default" | "secondary" | "destructive" | "outline";
+}) {
+  return (
+    <Badge className={cn("min-w-0 max-w-full truncate rounded-full px-2 text-[11px]", className)} variant={variant}>
+      {children}
+    </Badge>
   );
 }
