@@ -60,7 +60,6 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
 
 export function ChatWorkspace({
   busy,
-  fallbackModel,
   messages,
   modelRoutes,
   modelRoute,
@@ -85,7 +84,6 @@ export function ChatWorkspace({
   const [isExpanded, setIsExpanded] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const routeOptions = modelRoutes?.length ? modelRoutes : FALLBACK_CHAT_MODEL_ROUTES;
-  const selectedModelRoute = routeOptions.find((route) => route.route === modelRoute) ?? routeOptions[0];
   const hasMessages = messages.length > 0;
 
   function resetComposer() {
@@ -117,7 +115,7 @@ export function ChatWorkspace({
 
     const target = event.currentTarget;
     target.style.height = "auto";
-    target.style.height = `${Math.min(target.scrollHeight, 220)}px`;
+    target.style.height = `${Math.min(target.scrollHeight, 176)}px`;
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -128,10 +126,10 @@ export function ChatWorkspace({
   }
 
   return (
-    <div className="-m-4 flex min-h-[calc(100svh-9.5rem)] flex-col overflow-hidden bg-background md:-m-5">
-      <div className={cn("flex-1 overflow-y-auto", hasMessages ? "px-4 py-5" : "grid place-items-center px-4 py-10")}>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
+      <div className={cn("min-h-0 flex-1 overflow-y-auto", hasMessages ? "px-1 py-2" : "grid place-items-center px-4 py-10")}>
         {hasMessages ? (
-          <div className="mx-auto grid w-full max-w-4xl gap-7 pb-8">
+          <div className="mx-auto grid w-full max-w-3xl gap-6 pb-6">
             {messages.map((message) => (
               <ChatBubble
                 key={message.id}
@@ -143,46 +141,26 @@ export function ChatWorkspace({
             ))}
           </div>
         ) : (
-          <div className="w-full">
+          <div className="w-full pb-20">
             <EmptyChatState />
-            <div className="mt-8">
-              <Composer
-                busy={busy}
-                draft={draft}
-                fallbackModel={fallbackModel}
-                inputRef={inputRef}
-                isExpanded={isExpanded}
-                onDraftChange={handleDraftChange}
-                onKeyDown={handleKeyDown}
-                onModelRouteChange={onModelRouteChange}
-                onSubmit={handleSubmit}
-                routeOptions={routeOptions}
-                selectedModelRoute={selectedModelRoute}
-                modelRoute={modelRoute}
-              />
-            </div>
           </div>
         )}
       </div>
 
-      {hasMessages ? (
-        <div className="shrink-0 border-t bg-background/95 px-4 py-3">
-          <Composer
-            busy={busy}
-            draft={draft}
-            fallbackModel={fallbackModel}
-            inputRef={inputRef}
-            isExpanded={isExpanded}
-            onDraftChange={handleDraftChange}
-            onKeyDown={handleKeyDown}
-            onModelRouteChange={onModelRouteChange}
-            onSubmit={handleSubmit}
-            routeOptions={routeOptions}
-            selectedModelRoute={selectedModelRoute}
-            modelRoute={modelRoute}
-          />
-        </div>
-      ) : null}
+      <div className="shrink-0 bg-background px-2 pb-2 pt-3 md:px-4 md:pb-3">
+        <Composer
+          busy={busy}
+          draft={draft}
+          inputRef={inputRef}
+          isExpanded={isExpanded}
+          onDraftChange={handleDraftChange}
+          onKeyDown={handleKeyDown}
+          onModelRouteChange={onModelRouteChange}
+          onSubmit={handleSubmit}
+          routeOptions={routeOptions}
+          modelRoute={modelRoute}
+        />
+      </div>
     </div>
   );
 }
@@ -203,7 +181,6 @@ function EmptyChatState() {
 function Composer({
   busy,
   draft,
-  fallbackModel,
   inputRef,
   isExpanded,
   modelRoute,
@@ -212,11 +189,9 @@ function Composer({
   onModelRouteChange,
   onSubmit,
   routeOptions,
-  selectedModelRoute,
 }: {
   busy: boolean;
   draft: string;
-  fallbackModel?: string;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   isExpanded: boolean;
   modelRoute: ChatModelRoute;
@@ -225,14 +200,13 @@ function Composer({
   onModelRouteChange: (route: ChatModelRoute) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   routeOptions: ChatModelRouteConfig[];
-  selectedModelRoute: ChatModelRouteConfig;
 }) {
   return (
     <div className="mx-auto w-full max-w-3xl">
       <form className="group/composer w-full" onSubmit={onSubmit}>
         <div
           className={cn(
-            "grid w-full border bg-card p-2.5 shadow-lg transition-[border-radius,box-shadow] duration-200 ease-out focus-within:border-ring/50 focus-within:shadow-xl",
+            "grid w-full border bg-card p-2 shadow-sm transition-[border-radius,box-shadow] duration-200 ease-out focus-within:border-ring/50 focus-within:shadow-md",
             isExpanded
               ? "rounded-3xl [grid-template-areas:'primary'_'footer'] [grid-template-columns:1fr] [grid-template-rows:auto_auto]"
               : "rounded-3xl [grid-template-areas:'leading_primary_trailing'] [grid-template-columns:auto_1fr_auto] [grid-template-rows:auto]",
@@ -247,14 +221,14 @@ function Composer({
               type="button"
               variant="ghost"
             >
-              <Plus className="size-5" />
+              <Plus className="size-4" />
             </Button>
           </div>
 
           <div className="min-w-0 px-2 py-1" style={{ gridArea: "primary" }}>
             <textarea
               ref={inputRef}
-              className="max-h-56 min-h-10 w-full resize-none overflow-y-auto bg-transparent py-2 text-sm leading-6 outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 md:text-base"
+              className="max-h-44 min-h-8 w-full resize-none overflow-y-auto bg-transparent py-1.5 text-sm leading-6 outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 md:text-[15px]"
               disabled={busy}
               onChange={onDraftChange}
               onKeyDown={onKeyDown}
@@ -276,7 +250,7 @@ function Composer({
               >
                 <SelectTrigger
                   aria-label="Select model route"
-                  className="h-9 max-w-[11rem] rounded-full border-0 bg-transparent px-2 text-muted-foreground shadow-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
+                  className="h-8 max-w-[11rem] rounded-full border-0 bg-transparent px-2 text-muted-foreground shadow-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
                   size="sm"
                 >
                   <SelectValue />
@@ -294,7 +268,7 @@ function Composer({
             {!draft.trim() ? (
               <Button
                 aria-label="Voice input unavailable"
-                className="size-10 rounded-full text-muted-foreground hover:text-foreground"
+                className="size-8 rounded-full text-muted-foreground hover:text-foreground"
                 disabled={busy}
                 title="Voice input is not connected yet"
                 type="button"
@@ -305,7 +279,7 @@ function Composer({
             ) : (
               <Button
                 aria-label="Send message"
-                className="size-10 rounded-full"
+                className="size-8 rounded-full"
                 disabled={busy}
                 title="Send"
                 type="submit"
@@ -316,12 +290,6 @@ function Composer({
           </div>
         </div>
       </form>
-
-      <div className="mt-2 flex min-h-5 flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-        <span className="truncate">Route: {selectedModelRoute.label}</span>
-        {fallbackModel ? <span className="hidden truncate sm:inline">Fallback: {fallbackModel}</span> : null}
-        <span className="hidden sm:inline">Enter to send, Shift Enter for new line</span>
-      </div>
     </div>
   );
 }
