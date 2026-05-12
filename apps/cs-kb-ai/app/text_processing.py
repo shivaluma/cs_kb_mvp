@@ -29,6 +29,7 @@ ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 NOTE_RE = re.compile(r"^\s*(lưu ý|luu y|note|warning|cảnh báo|canh bao|script|sla|zt)\b", re.IGNORECASE)
+URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
 DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
@@ -354,12 +355,12 @@ def spreadsheet_rows(filename: str, data: bytes) -> list[tuple[str, list[tuple[i
             sheets.append((sheet.name.strip(), rows))
         return sheets
 
-    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    workbook = load_workbook(io.BytesIO(data), read_only=False, data_only=True)
     sheets = []
     for worksheet in workbook.worksheets:
         rows = []
-        for row_number, row in enumerate(worksheet.iter_rows(values_only=True), start=1):
-            values = [cell_to_text(value) for value in row]
+        for row_number, row in enumerate(worksheet.iter_rows(values_only=False), start=1):
+            values = [cell_to_text_with_hyperlink(cell) for cell in row]
             if any(values):
                 rows.append((row_number, trim_trailing_empty(values)))
         sheets.append((worksheet.title.strip(), rows))
@@ -494,6 +495,8 @@ def spreadsheet_chunk(
     body = "\n".join([*context_lines, content]).strip()
     resolved_heading = heading or (context[-1] if context else f"{sheet_name} dòng {row_number}")
     rule_id = f"{slugify(sheet_name) or 'sheet'}_row_{row_number}"
+    related_documents = spreadsheet_related_documents_from_row(values or [], headers or [], resolved_heading)
+    related_metadata = {"related_documents": related_documents} if related_documents else {}
     return Chunk(
         chunk_index=index,
         section=section,
@@ -511,6 +514,7 @@ def spreadsheet_chunk(
             "parent_unit_id": rule_id,
             "section_path": [sheet_name],
             "source_refs": [{"source_type": "excel", "source_file": "", "sheet": sheet_name, "row_start": row_number, "row_end": row_number, "column_names": headers or []}],
+            **related_metadata,
             **(extra_metadata or {}),
         },
     )
@@ -566,6 +570,8 @@ def is_header_like(values: list[str]) -> bool:
     non_empty = [value for value in values if value]
     if not non_empty:
         return False
+    if any(URL_RE.search(value) for value in non_empty):
+        return False
     if any(len(value) > 120 for value in non_empty):
         return False
     return True
@@ -577,6 +583,82 @@ def cell_to_text(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return normalize_cell_text(str(value))
+
+
+def cell_to_text_with_hyperlink(cell: Any) -> str:
+    text = cell_to_text(getattr(cell, "value", None))
+    hyperlink = getattr(cell, "hyperlink", None)
+    if not hyperlink:
+        return text
+    target = normalize_cell_text(str(getattr(hyperlink, "target", "") or getattr(hyperlink, "location", "") or ""))
+    display = cell_to_text(getattr(hyperlink, "display", None))
+    label = display or text or "Link"
+    if target and target not in label and target not in text:
+        return f"{label} ({target})"
+    return label or target
+
+
+def spreadsheet_related_documents_from_row(values: list[str], headers: list[str], fallback_title: str = "") -> list[dict[str, Any]]:
+    context_title = first_non_link_value(values, headers) or fallback_title
+    output: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, value in enumerate(values):
+        urls = URL_RE.findall(value or "")
+        if not urls:
+            continue
+        header = headers[index] if index < len(headers) and headers[index] else f"Column {index + 1}"
+        label = link_label_from_value(value)
+        if is_generic_link_label(label):
+            label = context_title or header
+        for url in urls:
+            key = (normalize_cell_text(label).lower(), url)
+            if not label or key in seen:
+                continue
+            seen.add(key)
+            output.append(
+                {
+                    "target_title": label[:300],
+                    "relation_type": "references",
+                    "source_url": url,
+                    "source_header": header,
+                    "source_value": value[:500],
+                    "relation_source": "spreadsheet_hyperlink",
+                }
+            )
+    return output
+
+
+def link_label_from_value(value: str) -> str:
+    label = URL_RE.sub("", value or "")
+    label = re.sub(r"\(\s*\)", "", label)
+    return normalize_cell_text(label.strip(" -:()"))
+
+
+def first_non_link_value(values: list[str], headers: list[str]) -> str:
+    for index, value in enumerate(values):
+        if not value or URL_RE.search(value):
+            continue
+        header = headers[index] if index < len(headers) else ""
+        if is_generic_link_label(value) or is_generic_link_label(header):
+            continue
+        return value[:300]
+    return ""
+
+
+def is_generic_link_label(value: str) -> bool:
+    normalized = normalize_phrase(value)
+    return normalized in {
+        "",
+        "link",
+        "url",
+        "hyperlink",
+        "xem tai day",
+        "tai day",
+        "link quy dinh",
+        "duong dan",
+        "link tai lieu",
+        "tai lieu lien quan",
+    }
 
 
 def normalize_cell_text(value: str) -> str:

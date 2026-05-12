@@ -201,9 +201,9 @@ export type DocumentSummary = {
   metadata: Record<string, unknown>;
 };
 
-export type RelationType = "requires" | "references";
+export type RelationType = "requires" | "references" | "routes_to" | "escalates_to" | "exception_of" | "supersedes";
 
-export type RelationStatus = "unresolved" | "approved" | "rejected";
+export type RelationStatus = "suggested" | "unresolved" | "approved" | "rejected" | "archived";
 
 export type DocumentRelation = {
   id: string;

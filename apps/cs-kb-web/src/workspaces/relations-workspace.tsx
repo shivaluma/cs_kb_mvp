@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { CheckCircle2, FilePlus2, GitBranch, Loader2, RefreshCw, Search, XCircle } from "lucide-react";
+import { CheckCircle2, FilePlus2, GitBranch, Loader2, PlusCircle, RefreshCw, Search, XCircle } from "lucide-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
@@ -8,12 +8,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatDate } from "@/lib/format";
-import type { DocumentRelation, DocumentSummary, RelationStatus } from "@/types";
+import type { DocumentRelation, DocumentSummary, RelationStatus, RelationType } from "@/types";
 
 export function RelationsWorkspace({
   assigningRelationId,
+  creatingRelation,
   documentsLoading,
   onAssign,
+  onCreate,
   onRefresh,
   onReject,
   onSetStatus,
@@ -22,11 +24,14 @@ export function RelationsWorkspace({
   rejectingRelationId,
   relations,
   relationsLoading,
+  sourceDocuments,
   status,
 }: {
   assigningRelationId: string;
+  creatingRelation: boolean;
   documentsLoading: boolean;
   onAssign: (relation: DocumentRelation, targetDocumentId: string) => void;
+  onCreate: (payload: { relationType: RelationType; sourceDocumentId: string; targetDocumentId?: string; targetTitle: string }) => void;
   onRefresh: () => void;
   onReject: (relation: DocumentRelation) => void;
   onSetStatus: (status: RelationStatus | "all") => void;
@@ -35,15 +40,23 @@ export function RelationsWorkspace({
   rejectingRelationId: string;
   relations: DocumentRelation[];
   relationsLoading: boolean;
+  sourceDocuments: DocumentSummary[];
   status: RelationStatus | "all";
 }) {
   const [assigningId, setAssigningId] = useState("");
   const [targetSearch, setTargetSearch] = useState("");
   const visibleRelations = relations;
   const unresolvedCount = relations.filter((relation) => relation.status === "unresolved").length;
+  const suggestedCount = relations.filter((relation) => relation.status === "suggested").length;
 
   return (
     <div className="space-y-4">
+      <ManualRelationCreator
+        creating={creatingRelation}
+        onCreate={onCreate}
+        publishedDocuments={publishedDocuments}
+        sourceDocuments={sourceDocuments}
+      />
       <Card className="rounded-xl">
         <CardHeader className="border-b pb-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -51,6 +64,7 @@ export function RelationsWorkspace({
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="secondary">AI gated</Badge>
                 <Badge variant={unresolvedCount ? "destructive" : "outline"}>{unresolvedCount} unresolved</Badge>
+                <Badge variant={suggestedCount ? "secondary" : "outline"}>{suggestedCount} suggested</Badge>
               </div>
               <CardTitle className="mt-3">Unresolved Relations</CardTitle>
               <CardDescription className="mt-2 max-w-[72ch] leading-6">
@@ -64,8 +78,10 @@ export function RelationsWorkspace({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="unresolved">unresolved</SelectItem>
+                  <SelectItem value="suggested">suggested</SelectItem>
                   <SelectItem value="approved">approved</SelectItem>
                   <SelectItem value="rejected">rejected</SelectItem>
+                  <SelectItem value="archived">archived</SelectItem>
                   <SelectItem value="all">all</SelectItem>
                 </SelectContent>
               </Select>
@@ -123,6 +139,123 @@ export function RelationsWorkspace({
   );
 }
 
+function ManualRelationCreator({
+  creating,
+  onCreate,
+  publishedDocuments,
+  sourceDocuments,
+}: {
+  creating: boolean;
+  onCreate: (payload: { relationType: RelationType; sourceDocumentId: string; targetDocumentId?: string; targetTitle: string }) => void;
+  publishedDocuments: DocumentSummary[];
+  sourceDocuments: DocumentSummary[];
+}) {
+  const [sourceDocumentId, setSourceDocumentId] = useState("");
+  const [targetDocumentId, setTargetDocumentId] = useState("__manual__");
+  const [targetTitle, setTargetTitle] = useState("");
+  const [relationType, setRelationType] = useState<RelationType>("references");
+  const selectedTarget = publishedDocuments.find((document) => document.document_id === targetDocumentId);
+  const effectiveTargetTitle = (selectedTarget?.title || targetTitle).trim();
+  const canCreate = Boolean(sourceDocumentId && effectiveTargetTitle);
+
+  function submit() {
+    if (!canCreate) {
+      return;
+    }
+    onCreate({
+      relationType,
+      sourceDocumentId,
+      targetDocumentId: selectedTarget?.document_id,
+      targetTitle: effectiveTargetTitle,
+    });
+    setTargetTitle("");
+    setTargetDocumentId("__manual__");
+  }
+
+  return (
+    <Card className="rounded-xl">
+      <CardHeader className="border-b pb-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">manual</Badge>
+              <Badge variant="secondary">human curated</Badge>
+            </div>
+            <CardTitle className="mt-3">Add Relation</CardTitle>
+            <CardDescription className="mt-2 max-w-[72ch] leading-6">
+              Create a dependency that extraction missed. Relations with a selected published target become approved; title-only relations stay unresolved.
+            </CardDescription>
+          </div>
+          <Button disabled={!canCreate || creating} onClick={submit} type="button">
+            {creating ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <PlusCircle data-icon="inline-start" className="size-4" />}
+            Add relation
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-3 pt-4 md:grid-cols-[minmax(0,1fr)_11rem_minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground">Source SOP</p>
+          <Select onValueChange={setSourceDocumentId} value={sourceDocumentId}>
+            <SelectTrigger>
+              <SelectValue placeholder="Choose source" />
+            </SelectTrigger>
+            <SelectContent>
+              {sourceDocuments.map((document) => (
+                <SelectItem key={document.document_id} value={document.document_id}>
+                  {document.title}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground">Type</p>
+          <Select onValueChange={(value) => setRelationType(value as RelationType)} value={relationType}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="references">references</SelectItem>
+              <SelectItem value="requires">requires</SelectItem>
+              <SelectItem value="routes_to">routes_to</SelectItem>
+              <SelectItem value="escalates_to">escalates_to</SelectItem>
+              <SelectItem value="exception_of">exception_of</SelectItem>
+              <SelectItem value="supersedes">supersedes</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground">Published target</p>
+          <Select onValueChange={setTargetDocumentId} value={targetDocumentId}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__manual__">No published target yet</SelectItem>
+              {publishedDocuments
+                .filter((document) => document.document_id !== sourceDocumentId)
+                .map((document) => (
+                  <SelectItem key={document.document_id} value={document.document_id}>
+                    {document.title}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground">Target title</p>
+          <Input
+            disabled={targetDocumentId !== "__manual__"}
+            onChange={(event) => setTargetTitle(event.target.value)}
+            placeholder={selectedTarget?.title || "Missing SOP title"}
+            value={targetDocumentId === "__manual__" ? targetTitle : selectedTarget?.title ?? ""}
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function RelationRow({
   assigning,
   assigningOpen,
@@ -158,7 +291,10 @@ function RelationRow({
       .slice(0, 8);
   }, [publishedDocuments, relation.source_document_id, targetSearch]);
   const resolvedTarget = relation.target_title_resolved || relation.target_title;
-  const canResolve = relation.status === "unresolved";
+  const canResolve = relation.status === "unresolved" || relation.status === "suggested";
+  const relationSource = typeof relation.metadata?.relation_source === "string" ? relation.metadata.relation_source : "";
+  const evidenceText = typeof relation.metadata?.evidence_text === "string" ? relation.metadata.evidence_text : "";
+  const sourceUrl = typeof relation.metadata?.source_url === "string" ? relation.metadata.source_url : typeof relation.metadata?.target_url === "string" ? relation.metadata.target_url : "";
 
   return (
     <article className="px-2 py-3">
@@ -170,6 +306,7 @@ function RelationRow({
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{resolvedTarget}</p>
           {relation.target_title_resolved ? <p className="mt-1 text-xs text-muted-foreground">Assigned from published SOP</p> : null}
+          {relationSource ? <p className="mt-1 text-xs text-muted-foreground">{relationSource}</p> : null}
         </div>
         <Badge variant={relation.relation_type === "requires" ? "secondary" : "outline"}>{relation.relation_type}</Badge>
         <StatusBadge status={relation.status} />
@@ -178,6 +315,12 @@ function RelationRow({
             {assigning ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <CheckCircle2 data-icon="inline-start" className="size-3.5" />}
             Assign existing SOP
           </Button>
+          {relation.status === "suggested" && relation.target_document_id ? (
+            <Button disabled={assigning} onClick={() => onAssign(relation, relation.target_document_id as string)} size="sm" type="button" variant="secondary">
+              {assigning ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <CheckCircle2 data-icon="inline-start" className="size-3.5" />}
+              Approve suggestion
+            </Button>
+          ) : null}
           <Button disabled={!canResolve} onClick={() => onUploadTarget(relation)} size="sm" type="button" variant="outline">
             <FilePlus2 data-icon="inline-start" className="size-3.5" />
             Upload target SOP
@@ -188,6 +331,12 @@ function RelationRow({
           </Button>
         </div>
       </div>
+      {evidenceText || sourceUrl ? (
+        <div className="mt-2 rounded-lg border bg-muted/15 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          {evidenceText ? <p>Evidence: {evidenceText}</p> : null}
+          {sourceUrl ? <p className="truncate">URL: {sourceUrl}</p> : null}
+        </div>
+      ) : null}
 
       {assigningOpen && canResolve ? (
         <div className="mt-3 rounded-xl border bg-muted/15 p-3">

@@ -65,6 +65,58 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertEqual(candidates[0]["target_title"], "Quy định sử dụng tasklist")
         self.assertEqual(candidates[0]["relation_type"], "requires")
 
+    def test_explicit_text_reference_creates_single_requires_candidate(self) -> None:
+        candidates = repository.relation_candidates_from_chunk(
+            {
+                "chunk_id": "chunk-2",
+                "section": "policy_rule",
+                "heading": "Tasklist",
+                "content": "CS thực hiện theo Quy định sử dụng tasklist trước khi xử lý.",
+                "metadata": {"unit_type": "policy_rule"},
+            },
+            repository.normalize_phrase("Quy định chuyển Tech"),
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["target_title"], "Quy định sử dụng tasklist")
+        self.assertEqual(candidates[0]["relation_type"], "requires")
+        self.assertEqual(candidates[0]["metadata"]["relation_source"], "explicit_text_reference")
+        self.assertFalse(candidates[0]["metadata"]["needs_clarification"])
+
+    def test_ambiguous_corresponding_process_creates_clarification_candidate(self) -> None:
+        candidates = repository.relation_candidates_from_chunk(
+            {
+                "chunk_id": "chunk-3",
+                "section": "handling_rule",
+                "heading": "Hỗ trợ khách hàng",
+                "content": "CS hỗ trợ theo quy trình tương ứng.",
+                "metadata": {"unit_type": "handling_rule"},
+            },
+            repository.normalize_phrase("Quy định xác minh tài khoản"),
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["target_title"], "quy trình tương ứng")
+        self.assertEqual(candidates[0]["relation_type"], "requires")
+        self.assertTrue(candidates[0]["metadata"]["needs_clarification"])
+
+    def test_operational_handoff_creates_routes_to_candidate(self) -> None:
+        candidates = repository.relation_candidates_from_chunk(
+            {
+                "chunk_id": "chunk-4",
+                "section": "workflow_step",
+                "heading": "Chuyển case",
+                "content": "CS cần chuyển cho MSC trong vòng 30 phút.",
+                "metadata": {"unit_type": "workflow_step"},
+            },
+            repository.normalize_phrase("Quy định theo dõi hình ảnh"),
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["target_title"], "MSC")
+        self.assertEqual(candidates[0]["relation_type"], "routes_to")
+        self.assertEqual(candidates[0]["metadata"]["relation_source"], "operational_handoff")
+
     def test_high_risk_governance_requires_owner_review_sla_and_future_due_date(self) -> None:
         tomorrow = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
         failures = repository.high_risk_governance_failures(

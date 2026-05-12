@@ -30,6 +30,7 @@ from app.text_processing import (
     is_docx_file,
     is_spreadsheet_file,
     render_pdf_pages_as_data_urls,
+    spreadsheet_related_documents_from_row,
     spreadsheet_rows,
     tokenize,
     workflow_units_to_chunks,
@@ -373,11 +374,13 @@ def try_ai_structuring(
             table_chunks = extract_docx_policy_table_chunks(filename, content_type, raw_text, raw_context, classification)
             if table_chunks:
                 return mark_structured_chunks(table_chunks), ["docx_policy_table_extraction_used"], ""
+            related_chunks = spreadsheet_related_document_chunks(filename, raw_context)
             llm_units, llm_warnings = extract_rule_table_units(filename, raw_text)
             warnings.extend(llm_warnings)
             if not llm_units:
                 return [], warnings, f"ai_{classification.document_type}_structuring_failed:{','.join(llm_warnings)}"
             chunks = ai_units_to_chunks(llm_units, filename, classification.source_type, classification.document_type)
+            chunks = append_unique_related_document_chunks(chunks, related_chunks)
             return mark_structured_chunks(chunks), warnings, ""
         if classification.document_type == "workflow_diagram":
             page_images, render_warnings = render_pdf_pages_as_data_urls(data) if filename.lower().endswith(".pdf") or content_type == "application/pdf" else ([], [])
@@ -584,6 +587,95 @@ def docx_policy_row_chunk(
         token_count=len(tokenize(content)),
         metadata=metadata,
     )
+
+
+def spreadsheet_related_document_chunks(filename: str, raw_context: dict[str, Any]) -> list[Chunk]:
+    spreadsheet_chunks = raw_context.get("spreadsheet_chunks")
+    if not isinstance(spreadsheet_chunks, list):
+        return []
+    output: list[Chunk] = []
+    seen: set[tuple[str, str]] = set()
+    for source_chunk in spreadsheet_chunks:
+        metadata = source_chunk.metadata if isinstance(source_chunk.metadata, dict) else {}
+        related_documents = metadata.get("related_documents")
+        if not isinstance(related_documents, list):
+            continue
+        for relation in related_documents:
+            if not isinstance(relation, dict):
+                continue
+            target_title = str(relation.get("target_title") or "").strip()
+            source_url = str(relation.get("source_url") or "").strip()
+            if not target_title:
+                continue
+            key = (normalize_for_signal(target_title), source_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            source_refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+            content_lines = [f"Tài liệu liên quan: {target_title}"]
+            if source_url:
+                content_lines.append(f"Source URL: {source_url}")
+            source_header = str(relation.get("source_header") or "").strip()
+            if source_header:
+                content_lines.append(f"Nguồn trong workbook: {source_header}")
+            content = "\n".join(content_lines)
+            output.append(
+                Chunk(
+                    chunk_index=len(output),
+                    section="related_document",
+                    heading=target_title[:180],
+                    content=content,
+                    token_count=len(tokenize(content)),
+                    metadata={
+                        "unit_type": "related_document",
+                        "retrieval_scope": "unit",
+                        "target_title": target_title,
+                        "relation_type": str(relation.get("relation_type") or "references"),
+                        "related_documents": [relation],
+                        "source_url": source_url,
+                        "source_type": "spreadsheet",
+                        "source_filename": filename,
+                        "sheet_name": metadata.get("sheet_name", ""),
+                        "row_number": metadata.get("row_number"),
+                        "source_ref_quality": source_ref_quality_from_refs(source_refs),
+                        "source_refs": source_refs,
+                    },
+                )
+            )
+    return output
+
+
+def append_unique_related_document_chunks(chunks: list[Chunk], related_chunks: list[Chunk]) -> list[Chunk]:
+    if not related_chunks:
+        return chunks
+    seen = {
+        (
+            normalize_for_signal(str(chunk.metadata.get("target_title") or chunk.heading or "")),
+            str(chunk.metadata.get("source_url") or ""),
+        )
+        for chunk in chunks
+        if str(chunk.metadata.get("unit_type") or chunk.section) == "related_document"
+    }
+    output = list(chunks)
+    for related_chunk in related_chunks:
+        key = (
+            normalize_for_signal(str(related_chunk.metadata.get("target_title") or related_chunk.heading or "")),
+            str(related_chunk.metadata.get("source_url") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(
+            Chunk(
+                chunk_index=len(output),
+                section=related_chunk.section,
+                heading=related_chunk.heading,
+                content=related_chunk.content,
+                token_count=related_chunk.token_count,
+                metadata=related_chunk.metadata,
+            )
+        )
+    return output
 
 
 def docx_policy_full_sop_content(raw_text: str, row_chunks: list[Chunk]) -> str:
@@ -1180,6 +1272,7 @@ def build_degraded_spreadsheet_draft(filename: str, raw_text: str, blocks: list[
             content = row_content(values, headers)
             if not content:
                 continue
+            related_documents = spreadsheet_related_documents_from_row(values, headers, sheet_name)
             chunks.append(
                 degraded_chunk(
                     len(chunks),
@@ -1197,6 +1290,7 @@ def build_degraded_spreadsheet_draft(filename: str, raw_text: str, blocks: list[
                         "historical_sheets": scope == "historical_candidate",
                         "source_ref_quality": "sheet_row",
                         "source_ref_acknowledged": True,
+                        **({"related_documents": related_documents} if related_documents else {}),
                         "source_refs": [{"source_type": "excel", "source_file": filename, "sheet": sheet_name, "row_start": row_number, "row_end": row_number, "column_names": headers}],
                     },
                     classification,

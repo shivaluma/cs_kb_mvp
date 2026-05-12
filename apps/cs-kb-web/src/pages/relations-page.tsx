@@ -4,10 +4,10 @@ import { useNavigate } from "@tanstack/react-router";
 import { RouteLoading } from "@/components/route-loading";
 import { workspacePaths } from "@/constants";
 import { useDocuments } from "@/hooks/api/documents";
-import { useAssignRelation, useRejectRelation, useRelations } from "@/hooks/api/relations";
+import { useAssignRelation, useCreateRelation, useRejectRelation, useRelations } from "@/hooks/api/relations";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { useFeedback } from "@/providers/feedback-context";
-import type { DocumentRelation, RelationStatus } from "@/types";
+import type { DocumentRelation, RelationStatus, RelationType } from "@/types";
 
 const RelationsWorkspace = lazy(() =>
   import("@/workspaces/relations-workspace").then((module) => ({ default: module.RelationsWorkspace })),
@@ -21,7 +21,9 @@ export function RelationsPage() {
   const relationsQuery = useRelations(status);
   const documentsQuery = useDocuments();
   const assignRelationMutation = useAssignRelation();
+  const createRelationMutation = useCreateRelation();
   const rejectRelationMutation = useRejectRelation();
+  const sourceDocuments = (documentsQuery.data ?? []).filter((document) => document.status === "active");
   const publishedDocuments = (documentsQuery.data ?? []).filter(
     (document) => document.status === "active" && document.latest_version_status === "published",
   );
@@ -46,6 +48,20 @@ export function RelationsPage() {
     );
   }
 
+  function createRelation(payload: { relationType: RelationType; sourceDocumentId: string; targetDocumentId?: string; targetTitle: string }) {
+    createRelationMutation.mutate(
+      {
+        ...payload,
+        actor: "cs-ops-ui",
+        metadata: { relation_source: "manual" },
+      },
+      {
+        onSuccess: (created) => reportNotice(`Created ${created.status} ${created.relation_type} relation to ${created.target_title_resolved || created.target_title}.`),
+        onError: () => reportError("Create relation failed. Source must be active; selected target must be published."),
+      },
+    );
+  }
+
   function uploadTarget(relation: DocumentRelation) {
     void navigate({
       to: workspacePaths.documents,
@@ -60,8 +76,10 @@ export function RelationsPage() {
     <Suspense fallback={<RouteLoading label="Loading relations" />}>
       <RelationsWorkspace
         assigningRelationId={assignRelationMutation.isPending ? assignRelationMutation.variables?.relationId ?? "" : ""}
+        creatingRelation={createRelationMutation.isPending}
         documentsLoading={documentsQuery.isFetching}
         onAssign={assignRelation}
+        onCreate={createRelation}
         onRefresh={() => void relationsQuery.refetch()}
         onReject={rejectRelation}
         onSetStatus={(nextStatus) => setParams({ status: nextStatus === "unresolved" ? "" : nextStatus })}
@@ -70,6 +88,7 @@ export function RelationsPage() {
         rejectingRelationId={rejectRelationMutation.isPending ? rejectRelationMutation.variables?.relationId ?? "" : ""}
         relations={relationsQuery.data ?? []}
         relationsLoading={relationsQuery.isFetching}
+        sourceDocuments={sourceDocuments}
         status={status}
       />
     </Suspense>

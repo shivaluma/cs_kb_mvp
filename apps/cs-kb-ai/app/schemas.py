@@ -23,8 +23,8 @@ DocumentType = Literal[
 ]
 ReviewStatus = Literal["needs_review", "reviewed", "approved"]
 BulkReviewScope = Literal["all", "atomic"]
-RelationType = Literal["requires", "references"]
-RelationStatus = Literal["unresolved", "approved", "rejected"]
+RelationType = Literal["requires", "references", "routes_to", "escalates_to", "exception_of", "supersedes"]
+RelationStatus = Literal["suggested", "unresolved", "approved", "rejected", "archived"]
 ExtractionUnitType = Literal[
     "full_sop",
     "routing_rule",
@@ -867,6 +867,17 @@ class DocumentRelation(BaseModel):
 class AssignRelationRequest(BaseModel):
     target_document_id: str = Field(min_length=1)
     actor: str = "cs-ops-ui"
+
+
+class CreateRelationRequest(BaseModel):
+    source_document_id: str = Field(min_length=1)
+    source_version_id: Optional[str] = None
+    source_chunk_id: Optional[str] = None
+    target_title: str = ""
+    target_document_id: Optional[str] = None
+    relation_type: RelationType = "references"
+    actor: str = "cs-ops-ui"
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class RejectRelationRequest(BaseModel):

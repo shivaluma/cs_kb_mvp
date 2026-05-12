@@ -19,6 +19,7 @@ from app.retrieval import retrieve
 from app.schemas import (
     BulkReviewVersionRequest,
     AssignRelationRequest,
+    CreateRelationRequest,
     DocumentMetadata,
     DocumentMetadataPreviewResponse,
     DocumentChunkSummary,
@@ -656,6 +657,27 @@ def list_documents() -> list[DocumentSummary]:
 @app.get("/ai/v1/relations", response_model=list[DocumentRelation])
 def list_relations(status: str = "unresolved") -> list[DocumentRelation]:
     return [DocumentRelation(**row) for row in repository.list_document_relations(status)]
+
+
+@app.post("/ai/v1/relations", response_model=DocumentRelation)
+def create_relation(payload: CreateRelationRequest) -> DocumentRelation:
+    try:
+        return DocumentRelation(
+            **repository.create_document_relation(
+                source_document_id=payload.source_document_id,
+                source_version_id=payload.source_version_id,
+                source_chunk_id=payload.source_chunk_id,
+                target_title=payload.target_title,
+                target_document_id=payload.target_document_id,
+                relation_type=payload.relation_type,
+                actor=payload.actor,
+                metadata=payload.metadata,
+            )
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/ai/v1/relations/{relation_id}/assign", response_model=DocumentRelation)

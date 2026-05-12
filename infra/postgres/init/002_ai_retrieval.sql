@@ -80,9 +80,9 @@ CREATE TABLE IF NOT EXISTS ai_document_relations (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT ai_document_relations_type_check
-    CHECK (relation_type IN ('requires', 'references')),
+    CHECK (relation_type IN ('requires', 'references', 'routes_to', 'escalates_to', 'exception_of', 'supersedes')),
   CONSTRAINT ai_document_relations_status_check
-    CHECK (status IN ('unresolved', 'approved', 'rejected')),
+    CHECK (status IN ('suggested', 'unresolved', 'approved', 'rejected', 'archived')),
   UNIQUE (source_version_id, source_chunk_id, target_title_normalized, relation_type)
 );
 

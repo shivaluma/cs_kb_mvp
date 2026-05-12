@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from contextlib import contextmanager
@@ -20,6 +21,47 @@ from app.text_processing import normalize_phrase, render_pdf_page_jpeg, tokenize
 pool = ConnectionPool(settings.database_url, min_size=1, max_size=10, open=False)
 _synonym_cache: tuple[float, list[dict[str, Any]]] = (0, [])
 SYNONYM_CACHE_SECONDS = 30
+RELATION_TYPES = ("requires", "references", "routes_to", "escalates_to", "exception_of", "supersedes")
+RELATION_STATUSES = ("suggested", "unresolved", "approved", "rejected", "archived")
+URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
+RELATION_TITLE_STOP_RE = re.compile(
+    r"\s+(?:trước khi|truoc khi|sau khi|nếu|neu|trong vòng|trong vong|sau đó|sau do|để|de)\b",
+    re.IGNORECASE,
+)
+RELATION_TYPE_PRIORITY = {
+    "requires": 0,
+    "exception_of": 1,
+    "supersedes": 2,
+    "routes_to": 3,
+    "escalates_to": 4,
+    "references": 5,
+}
+TEXT_RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (
+        re.compile(
+            r"(?:thực hiện|thuc hien|áp dụng|ap dung|xử lý|xu ly|hỗ trợ|ho tro)\s+theo\s+(?P<title>(?:quy\s*(?:định|dinh|trình|trinh)|sop|hướng\s*dẫn|huong\s*dan|macro)[^.;\n]{3,180})",
+            re.IGNORECASE,
+        ),
+        "requires",
+        "explicit_text_reference",
+    ),
+    (
+        re.compile(
+            r"(?:theo|xem(?:\s+thêm)?|tham\s*khảo|tham\s*khao)\s+(?P<title>(?:quy\s*(?:định|dinh|trình|trinh)|sop|hướng\s*dẫn|huong\s*dan|macro)[^.;\n]{3,180})",
+            re.IGNORECASE,
+        ),
+        "references",
+        "explicit_text_reference",
+    ),
+    (
+        re.compile(
+            r"(?:chuyển|chuyen)\s+(?:case\s+)?(?:cho|đến|den|về|ve|vào|vao)\s+(?P<title>[A-Za-zÀ-ỹ0-9 _./-]{2,90})",
+            re.IGNORECASE,
+        ),
+        "routes_to",
+        "operational_handoff",
+    ),
+)
 
 
 def pg_text(value: Any) -> str:
@@ -170,11 +212,37 @@ def ensure_schema() -> None:
               created_at timestamptz NOT NULL DEFAULT now(),
               updated_at timestamptz NOT NULL DEFAULT now(),
               CONSTRAINT ai_document_relations_type_check
-                CHECK (relation_type IN ('requires', 'references')),
+                CHECK (relation_type IN ('requires', 'references', 'routes_to', 'escalates_to', 'exception_of', 'supersedes')),
               CONSTRAINT ai_document_relations_status_check
-                CHECK (status IN ('unresolved', 'approved', 'rejected')),
+                CHECK (status IN ('suggested', 'unresolved', 'approved', 'rejected', 'archived')),
               UNIQUE (source_version_id, source_chunk_id, target_title_normalized, relation_type)
             )
+            """
+        )
+        conn.execute(
+            """
+            ALTER TABLE ai_document_relations
+            DROP CONSTRAINT IF EXISTS ai_document_relations_type_check
+            """
+        )
+        conn.execute(
+            """
+            ALTER TABLE ai_document_relations
+            ADD CONSTRAINT ai_document_relations_type_check
+            CHECK (relation_type IN ('requires', 'references', 'routes_to', 'escalates_to', 'exception_of', 'supersedes'))
+            """
+        )
+        conn.execute(
+            """
+            ALTER TABLE ai_document_relations
+            DROP CONSTRAINT IF EXISTS ai_document_relations_status_check
+            """
+        )
+        conn.execute(
+            """
+            ALTER TABLE ai_document_relations
+            ADD CONSTRAINT ai_document_relations_status_check
+            CHECK (status IN ('suggested', 'unresolved', 'approved', 'rejected', 'archived'))
             """
         )
         conn.execute(
@@ -687,17 +755,7 @@ def sync_unresolved_relations_tx(conn: Connection[Any], document_id: str, versio
         return 0
 
     insert_rows = [
-        (
-            str(uuid.uuid4()),
-            document_id,
-            version_id,
-            candidate["source_chunk_id"],
-            candidate["target_title"],
-            candidate["target_title_normalized"],
-            candidate["relation_type"],
-            pg_text(actor or "system"),
-            pg_text(json.dumps(candidate.get("metadata") or {})),
-        )
+        relation_insert_row(conn, document_id, version_id, candidate, actor)
         for candidate in candidates
     ]
     with conn.cursor() as cur:
@@ -705,14 +763,27 @@ def sync_unresolved_relations_tx(conn: Connection[Any], document_id: str, versio
             """
             INSERT INTO ai_document_relations (
               id, source_document_id, source_version_id, source_chunk_id,
-              target_title, target_title_normalized, relation_type, created_by, metadata
+              target_title, target_title_normalized, target_document_id, target_version_id,
+              relation_type, status, created_by, metadata
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
             ON CONFLICT (source_version_id, source_chunk_id, target_title_normalized, relation_type)
             DO UPDATE SET
               target_title = EXCLUDED.target_title,
+              target_document_id = CASE
+                WHEN ai_document_relations.status IN ('unresolved', 'suggested') THEN EXCLUDED.target_document_id
+                ELSE ai_document_relations.target_document_id
+              END,
+              target_version_id = CASE
+                WHEN ai_document_relations.status IN ('unresolved', 'suggested') THEN EXCLUDED.target_version_id
+                ELSE ai_document_relations.target_version_id
+              END,
+              status = CASE
+                WHEN ai_document_relations.status IN ('unresolved', 'suggested') THEN EXCLUDED.status
+                ELSE ai_document_relations.status
+              END,
               metadata = CASE
-                WHEN ai_document_relations.status = 'unresolved' THEN EXCLUDED.metadata
+                WHEN ai_document_relations.status IN ('unresolved', 'suggested') THEN EXCLUDED.metadata
                 ELSE ai_document_relations.metadata
               END,
               updated_at = now()
@@ -720,6 +791,77 @@ def sync_unresolved_relations_tx(conn: Connection[Any], document_id: str, versio
             insert_rows,
         )
     return len(candidates)
+
+
+def relation_insert_row(
+    conn: Connection[Any],
+    document_id: str,
+    version_id: str,
+    candidate: dict[str, Any],
+    actor: str,
+) -> tuple[Any, ...]:
+    target_document_id = None
+    target_version_id = None
+    status = "unresolved"
+    metadata = dict(candidate.get("metadata") or {})
+    if not metadata.get("needs_clarification"):
+        target = exact_relation_target_tx(conn, candidate["target_title_normalized"], document_id)
+        if target:
+            target_document_id = target["document_id"]
+            target_version_id = target["version_id"]
+            status = "suggested"
+            metadata = {
+                **metadata,
+                "match_status": "exact_title_candidate",
+                "matched_target_title": target.get("title", ""),
+            }
+        else:
+            metadata = {**metadata, "match_status": "no_confident_target"}
+    else:
+        metadata = {**metadata, "match_status": "needs_clarification"}
+    return (
+        str(uuid.uuid4()),
+        document_id,
+        version_id,
+        candidate["source_chunk_id"] or None,
+        candidate["target_title"],
+        candidate["target_title_normalized"],
+        target_document_id,
+        target_version_id,
+        candidate["relation_type"],
+        status,
+        pg_text(actor or "system"),
+        pg_text(json.dumps(metadata)),
+    )
+
+
+def exact_relation_target_tx(conn: Connection[Any], normalized_target_title: str, source_document_id: str) -> dict[str, Any] | None:
+    if not normalized_target_title:
+        return None
+    conn.row_factory = dict_row
+    rows = conn.execute(
+        """
+        SELECT d.id::text AS document_id,
+               v.id::text AS version_id,
+               d.title,
+               d.source_filename
+        FROM ai_documents d
+        JOIN ai_document_versions v ON v.id = d.current_version_id
+        WHERE d.status = 'active'
+          AND v.status = 'published'
+          AND d.id::text <> %s
+        """,
+        (source_document_id,),
+    ).fetchall()
+    matches = [
+        dict(row)
+        for row in rows
+        if normalized_target_title in {
+            normalize_phrase(str(row.get("title") or "")),
+            normalize_phrase(str(row.get("source_filename") or "").rsplit(".", 1)[0]),
+        }
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def relation_candidates_from_chunk(row: dict[str, Any], source_title_norm: str) -> list[dict[str, Any]]:
@@ -752,6 +894,7 @@ def relation_candidates_from_chunk(row: dict[str, Any], source_title_norm: str) 
                 "relation_type": metadata.get("relation_type"),
             }
         )
+    raw_items.extend(relation_items_from_text(heading, content))
 
     output: list[dict[str, Any]] = []
     for item in raw_items:
@@ -773,10 +916,113 @@ def relation_candidates_from_chunk(row: dict[str, Any], source_title_norm: str) 
                     "source_unit_type": unit_type,
                     "source_heading": heading,
                     "source_section": str(row.get("section") or ""),
+                    **(item if isinstance(item, dict) else {}),
                 },
             }
         )
     return output
+
+
+def relation_items_from_text(heading: str, content: str) -> list[dict[str, Any]]:
+    text = "\n".join([heading, content]).strip()
+    if not text:
+        return []
+    output: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for pattern, relation_type, relation_source in TEXT_RELATION_PATTERNS:
+        for match in pattern.finditer(text):
+            target_title = clean_relation_title(match.group("title"))
+            if not target_title:
+                continue
+            evidence_text = clean_relation_title(match.group(0))
+            needs_clarification = normalize_phrase(target_title) in {
+                "quy trinh tuong ung",
+                "quy dinh tuong ung",
+                "sop tuong ung",
+                "quy trinh lien quan",
+            }
+            key = (normalize_phrase(target_title), relation_type, evidence_text)
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(
+                {
+                    "target_title": target_title,
+                    "relation_type": relation_type,
+                    "relation_source": relation_source,
+                    "evidence_text": evidence_text[:500],
+                    "confidence": 0.86 if not needs_clarification else 0.45,
+                    "needs_clarification": needs_clarification,
+                }
+            )
+    for url in URL_RE.findall(text):
+        evidence_title = relation_title_near_url(text, url) or relation_title_from_text(heading, content)
+        if not evidence_title:
+            evidence_title = url
+        key = (normalize_phrase(evidence_title), "references", url)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(
+            {
+                "target_title": evidence_title,
+                "relation_type": "references",
+                "relation_source": "explicit_url",
+                "target_url": url,
+                "evidence_text": url,
+                "confidence": 0.8,
+            }
+        )
+    return consolidate_relation_items(output)
+
+
+def consolidate_relation_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_target: dict[str, dict[str, Any]] = {}
+    ordered_keys: list[str] = []
+    for item in items:
+        normalized_title = normalize_phrase(relation_target_title(item))
+        if not normalized_title:
+            continue
+        current = by_target.get(normalized_title)
+        if current is None:
+            by_target[normalized_title] = item
+            ordered_keys.append(normalized_title)
+            continue
+        current_type = str(current.get("relation_type") or "references")
+        next_type = str(item.get("relation_type") or "references")
+        current_priority = RELATION_TYPE_PRIORITY.get(current_type, 99)
+        next_priority = RELATION_TYPE_PRIORITY.get(next_type, 99)
+        if next_priority < current_priority:
+            merged = {**current, **item}
+        else:
+            merged = {**item, **current}
+        if item.get("target_url") and not merged.get("target_url"):
+            merged["target_url"] = item["target_url"]
+        if item.get("evidence_text") and item["evidence_text"] != merged.get("evidence_text"):
+            merged["evidence_text"] = "; ".join(
+                value
+                for value in [str(merged.get("evidence_text") or ""), str(item.get("evidence_text") or "")]
+                if value
+            )[:500]
+        merged["confidence"] = max(float(current.get("confidence") or 0), float(item.get("confidence") or 0))
+        merged["needs_clarification"] = bool(current.get("needs_clarification") or item.get("needs_clarification"))
+        by_target[normalized_title] = merged
+    return [by_target[key] for key in ordered_keys]
+
+
+def relation_title_near_url(text: str, url: str) -> str:
+    for line in text.splitlines():
+        if url not in line:
+            continue
+        before_url = line.split(url, 1)[0]
+        if "(" in before_url:
+            before_url = before_url.rsplit("(", 1)[0]
+        if ":" in before_url:
+            before_url = before_url.rsplit(":", 1)[-1]
+        title = clean_relation_title(before_url)
+        if title and normalize_phrase(title) not in {"link", "url", "link quy dinh", "source url"}:
+            return title
+    return ""
 
 
 def relation_target_title(item: Any) -> str:
@@ -800,6 +1046,7 @@ def relation_title_from_text(heading: str, content: str) -> str:
 
 def clean_relation_title(value: str) -> str:
     cleaned = " ".join(str(value or "").replace(":", " ").split()).strip(" -•")
+    cleaned = RELATION_TITLE_STOP_RE.split(cleaned, maxsplit=1)[0].strip(" -•")
     if len(cleaned) > 300:
         cleaned = cleaned[:300].rsplit(" ", 1)[0].strip()
     return cleaned
@@ -811,9 +1058,19 @@ def normalize_relation_type(value: Any, content: str = "") -> str:
         return "requires"
     if normalized in {"references", "reference", "related", "links_to"}:
         return "references"
+    if normalized in {"routes_to", "route", "handoff", "handoff_to", "chuyen", "chuyen_cho"}:
+        return "routes_to"
+    if normalized in {"escalates_to", "escalation", "escalate"}:
+        return "escalates_to"
+    if normalized in {"exception_of", "exception"}:
+        return "exception_of"
+    if normalized in {"supersedes", "replace", "replaces"}:
+        return "supersedes"
     content_norm = normalize_phrase(content)
     if any(signal in content_norm for signal in ["bat buoc", "phai mo", "phai xem", "requires", "must use", "prerequisite"]):
         return "requires"
+    if any(signal in content_norm for signal in ["chuyen case", "chuyen cho", "handoff"]):
+        return "routes_to"
     return "references"
 
 
@@ -2010,12 +2267,174 @@ def list_document_relations(status: str = "unresolved") -> list[dict[str, Any]]:
             LEFT JOIN ai_documents target ON target.id = r.target_document_id
             {where}
             ORDER BY
-              CASE r.status WHEN 'unresolved' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
+              CASE r.status WHEN 'unresolved' THEN 0 WHEN 'suggested' THEN 1 WHEN 'approved' THEN 2 ELSE 3 END,
               r.updated_at DESC
             """,
             params,
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def create_document_relation(
+    *,
+    source_document_id: str,
+    source_version_id: str | None,
+    source_chunk_id: str | None,
+    target_title: str,
+    target_document_id: str | None,
+    relation_type: str,
+    actor: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    relation_type = normalize_relation_type(relation_type)
+    clean_metadata = metadata if isinstance(metadata, dict) else {}
+    with connection() as conn:
+        with conn.transaction():
+            conn.row_factory = dict_row
+            source = conn.execute(
+                """
+                SELECT d.id::text AS document_id,
+                       COALESCE(%s, d.current_version_id::text) AS version_id
+                FROM ai_documents d
+                WHERE d.id = %s AND d.status = 'active'
+                """,
+                (source_version_id, source_document_id),
+            ).fetchone()
+            if not source or not source.get("version_id"):
+                raise LookupError("source_document_not_found")
+            if source_version_id:
+                version_exists = conn.execute(
+                    "SELECT 1 FROM ai_document_versions WHERE id = %s AND document_id = %s",
+                    (source_version_id, source_document_id),
+                ).fetchone()
+                if not version_exists:
+                    raise LookupError("source_version_not_found")
+            if source_chunk_id:
+                chunk_exists = conn.execute(
+                    "SELECT 1 FROM ai_chunks WHERE id = %s AND document_id = %s AND version_id = %s",
+                    (source_chunk_id, source_document_id, source["version_id"]),
+                ).fetchone()
+                if not chunk_exists:
+                    raise LookupError("source_chunk_not_found")
+
+            resolved_target = None
+            if target_document_id:
+                resolved_target = published_target_document_tx(conn, target_document_id)
+                if not resolved_target:
+                    raise LookupError("target_document_not_found")
+                target_title = target_title or str(resolved_target.get("title") or "")
+            target_title = clean_relation_title(target_title)
+            if not target_title:
+                raise ValueError("target_title_required")
+            normalized_title = normalize_phrase(target_title)[:300]
+            status = "approved" if resolved_target else "unresolved"
+            if not resolved_target:
+                resolved_target = exact_relation_target_tx(conn, normalized_title, source_document_id)
+                if resolved_target:
+                    status = "suggested"
+            metadata_payload = {
+                **clean_metadata,
+                "relation_source": clean_metadata.get("relation_source") or "manual",
+                "match_status": "manual_target_approved" if status == "approved" else ("exact_title_candidate" if status == "suggested" else "manual_unresolved"),
+            }
+            existing = conn.execute(
+                """
+                SELECT id::text AS id
+                FROM ai_document_relations
+                WHERE source_document_id = %s
+                  AND source_version_id = %s
+                  AND source_chunk_id IS NOT DISTINCT FROM %s
+                  AND target_title_normalized = %s
+                  AND relation_type = %s
+                """,
+                (source_document_id, source["version_id"], source_chunk_id, normalized_title, relation_type),
+            ).fetchone()
+            relation_id = str(existing["id"]) if existing else str(uuid.uuid4())
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE ai_document_relations
+                    SET target_title = %s,
+                        target_document_id = %s,
+                        target_version_id = %s,
+                        status = %s,
+                        reviewed_by = CASE WHEN %s = 'approved' THEN %s ELSE reviewed_by END,
+                        reviewed_at = CASE WHEN %s = 'approved' THEN now() ELSE reviewed_at END,
+                        rejection_reason = '',
+                        metadata = %s::jsonb,
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (
+                        target_title,
+                        resolved_target.get("document_id") if resolved_target else None,
+                        resolved_target.get("version_id") if resolved_target else None,
+                        status,
+                        status,
+                        pg_text(actor),
+                        status,
+                        pg_text(json.dumps(metadata_payload)),
+                        relation_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO ai_document_relations (
+                      id, source_document_id, source_version_id, source_chunk_id,
+                      target_title, target_title_normalized, target_document_id, target_version_id,
+                      relation_type, status, created_by, reviewed_by, reviewed_at, metadata
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s = 'approved' THEN %s ELSE NULL END, CASE WHEN %s = 'approved' THEN now() ELSE NULL END, %s::jsonb)
+                    """,
+                    (
+                        relation_id,
+                        source_document_id,
+                        source["version_id"],
+                        source_chunk_id,
+                        target_title,
+                        normalized_title,
+                        resolved_target.get("document_id") if resolved_target else None,
+                        resolved_target.get("version_id") if resolved_target else None,
+                        relation_type,
+                        status,
+                        pg_text(actor or "cs-ops-ui"),
+                        status,
+                        pg_text(actor),
+                        status,
+                        pg_text(json.dumps(metadata_payload)),
+                    ),
+                )
+            audit_tx(
+                conn,
+                actor=pg_text(actor),
+                action="document_relation_create",
+                entity_type="ai_document_relation",
+                entity_id=relation_id,
+                metadata={"status": status, "relation_type": relation_type, "source_document_id": source_document_id},
+            )
+    return relation_by_id(relation_id)
+
+
+def published_target_document_tx(conn: Connection[Any], target_document_id: str) -> dict[str, Any] | None:
+    conn.row_factory = dict_row
+    row = conn.execute(
+        """
+        SELECT d.id::text AS document_id,
+               v.id::text AS version_id,
+               d.title,
+               v.status AS version_status
+        FROM ai_documents d
+        JOIN ai_document_versions v ON v.id = d.current_version_id
+        WHERE d.id = %s AND d.status = 'active'
+        """,
+        (target_document_id,),
+    ).fetchone()
+    if not row:
+        return None
+    if row["version_status"] != "published":
+        raise ValueError("target_document_must_have_published_current_version")
+    return dict(row)
 
 
 def assign_document_relation(relation_id: str, target_document_id: str, actor: str) -> dict[str, Any]:

@@ -54,6 +54,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ai/suggest", h.aiSuggest)
 	mux.HandleFunc("GET /api/v1/ai/documents", h.proxyAI("/ai/v1/documents"))
 	mux.HandleFunc("GET /api/v1/ai/relations", h.proxyAI("/ai/v1/relations"))
+	mux.HandleFunc("POST /api/v1/ai/relations", h.proxyAI("/ai/v1/relations"))
 	mux.HandleFunc("POST /api/v1/ai/relations/{id}/assign", h.proxyAIRelationAction("assign"))
 	mux.HandleFunc("POST /api/v1/ai/relations/{id}/reject", h.proxyAIRelationAction("reject"))
 	mux.HandleFunc("POST /api/v1/ai/documents/metadata-preview", h.proxyAIDocumentMetadataPreview)

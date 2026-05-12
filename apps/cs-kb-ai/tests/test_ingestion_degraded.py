@@ -227,6 +227,62 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(current["metadata"]["source_refs"][0]["column_names"], ["Case", "Action"])
         self.assertTrue(any(artifact["artifact_type"] == "structuring_plan" for artifact in enrichment["pipeline_artifacts"]))
 
+    def test_excel_hyperlink_rows_create_related_document_candidates(self) -> None:
+        ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
+        data = workbook_with_hyperlinks_bytes()
+
+        _raw, _digest, chunks, _warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định xác minh tài khoản.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            data=data,
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        related_rows = [
+            chunk for chunk in chunks
+            if chunk["metadata"].get("related_documents")
+        ]
+        self.assertEqual(enrichment["document_type"], "policy_table")
+        self.assertGreaterEqual(len(related_rows), 2)
+        targets = [
+            relation["target_title"]
+            for chunk in related_rows
+            for relation in chunk["metadata"]["related_documents"]
+        ]
+        self.assertIn("Call In App, Non-voice In App", targets)
+        self.assertIn("Xác minh tài khoản kênh hotline.xlsx", targets)
+        self.assertTrue(all(relation.get("source_url", "").startswith("https://") for chunk in related_rows for relation in chunk["metadata"]["related_documents"]))
+
+    def test_successful_ai_spreadsheet_structuring_keeps_related_document_units(self) -> None:
+        def fake_rule_extractor(_filename: str, _raw_text: str):
+            refs = [{"source_type": "excel", "source_file": "rules.xlsx", "sheet": "Rules", "row_start": 1, "row_end": 1}]
+            return (
+                [
+                    {
+                        "unit_type": "policy_rule",
+                        "title": "Quy định xác minh tài khoản",
+                        "content": "CS xác minh theo từng kênh.",
+                        "source_refs": refs,
+                    }
+                ],
+                ["openrouter_rule_table_extraction_used"],
+            )
+
+        ingestion.extract_rule_table_units = fake_rule_extractor
+        data = workbook_with_hyperlinks_bytes()
+
+        _raw, _digest, chunks, _warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định xác minh tài khoản.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            data=data,
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        related_units = [chunk for chunk in chunks if chunk["metadata"].get("unit_type") == "related_document"]
+        self.assertEqual(enrichment["extraction_status"], "structured")
+        self.assertGreaterEqual(len(related_units), 2)
+        self.assertIn("Source URL:", related_units[0]["content"])
+
     def test_degraded_policy_text_does_not_duplicate_warning_clone_content(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
 
@@ -1055,6 +1111,21 @@ def workbook_bytes(sheets: dict[str, list[list[str]]]) -> bytes:
         worksheet.title = sheet_name
         for row in rows:
             worksheet.append(row)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def workbook_with_hyperlinks_bytes() -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Quy trình xác minh từ 02072025"
+    worksheet.append(["Kênh", "Link"])
+    worksheet.append(["Call In App, Non-voice In App", "Link"])
+    worksheet["B2"].hyperlink = "https://example.com/call-in-app.pdf"
+    worksheet.append(["Hotline 1900232345", "Link"])
+    worksheet["B3"].hyperlink = "https://example.com/hotline.xlsx"
+    worksheet["B3"].hyperlink.display = "Xác minh tài khoản kênh hotline.xlsx"
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
