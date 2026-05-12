@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { CheckCircle2, FilePlus2, GitBranch, Loader2, PlusCircle, RefreshCw, Search, XCircle } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { CheckCircle2, CircleHelp, FilePlus2, GitBranch, Loader2, PlusCircle, RefreshCw, Search, XCircle } from "lucide-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatDate } from "@/lib/format";
 import type { DocumentRelation, DocumentSummary, RelationStatus, RelationType } from "@/types";
 
@@ -173,86 +174,129 @@ function ManualRelationCreator({
   }
 
   return (
-    <Card className="rounded-xl">
-      <CardHeader className="border-b pb-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="outline">manual</Badge>
-              <Badge variant="secondary">human curated</Badge>
+    <TooltipProvider delayDuration={150}>
+      <Card className="rounded-xl">
+        <CardHeader className="border-b pb-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">manual</Badge>
+                <Badge variant="secondary">human curated</Badge>
+              </div>
+              <CardTitle className="mt-3">Add Relation</CardTitle>
+              <CardDescription className="mt-2 max-w-[72ch] leading-6">
+                Tạo liên kết nghiệp vụ mà extraction chưa bắt được. Chọn SOP đích đã publish để approve ngay, hoặc nhập tên SOP còn thiếu để đưa vào hàng chờ unresolved.
+              </CardDescription>
             </div>
-            <CardTitle className="mt-3">Add Relation</CardTitle>
-            <CardDescription className="mt-2 max-w-[72ch] leading-6">
-              Create a dependency that extraction missed. Relations with a selected published target become approved; title-only relations stay unresolved.
-            </CardDescription>
+            <Button disabled={!canCreate || creating} onClick={submit} type="button">
+              {creating ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <PlusCircle data-icon="inline-start" className="size-4" />}
+              Add relation
+            </Button>
           </div>
-          <Button disabled={!canCreate || creating} onClick={submit} type="button">
-            {creating ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <PlusCircle data-icon="inline-start" className="size-4" />}
-            Add relation
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="grid gap-3 pt-4 md:grid-cols-[minmax(0,1fr)_11rem_minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Source SOP</p>
-          <Select onValueChange={setSourceDocumentId} value={sourceDocumentId}>
-            <SelectTrigger>
-              <SelectValue placeholder="Choose source" />
-            </SelectTrigger>
-            <SelectContent>
-              {sourceDocuments.map((document) => (
-                <SelectItem key={document.document_id} value={document.document_id}>
-                  {document.title}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Type</p>
-          <Select onValueChange={(value) => setRelationType(value as RelationType)} value={relationType}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="references">references</SelectItem>
-              <SelectItem value="requires">requires</SelectItem>
-              <SelectItem value="routes_to">routes_to</SelectItem>
-              <SelectItem value="escalates_to">escalates_to</SelectItem>
-              <SelectItem value="exception_of">exception_of</SelectItem>
-              <SelectItem value="supersedes">supersedes</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Published target</p>
-          <Select onValueChange={setTargetDocumentId} value={targetDocumentId}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__manual__">No published target yet</SelectItem>
-              {publishedDocuments
-                .filter((document) => document.document_id !== sourceDocumentId)
-                .map((document) => (
+        </CardHeader>
+        <CardContent className="grid gap-3 pt-4 md:grid-cols-[minmax(0,1fr)_11rem_minmax(0,1fr)_minmax(0,1fr)]">
+          <div className="space-y-1.5">
+            <FieldLabel tooltip="SOP nguồn là tài liệu đang nhắc tới hoặc phụ thuộc vào SOP khác. Ví dụ: trong SOP A có câu “thực hiện theo SOP B” thì chọn SOP A ở đây.">
+              Source SOP
+            </FieldLabel>
+            <Select onValueChange={setSourceDocumentId} value={sourceDocumentId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Choose source" />
+              </SelectTrigger>
+              <SelectContent>
+                {sourceDocuments.map((document) => (
                   <SelectItem key={document.document_id} value={document.document_id}>
                     {document.title}
                   </SelectItem>
                 ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Target title</p>
-          <Input
-            disabled={targetDocumentId !== "__manual__"}
-            onChange={(event) => setTargetTitle(event.target.value)}
-            placeholder={selectedTarget?.title || "Missing SOP title"}
-            value={targetDocumentId === "__manual__" ? targetTitle : selectedTarget?.title ?? ""}
-          />
-        </div>
-      </CardContent>
-    </Card>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <FieldLabel
+              tooltip={
+                <div className="space-y-1">
+                  <p><span className="font-medium">references:</span> chỉ để xem thêm hoặc liên quan nhẹ.</p>
+                  <p><span className="font-medium">requires:</span> bắt buộc phải làm theo SOP đích.</p>
+                  <p><span className="font-medium">routes_to:</span> chuyển case, queue hoặc team.</p>
+                  <p><span className="font-medium">escalates_to:</span> escalate lên team/level khác.</p>
+                  <p><span className="font-medium">exception_of:</span> SOP này là ngoại lệ của SOP đích.</p>
+                  <p><span className="font-medium">supersedes:</span> SOP này thay thế SOP đích.</p>
+                </div>
+              }
+            >
+              Type
+            </FieldLabel>
+            <Select onValueChange={(value) => setRelationType(value as RelationType)} value={relationType}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="references">references</SelectItem>
+                <SelectItem value="requires">requires</SelectItem>
+                <SelectItem value="routes_to">routes_to</SelectItem>
+                <SelectItem value="escalates_to">escalates_to</SelectItem>
+                <SelectItem value="exception_of">exception_of</SelectItem>
+                <SelectItem value="supersedes">supersedes</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <FieldLabel tooltip="Nếu SOP đích đã có bản published trong KB thì chọn ở đây. Relation sẽ được approve ngay và search/chat mới được phép expand qua SOP đích.">
+              Published target
+            </FieldLabel>
+            <Select onValueChange={setTargetDocumentId} value={targetDocumentId}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__manual__">No published target yet</SelectItem>
+                {publishedDocuments
+                  .filter((document) => document.document_id !== sourceDocumentId)
+                  .map((document) => (
+                    <SelectItem key={document.document_id} value={document.document_id}>
+                      {document.title}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <FieldLabel tooltip="Chỉ nhập khi SOP đích chưa có trong KB hoặc chưa publish. Relation sẽ ở trạng thái unresolved để CS Ops upload hoặc assign target sau.">
+              Target title
+            </FieldLabel>
+            <Input
+              disabled={targetDocumentId !== "__manual__"}
+              onChange={(event) => setTargetTitle(event.target.value)}
+              placeholder={selectedTarget?.title || "Tên SOP còn thiếu"}
+              value={targetDocumentId === "__manual__" ? targetTitle : selectedTarget?.title ?? ""}
+            />
+          </div>
+        </CardContent>
+      </Card>
+    </TooltipProvider>
+  );
+}
+
+function FieldLabel({ children, tooltip }: { children: ReactNode; tooltip: ReactNode }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <p className="text-xs font-medium text-muted-foreground">{children}</p>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            aria-label={`Giải thích ${String(children)}`}
+            className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            type="button"
+          >
+            <CircleHelp className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-80 items-start text-left leading-5" side="top">
+          {tooltip}
+        </TooltipContent>
+      </Tooltip>
+    </div>
   );
 }
 
