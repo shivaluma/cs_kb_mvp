@@ -21,20 +21,37 @@ from app.text_processing import normalize_phrase, render_pdf_page_jpeg, tokenize
 pool = ConnectionPool(settings.database_url, min_size=1, max_size=10, open=False)
 _synonym_cache: tuple[float, list[dict[str, Any]]] = (0, [])
 SYNONYM_CACHE_SECONDS = 30
-RELATION_TYPES = ("requires", "references", "routes_to", "escalates_to", "exception_of", "supersedes")
+RELATION_TYPES = (
+    "references",
+    "requires",
+    "must_follow",
+    "routes_to",
+    "escalates_to",
+    "uses_macro",
+    "exception_of",
+    "supersedes",
+    "related_to",
+    "possible_conflict",
+)
 RELATION_STATUSES = ("suggested", "unresolved", "approved", "rejected", "archived")
+RELATION_TYPE_SQL = ", ".join(f"'{relation_type}'" for relation_type in RELATION_TYPES)
+BLOCKING_RELATION_TYPES = {"requires", "must_follow", "exception_of", "supersedes"}
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
 RELATION_TITLE_STOP_RE = re.compile(
     r"\s+(?:trước khi|truoc khi|sau khi|nếu|neu|trong vòng|trong vong|sau đó|sau do|để|de)\b",
     re.IGNORECASE,
 )
 RELATION_TYPE_PRIORITY = {
-    "requires": 0,
-    "exception_of": 1,
-    "supersedes": 2,
-    "routes_to": 3,
-    "escalates_to": 4,
-    "references": 5,
+    "must_follow": 0,
+    "requires": 1,
+    "exception_of": 2,
+    "supersedes": 3,
+    "routes_to": 4,
+    "escalates_to": 5,
+    "uses_macro": 6,
+    "references": 7,
+    "related_to": 8,
+    "possible_conflict": 9,
 }
 TEXT_RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
@@ -212,7 +229,7 @@ def ensure_schema() -> None:
               created_at timestamptz NOT NULL DEFAULT now(),
               updated_at timestamptz NOT NULL DEFAULT now(),
               CONSTRAINT ai_document_relations_type_check
-                CHECK (relation_type IN ('requires', 'references', 'routes_to', 'escalates_to', 'exception_of', 'supersedes')),
+                CHECK (relation_type IN ('references', 'requires', 'must_follow', 'routes_to', 'escalates_to', 'uses_macro', 'exception_of', 'supersedes', 'related_to', 'possible_conflict')),
               CONSTRAINT ai_document_relations_status_check
                 CHECK (status IN ('suggested', 'unresolved', 'approved', 'rejected', 'archived')),
               UNIQUE (source_version_id, source_chunk_id, target_title_normalized, relation_type)
@@ -229,7 +246,7 @@ def ensure_schema() -> None:
             """
             ALTER TABLE ai_document_relations
             ADD CONSTRAINT ai_document_relations_type_check
-            CHECK (relation_type IN ('requires', 'references', 'routes_to', 'escalates_to', 'exception_of', 'supersedes'))
+            CHECK (relation_type IN ('references', 'requires', 'must_follow', 'routes_to', 'escalates_to', 'uses_macro', 'exception_of', 'supersedes', 'related_to', 'possible_conflict'))
             """
         )
         conn.execute(
@@ -1054,18 +1071,26 @@ def clean_relation_title(value: str) -> str:
 
 def normalize_relation_type(value: Any, content: str = "") -> str:
     normalized = normalize_phrase(str(value or ""))
+    if normalized in {"must_follow", "must follow", "bat buoc lam theo", "phai lam theo"}:
+        return "must_follow"
     if normalized in {"requires", "require", "required", "dependency", "depends_on", "prerequisite"}:
         return "requires"
-    if normalized in {"references", "reference", "related", "links_to"}:
+    if normalized in {"references", "reference", "links_to"}:
         return "references"
+    if normalized in {"related_to", "related to", "related", "lien quan", "lien quan den"}:
+        return "related_to"
     if normalized in {"routes_to", "route", "handoff", "handoff_to", "chuyen", "chuyen_cho"}:
         return "routes_to"
     if normalized in {"escalates_to", "escalation", "escalate"}:
         return "escalates_to"
+    if normalized in {"uses_macro", "uses macro", "macro", "macro_script", "macro script", "script"}:
+        return "uses_macro"
     if normalized in {"exception_of", "exception"}:
         return "exception_of"
     if normalized in {"supersedes", "replace", "replaces"}:
         return "supersedes"
+    if normalized in {"possible_conflict", "possible conflict", "conflict", "conflicts", "mau thuan", "xung dot"}:
+        return "possible_conflict"
     content_norm = normalize_phrase(content)
     if any(signal in content_norm for signal in ["bat buoc", "phai mo", "phai xem", "requires", "must use", "prerequisite"]):
         return "requires"
@@ -1846,10 +1871,34 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         failures.append("missing_effective_from")
     if has_historical_sheets and not has_effective_from:
         failures.append("historical_sheets_without_current_effective_date")
+    high_risk_publish_scope = version["document_type"] in {"policy_rule", "policy_table", "workflow_diagram"} or has_high_risk_signal
+    failures.extend(unresolved_relation_publish_gate_failures_tx(conn, version_id, high_risk_publish_scope))
 
     failures = list(dict.fromkeys(failures))
     if failures:
         raise ValueError("publish_readiness_failed:" + ",".join(failures))
+
+
+def unresolved_relation_publish_gate_failures_tx(conn: Connection[Any], version_id: str, high_risk_publish_scope: bool) -> list[str]:
+    if not high_risk_publish_scope:
+        return []
+    conn.row_factory = dict_row
+    rows = conn.execute(
+        """
+        SELECT id::text AS id
+        FROM ai_document_relations
+        WHERE source_version_id = %s
+          AND status IN ('unresolved', 'suggested')
+          AND (
+            relation_type = ANY(%s)
+            OR COALESCE(metadata->>'affects_publish_gate', 'false') = 'true'
+          )
+        """,
+        (version_id, sorted(BLOCKING_RELATION_TYPES)),
+    ).fetchall()
+    if not rows:
+        return []
+    return [f"{len(rows)}_unresolved_required_relations"]
 
 
 def is_degraded_unconverted(metadata: dict[str, Any]) -> bool:
@@ -2328,13 +2377,14 @@ def create_document_relation(
                 raise ValueError("target_title_required")
             normalized_title = normalize_phrase(target_title)[:300]
             status = "approved" if resolved_target else "unresolved"
-            if not resolved_target:
+            relation_source = str(clean_metadata.get("relation_source") or "manual")
+            if not resolved_target and relation_source != "manual":
                 resolved_target = exact_relation_target_tx(conn, normalized_title, source_document_id)
                 if resolved_target:
                     status = "suggested"
             metadata_payload = {
                 **clean_metadata,
-                "relation_source": clean_metadata.get("relation_source") or "manual",
+                "relation_source": relation_source,
                 "match_status": "manual_target_approved" if status == "approved" else ("exact_title_candidate" if status == "suggested" else "manual_unresolved"),
             }
             existing = conn.execute(
@@ -3582,6 +3632,7 @@ def approved_relation_target_rows(source_document_ids: list[str], exclude_chunk_
             JOIN ai_chunks c ON c.document_id = target.id AND c.version_id = v.id
             WHERE r.status = 'approved'
               AND r.source_document_id = ANY(%s)
+              AND r.relation_type <> 'possible_conflict'
               AND target.status = 'active'
               AND target.current_version_id = v.id
               AND v.status = 'published'

@@ -34,6 +34,7 @@ export function useCreateRelation() {
       actor: string;
       metadata?: Record<string, unknown>;
       relationType: RelationType;
+      sourceChunkId?: string;
       sourceDocumentId: string;
       targetDocumentId?: string;
       targetTitle: string;
@@ -42,6 +43,7 @@ export function useCreateRelation() {
         actor: payload.actor,
         metadata: payload.metadata ?? {},
         relation_type: payload.relationType,
+        source_chunk_id: payload.sourceChunkId || null,
         source_document_id: payload.sourceDocumentId,
         target_document_id: payload.targetDocumentId || null,
         target_title: payload.targetTitle,

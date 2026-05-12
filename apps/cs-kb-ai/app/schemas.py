@@ -23,7 +23,18 @@ DocumentType = Literal[
 ]
 ReviewStatus = Literal["needs_review", "reviewed", "approved"]
 BulkReviewScope = Literal["all", "atomic"]
-RelationType = Literal["requires", "references", "routes_to", "escalates_to", "exception_of", "supersedes"]
+RelationType = Literal[
+    "references",
+    "requires",
+    "must_follow",
+    "routes_to",
+    "escalates_to",
+    "uses_macro",
+    "exception_of",
+    "supersedes",
+    "related_to",
+    "possible_conflict",
+]
 RelationStatus = Literal["suggested", "unresolved", "approved", "rejected", "archived"]
 ExtractionUnitType = Literal[
     "full_sop",

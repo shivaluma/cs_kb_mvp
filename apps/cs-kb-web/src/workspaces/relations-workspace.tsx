@@ -1,5 +1,5 @@
-import { useMemo, useState, type ReactNode } from "react";
-import { CheckCircle2, CircleHelp, FilePlus2, GitBranch, Loader2, PlusCircle, RefreshCw, Search, XCircle } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { ArrowRight, CheckCircle2, CircleHelp, FilePlus2, GitBranch, Loader2, PlusCircle, RefreshCw, Search, XCircle } from "lucide-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
@@ -8,8 +8,33 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useDocumentChunks } from "@/hooks/api/documents";
 import { formatDate } from "@/lib/format";
-import type { DocumentRelation, DocumentSummary, RelationStatus, RelationType } from "@/types";
+import type { DocumentChunk, DocumentRelation, DocumentSummary, RelationStatus, RelationType } from "@/types";
+
+type CreateRelationPayload = {
+  metadata?: Record<string, unknown>;
+  relationType: RelationType;
+  sourceChunkId?: string;
+  sourceDocumentId: string;
+  targetDocumentId?: string;
+  targetTitle: string;
+};
+
+const RELATION_TYPE_OPTIONS: Array<{ value: RelationType; label: string; help: string }> = [
+  { value: "references", label: "references", help: "Chỉ xem thêm hoặc liên quan nhẹ." },
+  { value: "requires", label: "requires", help: "Cần đọc hoặc làm theo SOP đích để xử lý đúng." },
+  { value: "must_follow", label: "must_follow", help: "Bắt buộc tuân thủ SOP đích, có tác động mạnh tới publish gate." },
+  { value: "routes_to", label: "routes_to", help: "Chuyển case, task, queue hoặc team." },
+  { value: "escalates_to", label: "escalates_to", help: "Escalate lên team, lead hoặc level khác." },
+  { value: "uses_macro", label: "uses_macro", help: "Dùng macro, script hoặc mẫu phản hồi từ SOP đích." },
+  { value: "exception_of", label: "exception_of", help: "SOP hoặc rule này là ngoại lệ của SOP đích." },
+  { value: "supersedes", label: "supersedes", help: "SOP này thay thế SOP hoặc version cũ." },
+  { value: "related_to", label: "related_to", help: "Liên quan nghiệp vụ, không bắt buộc context expansion." },
+  { value: "possible_conflict", label: "possible_conflict", help: "Có khả năng mâu thuẫn, cần CS Ops kiểm tra." },
+];
+
+const BLOCKING_RELATION_TYPES = new Set<RelationType>(["requires", "must_follow", "exception_of", "supersedes"]);
 
 export function RelationsWorkspace({
   assigningRelationId,
@@ -32,7 +57,7 @@ export function RelationsWorkspace({
   creatingRelation: boolean;
   documentsLoading: boolean;
   onAssign: (relation: DocumentRelation, targetDocumentId: string) => void;
-  onCreate: (payload: { relationType: RelationType; sourceDocumentId: string; targetDocumentId?: string; targetTitle: string }) => void;
+  onCreate: (payload: CreateRelationPayload) => void;
   onRefresh: () => void;
   onReject: (relation: DocumentRelation) => void;
   onSetStatus: (status: RelationStatus | "all") => void;
@@ -56,6 +81,7 @@ export function RelationsWorkspace({
         creating={creatingRelation}
         onCreate={onCreate}
         publishedDocuments={publishedDocuments}
+        relations={relations}
         sourceDocuments={sourceDocuments}
       />
       <Card className="rounded-xl">
@@ -144,20 +170,61 @@ function ManualRelationCreator({
   creating,
   onCreate,
   publishedDocuments,
+  relations,
   sourceDocuments,
 }: {
   creating: boolean;
-  onCreate: (payload: { relationType: RelationType; sourceDocumentId: string; targetDocumentId?: string; targetTitle: string }) => void;
+  onCreate: (payload: CreateRelationPayload) => void;
   publishedDocuments: DocumentSummary[];
+  relations: DocumentRelation[];
   sourceDocuments: DocumentSummary[];
 }) {
   const [sourceDocumentId, setSourceDocumentId] = useState("");
+  const [sourceScope, setSourceScope] = useState<"whole" | "unit">("whole");
+  const [sourceChunkId, setSourceChunkId] = useState("");
+  const [sourceUnitSearch, setSourceUnitSearch] = useState("");
+  const [evidenceText, setEvidenceText] = useState("");
   const [targetDocumentId, setTargetDocumentId] = useState("__manual__");
   const [targetTitle, setTargetTitle] = useState("");
+  const [targetSearch, setTargetSearch] = useState("");
   const [relationType, setRelationType] = useState<RelationType>("references");
+  const chunksQuery = useDocumentChunks(sourceDocumentId);
+  const sourceDocument = sourceDocuments.find((document) => document.document_id === sourceDocumentId);
   const selectedTarget = publishedDocuments.find((document) => document.document_id === targetDocumentId);
+  const selectedChunk = (chunksQuery.data ?? []).find((chunk) => chunk.chunk_id === sourceChunkId);
   const effectiveTargetTitle = (selectedTarget?.title || targetTitle).trim();
-  const canCreate = Boolean(sourceDocumentId && effectiveTargetTitle);
+  const resultStatus = selectedTarget ? "approved" : "unresolved";
+  const affectsPublishGate = BLOCKING_RELATION_TYPES.has(relationType);
+  const relationTypeHelp = RELATION_TYPE_OPTIONS.find((option) => option.value === relationType)?.help ?? "";
+  const sourceLabel = sourceScope === "unit" && selectedChunk ? unitLabel(selectedChunk) : sourceDocument?.title || "Source SOP";
+  const targetLabel = selectedTarget?.title || effectiveTargetTitle || "Unresolved target";
+  const canCreate = Boolean(sourceDocumentId && effectiveTargetTitle && (sourceScope === "whole" || sourceChunkId));
+  const sourceChunks = (chunksQuery.data ?? []).filter((chunk) => {
+    const query = sourceUnitSearch.trim().toLowerCase();
+    if (!query) {
+      return true;
+    }
+    return [chunk.heading, chunk.section, chunk.content].join(" ").toLowerCase().includes(query);
+  }).slice(0, 6);
+  const targetCandidates = publishedDocuments
+    .filter((document) => document.document_id !== sourceDocumentId)
+    .filter((document) => {
+      const query = targetSearch.trim().toLowerCase();
+      if (!query) {
+        return true;
+      }
+      return [document.title, document.source_filename, document.latest_document_type ?? "", String(document.metadata?.owner_team ?? ""), String(document.metadata?.category ?? "")]
+        .join(" ")
+        .toLowerCase()
+        .includes(query);
+    })
+    .slice(0, 6);
+  const existingRelations = sourceDocumentId ? relations.filter((relation) => relation.source_document_id === sourceDocumentId).slice(0, 5) : [];
+
+  useEffect(() => {
+    setSourceChunkId("");
+    setSourceUnitSearch("");
+  }, [sourceDocumentId, sourceScope]);
 
   function submit() {
     if (!canCreate) {
@@ -165,12 +232,25 @@ function ManualRelationCreator({
     }
     onCreate({
       relationType,
+      sourceChunkId: sourceScope === "unit" ? sourceChunkId : undefined,
       sourceDocumentId,
       targetDocumentId: selectedTarget?.document_id,
       targetTitle: effectiveTargetTitle,
+      metadata: {
+        affects_publish_gate: affectsPublishGate,
+        evidence_text: evidenceText.trim(),
+        manual_reason: evidenceText.trim(),
+        publish_impact: affectsPublishGate ? "blocks_high_risk_when_unresolved" : "warning_only",
+        risk_impact: affectsPublishGate ? "high" : relationType === "possible_conflict" ? "medium" : "low",
+        source_chunk_heading: selectedChunk?.heading ?? "",
+        source_chunk_section: selectedChunk?.section ?? "",
+        source_scope: sourceScope,
+      },
     });
     setTargetTitle("");
+    setTargetSearch("");
     setTargetDocumentId("__manual__");
+    setEvidenceText("");
   }
 
   return (
@@ -185,93 +265,198 @@ function ManualRelationCreator({
               </div>
               <CardTitle className="mt-3">Add Relation</CardTitle>
               <CardDescription className="mt-2 max-w-[72ch] leading-6">
-                Tạo liên kết nghiệp vụ mà extraction chưa bắt được. Chọn SOP đích đã publish để approve ngay, hoặc nhập tên SOP còn thiếu để đưa vào hàng chờ unresolved.
+                Tạo edge nghiệp vụ có source, evidence, target và tác động publish rõ ràng. Relation chỉ được search/chat dùng sau khi approved.
               </CardDescription>
             </div>
             <Button disabled={!canCreate || creating} onClick={submit} type="button">
               {creating ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <PlusCircle data-icon="inline-start" className="size-4" />}
-              Add relation
+              {selectedTarget ? "Add approved relation" : "Add unresolved relation"}
             </Button>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-3 pt-4 md:grid-cols-[minmax(0,1fr)_11rem_minmax(0,1fr)_minmax(0,1fr)]">
-          <div className="space-y-1.5">
-            <FieldLabel tooltip="SOP nguồn là tài liệu đang nhắc tới hoặc phụ thuộc vào SOP khác. Ví dụ: trong SOP A có câu “thực hiện theo SOP B” thì chọn SOP A ở đây.">
-              Source SOP
-            </FieldLabel>
-            <Select onValueChange={setSourceDocumentId} value={sourceDocumentId}>
-              <SelectTrigger>
-                <SelectValue placeholder="Choose source" />
-              </SelectTrigger>
-              <SelectContent>
-                {sourceDocuments.map((document) => (
-                  <SelectItem key={document.document_id} value={document.document_id}>
-                    {document.title}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <FieldLabel
-              tooltip={
-                <div className="space-y-1">
-                  <p><span className="font-medium">references:</span> chỉ để xem thêm hoặc liên quan nhẹ.</p>
-                  <p><span className="font-medium">requires:</span> bắt buộc phải làm theo SOP đích.</p>
-                  <p><span className="font-medium">routes_to:</span> chuyển case, queue hoặc team.</p>
-                  <p><span className="font-medium">escalates_to:</span> escalate lên team/level khác.</p>
-                  <p><span className="font-medium">exception_of:</span> SOP này là ngoại lệ của SOP đích.</p>
-                  <p><span className="font-medium">supersedes:</span> SOP này thay thế SOP đích.</p>
+        <CardContent className="space-y-4 pt-4">
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <FieldLabel tooltip="SOP nguồn là tài liệu đang nhắc tới hoặc phụ thuộc vào SOP khác. Ví dụ: trong SOP A có câu “thực hiện theo SOP B” thì chọn SOP A ở đây.">
+                  Source SOP
+                </FieldLabel>
+                <Select onValueChange={setSourceDocumentId} value={sourceDocumentId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Choose source" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {sourceDocuments.map((document) => (
+                      <SelectItem key={document.document_id} value={document.document_id}>
+                        {document.title}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <FieldLabel tooltip="Whole SOP dùng khi relation áp dụng cho toàn tài liệu. Specific unit dùng khi relation chỉ áp dụng cho một rule, condition hoặc step cụ thể.">
+                  Source scope
+                </FieldLabel>
+                <div className="inline-flex rounded-lg border bg-muted/20 p-1">
+                  <Button className="h-8 px-3" onClick={() => setSourceScope("whole")} type="button" variant={sourceScope === "whole" ? "secondary" : "ghost"}>
+                    Whole SOP
+                  </Button>
+                  <Button className="h-8 px-3" onClick={() => setSourceScope("unit")} type="button" variant={sourceScope === "unit" ? "secondary" : "ghost"}>
+                    Specific unit
+                  </Button>
                 </div>
-              }
-            >
-              Type
-            </FieldLabel>
-            <Select onValueChange={(value) => setRelationType(value as RelationType)} value={relationType}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="references">references</SelectItem>
-                <SelectItem value="requires">requires</SelectItem>
-                <SelectItem value="routes_to">routes_to</SelectItem>
-                <SelectItem value="escalates_to">escalates_to</SelectItem>
-                <SelectItem value="exception_of">exception_of</SelectItem>
-                <SelectItem value="supersedes">supersedes</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <FieldLabel tooltip="Nếu SOP đích đã có bản published trong KB thì chọn ở đây. Relation sẽ được approve ngay và search/chat mới được phép expand qua SOP đích.">
-              Published target
-            </FieldLabel>
-            <Select onValueChange={setTargetDocumentId} value={targetDocumentId}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__manual__">No published target yet</SelectItem>
-                {publishedDocuments
-                  .filter((document) => document.document_id !== sourceDocumentId)
-                  .map((document) => (
-                    <SelectItem key={document.document_id} value={document.document_id}>
-                      {document.title}
-                    </SelectItem>
+              </div>
+
+              {sourceScope === "unit" ? (
+                <div className="space-y-1.5">
+                  <FieldLabel tooltip="Chọn rule/condition/step cụ thể trong source SOP. Field này trả lời câu hỏi relation xuất phát từ đoạn nào.">
+                    Source unit
+                  </FieldLabel>
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input className="pl-8" disabled={!sourceDocumentId || chunksQuery.isFetching} onChange={(event) => setSourceUnitSearch(event.target.value)} placeholder="Search unit or condition..." value={sourceUnitSearch} />
+                  </div>
+                  {sourceDocumentId ? (
+                    <div className="max-h-48 overflow-auto rounded-lg border bg-muted/10 p-1">
+                      {chunksQuery.isFetching ? (
+                        <p className="px-2 py-2 text-xs text-muted-foreground">Loading source units...</p>
+                      ) : sourceChunks.length === 0 ? (
+                        <p className="px-2 py-2 text-xs text-muted-foreground">No unit matches this search.</p>
+                      ) : (
+                        sourceChunks.map((chunk) => (
+                          <button
+                            className={`w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-muted/50 ${chunk.chunk_id === sourceChunkId ? "bg-muted text-foreground" : "text-muted-foreground"}`}
+                            key={chunk.chunk_id}
+                            onClick={() => setSourceChunkId(chunk.chunk_id)}
+                            type="button"
+                          >
+                            <span className="block truncate text-xs font-medium">{unitLabel(chunk)}</span>
+                            <span className="mt-0.5 line-clamp-2 block text-xs">{chunk.content}</span>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <div className="space-y-1.5">
+                <FieldLabel tooltip="Paste câu gốc trong SOP hoặc lý do manual. Ví dụ: “CS thực hiện theo Quy định sử dụng tasklist”.">
+                  Evidence / reason
+                </FieldLabel>
+                <textarea
+                  className="min-h-20 w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none transition-shadow placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+                  onChange={(event) => setEvidenceText(event.target.value)}
+                  placeholder="Dẫn chứng từ source SOP hoặc lý do CS Ops xác nhận relation này"
+                  value={evidenceText}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <FieldLabel tooltip={relationTypeHelp}>
+                  Relation type
+                </FieldLabel>
+                <Select onValueChange={(value) => setRelationType(value as RelationType)} value={relationType}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {RELATION_TYPE_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <FieldLabel tooltip="Tìm SOP đích đã publish. Chọn target ở đây sẽ tạo approved relation ngay. Nếu không tìm thấy, tạo unresolved target bên dưới.">
+                  Target
+                </FieldLabel>
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input className="pl-8" onChange={(event) => setTargetSearch(event.target.value)} placeholder="Search published SOP..." value={targetSearch} />
+                </div>
+                <div className="max-h-52 overflow-auto rounded-lg border bg-muted/10 p-1">
+                  <button
+                    className={`w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-muted/50 ${targetDocumentId === "__manual__" ? "bg-muted text-foreground" : "text-muted-foreground"}`}
+                    onClick={() => setTargetDocumentId("__manual__")}
+                    type="button"
+                  >
+                    <span className="block text-xs font-medium">No matching published SOP</span>
+                    <span className="mt-0.5 block text-xs">Tạo unresolved target để upload hoặc assign sau.</span>
+                  </button>
+                  {targetCandidates.map((document) => (
+                    <button
+                      className={`mt-1 w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-muted/50 ${document.document_id === targetDocumentId ? "bg-muted text-foreground" : "text-muted-foreground"}`}
+                      key={document.document_id}
+                      onClick={() => {
+                        setTargetDocumentId(document.document_id);
+                        setTargetTitle("");
+                      }}
+                      type="button"
+                    >
+                      <span className="block truncate text-xs font-medium">{document.title}</span>
+                      <span className="mt-0.5 block truncate text-xs">
+                        {document.latest_document_type || "SOP"} · {document.metadata?.owner_team ? `Owner: ${String(document.metadata.owner_team)} · ` : ""}v{document.latest_version_number ?? 1} · {document.latest_version_status || "unknown"} · {formatDate(document.updated_at)}
+                      </span>
+                    </button>
                   ))}
-              </SelectContent>
-            </Select>
+                </div>
+              </div>
+
+              {targetDocumentId === "__manual__" ? (
+                <div className="space-y-1.5">
+                  <FieldLabel tooltip="Nhập tên SOP còn thiếu. Relation sẽ ở trạng thái unresolved để CS Ops upload hoặc assign target sau.">
+                    Unresolved target title
+                  </FieldLabel>
+                  <Input onChange={(event) => setTargetTitle(event.target.value)} placeholder="Tên SOP còn thiếu" value={targetTitle} />
+                </div>
+              ) : null}
+            </div>
           </div>
-          <div className="space-y-1.5">
-            <FieldLabel tooltip="Chỉ nhập khi SOP đích chưa có trong KB hoặc chưa publish. Relation sẽ ở trạng thái unresolved để CS Ops upload hoặc assign target sau.">
-              Target title
-            </FieldLabel>
-            <Input
-              disabled={targetDocumentId !== "__manual__"}
-              onChange={(event) => setTargetTitle(event.target.value)}
-              placeholder={selectedTarget?.title || "Tên SOP còn thiếu"}
-              value={targetDocumentId === "__manual__" ? targetTitle : selectedTarget?.title ?? ""}
-            />
+
+          <div className="rounded-xl border bg-muted/15 p-3">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Badge variant="outline">Preview</Badge>
+              <span className="max-w-72 truncate font-medium">{sourceLabel}</span>
+              <ArrowRight className="size-4 text-muted-foreground" />
+              <Badge variant={affectsPublishGate ? "secondary" : "outline"}>{relationType}</Badge>
+              <ArrowRight className="size-4 text-muted-foreground" />
+              <span className="max-w-72 truncate font-medium">{targetLabel}</span>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Badge variant={resultStatus === "approved" ? "secondary" : "destructive"}>Result: {resultStatus}</Badge>
+              <Badge variant={affectsPublishGate ? "destructive" : "outline"}>
+                Publish impact: {affectsPublishGate ? "blocks high-risk if unresolved" : "warning only"}
+              </Badge>
+              <Badge variant="outline">Search/chat: {resultStatus === "approved" ? "enabled after create" : "disabled until approved"}</Badge>
+            </div>
+            {targetDocumentId === "__manual__" ? (
+              <p className="mt-2 text-xs text-muted-foreground">Relation này sẽ unresolved. Sau khi tạo, dùng Assign existing SOP hoặc Upload target SOP trong danh sách bên dưới.</p>
+            ) : null}
           </div>
+
+          {existingRelations.length ? (
+            <div className="rounded-xl border p-3">
+              <p className="text-xs font-medium text-muted-foreground">Existing relations for this SOP</p>
+              <div className="mt-2 grid gap-2">
+                {existingRelations.map((relation) => (
+                  <div className="flex flex-wrap items-center gap-2 text-xs" key={relation.id}>
+                    <Badge variant={relation.status === "approved" ? "secondary" : relation.status === "unresolved" ? "destructive" : "outline"}>{relation.status}</Badge>
+                    <Badge variant="outline">{relation.relation_type}</Badge>
+                    <span className="truncate font-medium">{relation.target_title_resolved || relation.target_title}</span>
+                    {typeof relation.metadata?.evidence_text === "string" && relation.metadata.evidence_text ? (
+                      <span className="truncate text-muted-foreground">Evidence: {relation.metadata.evidence_text}</span>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
     </TooltipProvider>
@@ -298,6 +483,11 @@ function FieldLabel({ children, tooltip }: { children: ReactNode; tooltip: React
       </Tooltip>
     </div>
   );
+}
+
+function unitLabel(chunk: DocumentChunk) {
+  const heading = chunk.heading || chunk.section || `Unit ${chunk.chunk_index + 1}`;
+  return `${chunk.chunk_index + 1}. ${heading}`;
 }
 
 function RelationRow({
@@ -338,6 +528,8 @@ function RelationRow({
   const canResolve = relation.status === "unresolved" || relation.status === "suggested";
   const relationSource = typeof relation.metadata?.relation_source === "string" ? relation.metadata.relation_source : "";
   const evidenceText = typeof relation.metadata?.evidence_text === "string" ? relation.metadata.evidence_text : "";
+  const sourceScope = typeof relation.metadata?.source_scope === "string" ? relation.metadata.source_scope : relation.source_chunk_id ? "unit" : "whole";
+  const sourceChunkHeading = typeof relation.metadata?.source_chunk_heading === "string" ? relation.metadata.source_chunk_heading : "";
   const sourceUrl = typeof relation.metadata?.source_url === "string" ? relation.metadata.source_url : typeof relation.metadata?.target_url === "string" ? relation.metadata.target_url : "";
 
   return (
@@ -345,7 +537,9 @@ function RelationRow({
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7rem_8rem_18rem] md:items-start">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{relation.source_title}</p>
-          <p className="mt-1 text-xs text-muted-foreground">{formatDate(relation.updated_at)}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {sourceScope === "unit" ? `Unit: ${sourceChunkHeading || relation.source_chunk_id}` : "Whole SOP"} · {formatDate(relation.updated_at)}
+          </p>
         </div>
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{resolvedTarget}</p>

@@ -48,12 +48,19 @@ export function RelationsPage() {
     );
   }
 
-  function createRelation(payload: { relationType: RelationType; sourceDocumentId: string; targetDocumentId?: string; targetTitle: string }) {
+  function createRelation(payload: {
+    metadata?: Record<string, unknown>;
+    relationType: RelationType;
+    sourceChunkId?: string;
+    sourceDocumentId: string;
+    targetDocumentId?: string;
+    targetTitle: string;
+  }) {
     createRelationMutation.mutate(
       {
         ...payload,
         actor: "cs-ops-ui",
-        metadata: { relation_source: "manual" },
+        metadata: { relation_source: "manual", ...(payload.metadata ?? {}) },
       },
       {
         onSuccess: (created) => reportNotice(`Created ${created.status} ${created.relation_type} relation to ${created.target_title_resolved || created.target_title}.`),

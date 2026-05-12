@@ -117,6 +117,12 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertEqual(candidates[0]["relation_type"], "routes_to")
         self.assertEqual(candidates[0]["metadata"]["relation_source"], "operational_handoff")
 
+    def test_manual_relation_types_are_preserved(self) -> None:
+        self.assertEqual(repository.normalize_relation_type("must_follow"), "must_follow")
+        self.assertEqual(repository.normalize_relation_type("uses_macro"), "uses_macro")
+        self.assertEqual(repository.normalize_relation_type("related_to"), "related_to")
+        self.assertEqual(repository.normalize_relation_type("possible_conflict"), "possible_conflict")
+
     def test_high_risk_governance_requires_owner_review_sla_and_future_due_date(self) -> None:
         tomorrow = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
         failures = repository.high_risk_governance_failures(

@@ -201,7 +201,17 @@ export type DocumentSummary = {
   metadata: Record<string, unknown>;
 };
 
-export type RelationType = "requires" | "references" | "routes_to" | "escalates_to" | "exception_of" | "supersedes";
+export type RelationType =
+  | "references"
+  | "requires"
+  | "must_follow"
+  | "routes_to"
+  | "escalates_to"
+  | "uses_macro"
+  | "exception_of"
+  | "supersedes"
+  | "related_to"
+  | "possible_conflict";
 
 export type RelationStatus = "suggested" | "unresolved" | "approved" | "rejected" | "archived";
 
