@@ -206,87 +206,100 @@ function Composer({
       <form className="group/composer w-full" onSubmit={onSubmit}>
         <div
           className={cn(
-            "grid w-full border bg-card p-2 shadow-sm transition-[border-radius,box-shadow] duration-200 ease-out focus-within:border-ring/50 focus-within:shadow-md",
+            "grid w-full cursor-text overflow-clip border border-border bg-transparent bg-clip-padding p-2.5 shadow-lg transition-[border-radius] duration-200 ease-out dark:bg-muted/50",
             isExpanded
-              ? "rounded-3xl [grid-template-areas:'primary'_'footer'] [grid-template-columns:1fr] [grid-template-rows:auto_auto]"
-              : "rounded-3xl [grid-template-areas:'leading_primary_trailing'] [grid-template-columns:auto_1fr_auto] [grid-template-rows:auto]",
+              ? "rounded-3xl [grid-template-areas:'header'_'primary'_'footer'] [grid-template-columns:1fr] [grid-template-rows:auto_1fr_auto]"
+              : "rounded-3xl [grid-template-areas:'header_header_header'_'leading_primary_trailing'_'._footer_.'] [grid-template-columns:auto_1fr_auto] [grid-template-rows:auto_1fr_auto]",
           )}
         >
-          <div className={cn("flex items-end", isExpanded && "hidden")} style={{ gridArea: "leading" }}>
+          <div className={cn("flex items-center", isExpanded && "hidden")} style={{ gridArea: "leading" }}>
             <Button
               aria-label="Published SOP scope"
-              className="size-10 rounded-full text-muted-foreground hover:text-foreground"
+              className="rounded-full text-muted-foreground outline-none ring-0 hover:bg-accent hover:text-foreground"
               onClick={() => inputRef.current?.focus()}
+              size="icon"
               title="Answers are limited to published SOPs"
               type="button"
               variant="ghost"
             >
-              <Plus className="size-4" />
+              <Plus className="size-6" />
             </Button>
           </div>
 
-          <div className="min-w-0 px-2 py-1" style={{ gridArea: "primary" }}>
-            <textarea
-              ref={inputRef}
-              className="max-h-44 min-h-8 w-full resize-none overflow-y-auto bg-transparent py-1.5 text-sm leading-6 outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 md:text-[15px]"
-              disabled={busy}
-              onChange={onDraftChange}
-              onKeyDown={onKeyDown}
-              placeholder="Ask anything"
-              rows={1}
-              value={draft}
-            />
+          <div
+            className={cn("flex min-h-14 items-center overflow-x-hidden px-1.5", {
+              "mb-0 px-2 py-1": isExpanded,
+              "-my-2.5": !isExpanded,
+            })}
+            style={{ gridArea: "primary" }}
+          >
+            <div className="max-h-52 flex-1 overflow-auto">
+              <textarea
+                ref={inputRef}
+                className="block w-full min-h-0 resize-none rounded-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-muted-foreground focus-visible:ring-0 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={busy}
+                onChange={onDraftChange}
+                onKeyDown={onKeyDown}
+                placeholder="Ask anything"
+                rows={1}
+                value={draft}
+              />
+            </div>
           </div>
 
           <div
-            className={cn("flex min-w-0 items-center gap-1.5", isExpanded && "justify-end border-t pt-2")}
+            className="flex items-center gap-2"
             style={{ gridArea: isExpanded ? "footer" : "trailing" }}
           >
-            <div className="hidden min-w-0 sm:block">
-              <Select
-                disabled={busy}
-                onValueChange={(value) => onModelRouteChange(value as ChatModelRoute)}
-                value={modelRoute}
-              >
-                <SelectTrigger
-                  aria-label="Select model route"
-                  className="h-8 max-w-[11rem] rounded-full border-0 bg-transparent px-2 text-muted-foreground shadow-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
-                  size="sm"
+            <div className="ms-auto flex items-center gap-1.5">
+              <div className="hidden min-w-0 sm:block">
+                <Select
+                  disabled={busy}
+                  onValueChange={(value) => onModelRouteChange(value as ChatModelRoute)}
+                  value={modelRoute}
                 >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent align="end" className="w-80">
-                  {routeOptions.map((route) => (
-                    <SelectItem key={route.route} value={route.route}>
-                      {route.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+                  <SelectTrigger
+                    aria-label="Select model route"
+                    className="h-9 max-w-[12rem] rounded-full border-0 bg-transparent px-2 text-base text-muted-foreground shadow-none hover:bg-accent hover:text-foreground focus-visible:ring-0"
+                    size="sm"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent align="end" className="w-80">
+                    {routeOptions.map((route) => (
+                      <SelectItem key={route.route} value={route.route}>
+                        {route.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
-            {!draft.trim() ? (
               <Button
                 aria-label="Voice input unavailable"
-                className="size-8 rounded-full text-muted-foreground hover:text-foreground"
+                className={cn("rounded-full text-muted-foreground hover:bg-accent hover:text-foreground", draft.trim() && "hidden")}
                 disabled={busy}
+                size="icon"
                 title="Voice input is not connected yet"
                 type="button"
                 variant="ghost"
               >
                 <Mic className="size-5" />
               </Button>
-            ) : (
-              <Button
-                aria-label="Send message"
-                className="size-8 rounded-full"
-                disabled={busy}
-                title="Send"
-                type="submit"
-              >
-                {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-5" />}
-              </Button>
-            )}
+
+              {draft.trim() ? (
+                <Button
+                  aria-label="Send message"
+                  className="rounded-full"
+                  disabled={busy}
+                  size="icon"
+                  title="Send"
+                  type="submit"
+                >
+                  {busy ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-5" />}
+                </Button>
+              ) : null}
+            </div>
           </div>
         </div>
       </form>
