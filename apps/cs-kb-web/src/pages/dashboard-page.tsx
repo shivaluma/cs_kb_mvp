@@ -16,7 +16,7 @@ const DashboardWorkspace = lazy(() =>
 export function DashboardPage() {
   const navigate = useNavigate();
   const { getParam, setParams } = useUrlSearch();
-  const query = getParam("q", "quy trình xác minh thông tin cần xử lý thế nào");
+  const query = getParam("q", "");
   const homepageQuery = useHomepage();
   const documentsQuery = useDocuments();
   const systemHealthQuery = useSystemHealth();
@@ -37,9 +37,10 @@ export function DashboardPage() {
   }
 
   function runLookup() {
+    const trimmedQuery = query.trim();
     void navigate({
       to: workspacePaths.lookup,
-      search: { q: query } as never,
+      search: (trimmedQuery ? { q: trimmedQuery } : {}) as never,
     });
   }
 

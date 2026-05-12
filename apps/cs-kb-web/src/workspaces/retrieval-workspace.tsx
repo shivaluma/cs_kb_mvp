@@ -28,6 +28,8 @@ export function RetrievalWorkspace({
   retrieval: RetrievalResponse | null;
   setQuery: (query: string) => void;
 }) {
+  const canRetrieve = query.trim().length > 0;
+
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(23rem,0.72fr)_minmax(34rem,1.28fr)]">
       <section className="space-y-4">
@@ -47,7 +49,7 @@ export function RetrievalWorkspace({
                 className="min-h-28 rounded-xl border bg-background px-3 py-2 text-sm leading-6 shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-3 focus-visible:ring-ring/40"
                 id="retrieval-query"
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="quy trình xác minh thông tin cần xử lý thế nào"
+                placeholder="Ask a natural-language retrieval question"
                 value={query}
               />
             </div>
@@ -69,7 +71,7 @@ export function RetrievalWorkspace({
               <FilterGrid filters={filters} onUpdateFilter={onUpdateFilter} />
             </div>
 
-            <Button className="w-full justify-center" disabled={busy} onClick={onRetrieve} type="button">
+            <Button className="w-full justify-center" disabled={busy || !canRetrieve} onClick={onRetrieve} type="button">
               {busy ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Sparkles data-icon="inline-start" className="size-4" />}
               Run grounded retrieval
             </Button>

@@ -66,6 +66,7 @@ export function LookupWorkspace({
   semanticResults: RetrievalResult[];
   setQuery: (query: string) => void;
 }) {
+  const canSearch = query.trim().length > 0;
   const groupedResults = groupRetrievalResults(semanticResults);
   const aiSuggestedSops = aiSuggestion?.suggested_sops ?? [];
   const selectedCitationMatches =
@@ -103,7 +104,7 @@ export function LookupWorkspace({
                 value={query}
               />
             </div>
-            <Button className="h-10 px-4" disabled={loading} onClick={onRunSearch} type="button">
+            <Button className="h-10 px-4" disabled={loading || !canSearch} onClick={onRunSearch} type="button">
               {loading ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Search data-icon="inline-start" className="size-4" />}
               Search
             </Button>
@@ -129,7 +130,9 @@ export function LookupWorkspace({
           <CardContent>
             <ScrollArea className="h-[35rem] pr-3">
               <div className="space-y-2">
-                {loading || booting ? (
+                {!canSearch ? (
+                  <EmptyPanel icon={Search} title="Enter a query" text="Search results appear after you run a lookup." compact />
+                ) : loading || booting ? (
                   <ResultSkeleton />
                 ) : visibleCount === 0 ? (
                   <EmptyResults query={query} />

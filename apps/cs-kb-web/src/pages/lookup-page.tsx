@@ -16,7 +16,8 @@ const LookupWorkspace = lazy(() =>
 export function LookupPage() {
   const { getParam, setParams } = useUrlSearch();
   const { reportError, reportNotice } = useFeedback();
-  const query = getParam("q", "quy trình xác minh thông tin cần xử lý thế nào");
+  const query = getParam("q", "");
+  const hasSearchQuery = query.trim().length > 0;
   const chunkId = getParam("chunk", "");
   const [filters, setFilters] = useState<FilterState>({
     audience: getParam("audience", defaultFilters.audience),
@@ -34,16 +35,19 @@ export function LookupPage() {
   const sopMutation = useSOP();
   const aiSuggestMutation = useAISuggest();
   const homepage = homepageQuery.data;
-  const searchResults = searchMutation.data?.results ?? [];
-  const semanticResults = searchMutation.data?.semantic_results ?? [];
+  const searchResults = hasSearchQuery ? (searchMutation.data?.results ?? []) : [];
+  const semanticResults = hasSearchQuery ? (searchMutation.data?.semantic_results ?? []) : [];
   const aiSuggestion = (aiSuggestMutation.data as AISuggestion | undefined) ?? null;
   const booting = homepageQuery.isLoading && !homepageQuery.data && !homepageQuery.error && !searchMutation.data;
   const listSource = useMemo(() => {
+    if (!hasSearchQuery) {
+      return [];
+    }
     if (searchResults.length > 0) {
       return searchResults;
     }
-    return (homepage?.most_viewed ?? []).map(toSearchResult);
-  }, [homepage, searchResults]);
+    return searchMutation.data ? [] : (homepage?.most_viewed ?? []).map(toSearchResult);
+  }, [hasSearchQuery, homepage, searchMutation.data, searchResults]);
   const feedbackTotal = selected ? selected.analytics.helpful + selected.analytics.not_helpful : 0;
   const helpfulRate = feedbackTotal && selected ? Math.round((selected.analytics.helpful / feedbackTotal) * 100) : 0;
 
@@ -82,13 +86,26 @@ export function LookupPage() {
   }, [homepage, selected, selectedDocumentMatch]);
 
   function setQuery(nextQuery: string) {
+    if (!nextQuery.trim()) {
+      searchMutation.reset();
+      setSelectedDocumentMatch(null);
+      setParams({ q: nextQuery, chunk: "" });
+      return;
+    }
     setParams({ q: nextQuery });
   }
 
   function runSearch(nextQuery = query, nextFilters = filters) {
+    const trimmedQuery = nextQuery.trim();
+    if (!trimmedQuery) {
+      searchMutation.reset();
+      setSelectedDocumentMatch(null);
+      setParams({ chunk: "" });
+      return;
+    }
     searchMutation.mutate(
       {
-        query: nextQuery,
+        query: trimmedQuery,
         include_semantic: true,
         filters: compactFilters(nextFilters),
       },

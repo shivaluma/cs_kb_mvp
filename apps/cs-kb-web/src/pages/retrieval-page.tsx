@@ -17,7 +17,7 @@ export function RetrievalPage() {
   const { getParam, setParams } = useUrlSearch();
   const { reportError } = useFeedback();
   const retrievalMutation = useRetrieval();
-  const query = getParam("q", "quy trình xác minh thông tin cần xử lý thế nào");
+  const query = getParam("q", "");
   const mode = (getParam("mode", "hybrid") as RetrievalResponse["mode"]) || "hybrid";
   const [filters, setFilters] = useState<FilterState>(defaultFilters);
 
@@ -34,9 +34,14 @@ export function RetrievalPage() {
   }
 
   function runRetrieval() {
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) {
+      retrievalMutation.reset();
+      return;
+    }
     retrievalMutation.mutate(
       {
-        query,
+        query: trimmedQuery,
         mode,
         limit: 6,
         filters: {
