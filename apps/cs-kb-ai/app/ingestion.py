@@ -86,7 +86,54 @@ WARNING_SIGNALS = [
     "qa cham loi",
 ]
 
-AI_STRUCTURED_DOCUMENT_TYPES = {"policy_rule", "policy_table", "workflow_diagram"}
+AI_STRUCTURED_DOCUMENT_TYPES = {"policy_rule", "policy_table", "workflow_diagram", "kb_index_workbook"}
+URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
+
+KB_INDEX_SHEET_KINDS = {
+    "overal": "collection_summary",
+    "quy dinh lam viec ccu pcu": "core_sop_index",
+    "quy dinh chung": "general_sop_index",
+    "driver rider": "cross_audience_issue_router",
+    "driver cleaner": "driver_cleaner_issue_router",
+    "rider": "rider_issue_router",
+    "cleaner": "cleaner_issue_router",
+    "mcu": "merchant_issue_router",
+    "link lam viec": "tool_directory",
+    "vip": "vip_overlay_policy",
+    "tinh nang san pham moi": "product_update_index",
+}
+
+KB_INDEX_COLLECTION_BY_SHEET = {
+    "overal": ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
+    "quy dinh lam viec ccu pcu": ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
+    "quy dinh chung": ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
+    "driver rider": ("trip-order-issues", "Trip / Order Issues", "task"),
+    "driver cleaner": ("driver-operations", "Driver Operations", "audience"),
+    "rider": ("customer-rider-operations", "Customer / Rider Operations", "audience"),
+    "cleaner": ("cleaner-operations", "Cleaner Operations", "audience"),
+    "mcu": ("merchant-mcu-operations", "Merchant / MCU Operations", "audience"),
+    "link lam viec": ("tool-directory", "Tool Directory", "tool"),
+    "vip": ("vip-customer-handling", "VIP Customer Handling", "risk"),
+    "tinh nang san pham moi": ("product-updates", "Product Updates", "domain"),
+}
+
+DEFAULT_KB_COLLECTIONS = [
+    ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
+    ("customer-rider-operations", "Customer / Rider Operations", "audience"),
+    ("driver-operations", "Driver Operations", "audience"),
+    ("merchant-mcu-operations", "Merchant / MCU Operations", "audience"),
+    ("cleaner-operations", "Cleaner Operations", "audience"),
+    ("payment-refund", "Payment & Refund", "task"),
+    ("account-verification", "Account & Verification", "task"),
+    ("trip-order-issues", "Trip / Order Issues", "task"),
+    ("promotion-voucher", "Promotion / Voucher", "task"),
+    ("social-call-email-handling", "Social / Call / Email Handling", "channel"),
+    ("tech-bpla-msc-handoff", "Tech / BPLA / MSC Handoff", "owner"),
+    ("qa-zt-compliance", "QA / ZT / Compliance", "risk"),
+    ("vip-customer-handling", "VIP Customer Handling", "risk"),
+    ("tool-directory", "Tool Directory", "tool"),
+    ("product-updates", "Product Updates", "domain"),
+]
 
 
 def prepare_document_version(
@@ -138,6 +185,11 @@ def prepare_document_version(
             )
         )
 
+    if classification.document_type == "kb_index_workbook":
+        kb_index_plan = build_kb_index_plan(filename=filename, raw_context=raw_context)
+        raw_context["kb_index_plan"] = kb_index_plan
+        pipeline_artifacts.append(stage_artifact("plan", "kb_index_plan", kb_index_plan))
+
     if raw_text.strip() and classification.document_type in AI_STRUCTURED_DOCUMENT_TYPES:
         source_view_token = start_ai_breakdown_capture()
         try:
@@ -173,7 +225,7 @@ def prepare_document_version(
 
     source_chunks: list[Any] = []
     ai_error = ""
-    if classification.document_type in {"policy_rule", "policy_table", "workflow_diagram"}:
+    if classification.document_type in AI_STRUCTURED_DOCUMENT_TYPES:
         ai_warnings: list[str] = []
         ai_breakdown_token = start_ai_breakdown_capture()
         try:
@@ -370,6 +422,13 @@ def try_ai_structuring(
     warnings: list[str] = []
     raw_context = raw_context or {}
     try:
+        if classification.document_type == "kb_index_workbook":
+            plan = raw_context.get("kb_index_plan") if isinstance(raw_context.get("kb_index_plan"), dict) else {}
+            chunks = kb_index_plan_to_chunks(filename, raw_text, classification, plan)
+            if not chunks:
+                return [], warnings, "kb_index_workbook_structuring_failed:no_review_candidates"
+            warnings.append("kb_index_plan_extraction_used")
+            return mark_structured_chunks(chunks), warnings, ""
         if classification.document_type in {"policy_rule", "policy_table"}:
             table_chunks = extract_docx_policy_table_chunks(filename, content_type, raw_text, raw_context, classification)
             if table_chunks:
@@ -643,6 +702,633 @@ def spreadsheet_related_document_chunks(filename: str, raw_context: dict[str, An
                 )
             )
     return output
+
+
+def build_kb_index_plan(filename: str, raw_context: dict[str, Any]) -> dict[str, Any]:
+    sheets = raw_context.get("sheets") if isinstance(raw_context.get("sheets"), list) else []
+    plan: dict[str, Any] = {
+        "source_type": "excel_workbook",
+        "document_type": "kb_index_workbook",
+        "filename": filename,
+        "collections": [
+            {
+                "id": slug,
+                "name": name,
+                "slug": slug,
+                "collection_type": collection_type,
+                "description": "",
+                "source": "default_seed",
+                "status": "suggested",
+                "confidence": 0.72,
+                "review_status": "needs_review",
+            }
+            for slug, name, collection_type in DEFAULT_KB_COLLECTIONS
+        ],
+        "issue_router_units": [],
+        "sop_references": [],
+        "tool_links": [],
+        "action_templates": [],
+        "relations": [],
+        "unresolved_targets": [],
+        "review_warnings": [],
+    }
+    collection_slugs = {item["slug"] for item in plan["collections"]}
+
+    for sheet_name, rows in sheets:
+        normalized_sheet = normalized_search_text(sheet_name)
+        sheet_kind = KB_INDEX_SHEET_KINDS.get(normalized_sheet, "review_required")
+        collection_slug, collection_name, collection_type = KB_INDEX_COLLECTION_BY_SHEET.get(
+            normalized_sheet,
+            ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
+        )
+        if collection_slug not in collection_slugs:
+            plan["collections"].append(
+                {
+                    "id": collection_slug,
+                    "name": collection_name,
+                    "slug": collection_slug,
+                    "collection_type": collection_type,
+                    "description": f"Imported from sheet {sheet_name}",
+                    "source": "imported",
+                    "status": "suggested",
+                    "confidence": 0.8,
+                    "review_status": "needs_review",
+                    "source_refs": [excel_source_ref(filename, sheet_name, rows[0][0] if rows else 1, rows[0][0] if rows else 1, [])],
+                }
+            )
+            collection_slugs.add(collection_slug)
+        else:
+            for item in plan["collections"]:
+                if item.get("slug") == collection_slug:
+                    item.setdefault("source_refs", []).append(excel_source_ref(filename, sheet_name, rows[0][0] if rows else 1, rows[0][0] if rows else 1, []))
+                    item["source"] = "imported" if item.get("source") == "default_seed" else item.get("source")
+                    break
+
+        headers, header_row = infer_kb_sheet_headers(rows)
+        for row_number, values in rows:
+            if row_number <= header_row or not any(str(value or "").strip() for value in values):
+                continue
+            source_ref = excel_source_ref(filename, sheet_name, row_number, row_number, headers)
+            row = kb_index_row_payload(
+                filename=filename,
+                sheet_name=sheet_name,
+                sheet_kind=sheet_kind,
+                collection_slug=collection_slug,
+                collection_name=collection_name,
+                row_number=row_number,
+                values=values,
+                headers=headers,
+                source_ref=source_ref,
+            )
+            if not row:
+                continue
+            candidate_type = row["candidate_type"]
+            if candidate_type == "tool_link":
+                plan["tool_links"].append(row)
+            elif candidate_type == "issue_router_unit":
+                plan["issue_router_units"].append(row)
+            elif candidate_type == "sop_reference":
+                plan["sop_references"].append(row)
+            elif candidate_type in {"vip_overlay_rule", "product_update_note"}:
+                plan["issue_router_units"].append(row)
+            elif candidate_type == "quick_action_rule":
+                plan["action_templates"].append(row)
+
+            for relation in row.get("relations", []):
+                plan["relations"].append(relation)
+                if not relation.get("target_id"):
+                    plan["unresolved_targets"].append(
+                        {
+                            "target_title": relation.get("target_title"),
+                            "target_url": relation.get("target_url", ""),
+                            "relation_type": relation.get("relation_type", "references"),
+                            "source_sheet": sheet_name,
+                            "source_row": row_number,
+                            "source_ref": source_ref,
+                            "status": "unresolved",
+                        }
+                    )
+
+    plan["summary"] = {
+        "collection_count": len(plan["collections"]),
+        "issue_router_unit_count": len(plan["issue_router_units"]),
+        "sop_reference_count": len(plan["sop_references"]),
+        "tool_link_count": len(plan["tool_links"]),
+        "action_template_count": len(plan["action_templates"]),
+        "relation_count": len(plan["relations"]),
+        "unresolved_target_count": len(plan["unresolved_targets"]),
+    }
+    if not plan["issue_router_units"] and not plan["tool_links"] and not plan["sop_references"]:
+        plan["review_warnings"].append("kb_index_plan_no_candidates_detected")
+    return plan
+
+
+def infer_kb_sheet_headers(rows: list[tuple[int, list[str]]]) -> tuple[list[str], int]:
+    for row_number, values in rows:
+        non_empty = [str(value or "").strip() for value in values if str(value or "").strip()]
+        if len(non_empty) < 2:
+            continue
+        if any(URL_RE.search(value) for value in non_empty):
+            continue
+        if any(len(value) > 140 for value in non_empty):
+            continue
+        return values, row_number
+    width = max((len(values) for _, values in rows), default=0)
+    return [f"Column {index + 1}" for index in range(width)], 0
+
+
+def kb_index_row_payload(
+    *,
+    filename: str,
+    sheet_name: str,
+    sheet_kind: str,
+    collection_slug: str,
+    collection_name: str,
+    row_number: int,
+    values: list[str],
+    headers: list[str],
+    source_ref: dict[str, Any],
+) -> dict[str, Any]:
+    row_values = {headers[index] if index < len(headers) else f"Column {index + 1}": str(value or "").strip() for index, value in enumerate(values)}
+    row_text = "\n".join(f"{header}: {value}" for header, value in row_values.items() if value).strip()
+    if not row_text:
+        return {}
+
+    related_documents = spreadsheet_related_documents_from_row(values, headers, first_meaningful_value(values, headers))
+    urls = [url for value in values for url in URL_RE.findall(str(value or ""))]
+    base = {
+        "id": f"{normalized_key(sheet_name) or 'sheet'}_row_{row_number}",
+        "source_sheet": sheet_name,
+        "source_row": row_number,
+        "source_ref": source_ref,
+        "source_refs": [source_ref],
+        "row_values": row_values,
+        "related_documents": related_documents,
+        "hyperlinks": [{"url": url, "label": link_label_from_cell_text(value_for_url(values, url))} for url in urls],
+        "collection_slug": collection_slug,
+        "collection_name": collection_name,
+        "status": "suggested",
+        "review_status": "needs_review",
+        "confidence": 0.74,
+    }
+
+    if sheet_kind == "tool_directory":
+        name = cell_by_header(row_values, ["ten_file_he_thong", "ten_file", "he_thong", "ten"]) or first_meaningful_value(values, headers)
+        url = first_url(values)
+        return {
+            **base,
+            "candidate_type": "tool_link",
+            "unit_type": "tool_link",
+            "title": name or f"Công cụ dòng {row_number}",
+            "content": row_text,
+            "name": name or f"Công cụ dòng {row_number}",
+            "url": url,
+            "tool_type": infer_tool_type(row_text),
+            "description": cell_by_header(row_values, ["note", "noi_dung", "mo_ta"]),
+            "owner_team": cell_by_header(row_values, ["nhom", "owner", "team"]),
+        }
+
+    if sheet_kind in {"cross_audience_issue_router", "driver_cleaner_issue_router", "rider_issue_router", "cleaner_issue_router", "merchant_issue_router"}:
+        issue_text = cell_by_header(row_values, ["van_de", "issue"]) or first_meaningful_value(values, headers)
+        target_title = target_sop_title_from_row(row_values, related_documents)
+        action_type = infer_action_type(row_text)
+        relations = relation_candidates_for_kb_row(
+            target_title=target_title,
+            related_documents=related_documents,
+            relation_type="requires",
+            source_ref=source_ref,
+            evidence_text=row_text,
+        )
+        payload = {
+            **base,
+            "candidate_type": "issue_router_unit",
+            "unit_type": "issue_router_unit",
+            "title": issue_text[:180] or f"Issue router dòng {row_number}",
+            "content": row_text,
+            "issue_text": issue_text,
+            "audience": audience_for_sheet(sheet_name),
+            "vertical": split_taxonomy_values(cell_by_header(row_values, ["service", "vertical", "dich_vu"])),
+            "case_type": split_taxonomy_values(issue_text),
+            "task_type": [action_type] if action_type else [],
+            "target_sop_title": target_title,
+            "target_sop_url": first_relation_url(related_documents),
+            "relations": relations,
+            "risk_level": infer_kb_risk(row_text),
+        }
+        if action_type:
+            payload["action_template"] = action_template_from_router(payload, action_type)
+        return payload
+
+    if sheet_kind == "vip_overlay_policy":
+        title = cell_by_header(row_values, ["chu_de", "chi_tiet_van_de", "van_de"]) or first_meaningful_value(values, headers)
+        target_title = target_sop_title_from_row(row_values, related_documents)
+        return {
+            **base,
+            "candidate_type": "vip_overlay_rule",
+            "unit_type": "vip_overlay_rule",
+            "title": title[:180] or f"VIP rule dòng {row_number}",
+            "content": row_text,
+            "issue_text": title,
+            "audience": ["vip_customer"],
+            "vertical": [],
+            "case_type": split_taxonomy_values(title),
+            "task_type": [],
+            "target_sop_title": target_title,
+            "relations": relation_candidates_for_kb_row(target_title, related_documents, "requires", source_ref, row_text),
+            "risk_level": "high",
+        }
+
+    if sheet_kind == "product_update_index":
+        title = cell_by_header(row_values, ["tinh_nang_san_pham_moi", "doi_tuong", "noi_dung_chi_tiet"]) or first_meaningful_value(values, headers)
+        target_title = target_sop_title_from_row(row_values, related_documents)
+        return {
+            **base,
+            "candidate_type": "product_update_note",
+            "unit_type": "product_update_note",
+            "title": title[:180] or f"Tính năng mới dòng {row_number}",
+            "content": row_text,
+            "audience": split_taxonomy_values(cell_by_header(row_values, ["doi_tuong"])),
+            "vertical": [],
+            "case_type": split_taxonomy_values(title),
+            "task_type": [],
+            "target_sop_title": target_title,
+            "relations": relation_candidates_for_kb_row(target_title, related_documents, "references", source_ref, row_text),
+            "risk_level": infer_kb_risk(row_text),
+        }
+
+    if sheet_kind in {"core_sop_index", "general_sop_index", "collection_summary"}:
+        title = (
+            cell_by_header(row_values, ["ten_quy_trinh_quy_dinh", "quy_dinh_quy_trinh_xu_ly", "van_de", "sop"])
+            or first_meaningful_value(values, headers)
+        )
+        target_title = target_sop_title_from_row(row_values, related_documents) or title
+        return {
+            **base,
+            "candidate_type": "sop_reference",
+            "unit_type": "sop_reference",
+            "title": title[:180] or f"SOP reference dòng {row_number}",
+            "content": row_text,
+            "target_sop_title": target_title,
+            "target_sop_url": first_relation_url(related_documents),
+            "relations": relation_candidates_for_kb_row(target_title, related_documents, "references", source_ref, row_text),
+            "risk_level": infer_kb_risk(row_text),
+        }
+
+    return {
+        **base,
+        "candidate_type": "sop_reference",
+        "unit_type": "sop_reference",
+        "title": first_meaningful_value(values, headers)[:180] or f"Workbook row {row_number}",
+        "content": row_text,
+        "target_sop_title": target_sop_title_from_row(row_values, related_documents),
+        "relations": relation_candidates_for_kb_row(target_sop_title_from_row(row_values, related_documents), related_documents, "references", source_ref, row_text),
+        "risk_level": infer_kb_risk(row_text),
+    }
+
+
+def kb_index_plan_to_chunks(filename: str, raw_text: str, classification: Any, plan: dict[str, Any]) -> list[Chunk]:
+    if not plan:
+        return []
+    chunks: list[Chunk] = []
+    source_refs = first_kb_plan_source_refs(plan) or [{"source_type": "excel", "source_file": filename, "sheet": "unknown", "row_start": 1, "row_end": 1}]
+    title = path_title(filename)
+    summary = plan.get("summary") if isinstance(plan.get("summary"), dict) else {}
+    full_content = "\n".join(
+        [
+            f"{title}",
+            "Workbook này là chỉ mục vận hành CS: collections, issue routers, SOP references, tool links và action templates.",
+            f"Collections: {summary.get('collection_count', 0)}",
+            f"Issue router units: {summary.get('issue_router_unit_count', 0)}",
+            f"SOP references: {summary.get('sop_reference_count', 0)}",
+            f"Tool links: {summary.get('tool_link_count', 0)}",
+        ]
+    )
+    chunks.append(
+        Chunk(
+            chunk_index=0,
+            section="full_sop",
+            heading=title,
+            content=full_content,
+            token_count=len(tokenize(full_content)),
+            metadata={
+                "unit_type": "full_sop",
+                "retrieval_scope": "document",
+                "document_type": classification.document_type,
+                "source_type": classification.source_type,
+                "kb_index": True,
+                "kb_index_plan_summary": summary,
+                "source_refs": source_refs,
+                "source_ref_quality": source_ref_quality_from_refs(source_refs),
+                "confidence": min(float(getattr(classification, "confidence", 0.94) or 0.94), 0.94),
+                "review_status": "needs_review",
+            },
+        )
+    )
+
+    candidates: list[dict[str, Any]] = []
+    for candidate_type in ("collections", "issue_router_units", "sop_references", "tool_links", "action_templates"):
+        for candidate in plan.get(candidate_type, []) if isinstance(plan.get(candidate_type), list) else []:
+            if isinstance(candidate, dict):
+                candidates.append({**candidate, "plan_bucket": candidate_type})
+
+    for candidate in candidates:
+        unit_type = str(candidate.get("unit_type") or ("quick_action_rule" if candidate.get("plan_bucket") == "action_templates" else "text_section"))
+        title = str(candidate.get("title") or candidate.get("name") or candidate.get("collection_name") or candidate.get("name") or unit_type).strip()[:180]
+        content = str(candidate.get("content") or candidate.get("description") or title).strip()
+        if candidate.get("plan_bucket") == "collections" and candidate.get("source") == "default_seed" and not candidate.get("source_refs"):
+            continue
+        refs = candidate.get("source_refs") if isinstance(candidate.get("source_refs"), list) else [candidate.get("source_ref")] if isinstance(candidate.get("source_ref"), dict) else source_refs
+        relations = candidate.get("relations") if isinstance(candidate.get("relations"), list) else []
+        metadata = {
+            **{key: value for key, value in candidate.items() if key not in {"content", "source_refs"}},
+            "unit_type": unit_type,
+            "retrieval_scope": "unit",
+            "document_type": classification.document_type,
+            "source_type": classification.source_type,
+            "kb_index": True,
+            "kb_index_candidate_type": candidate.get("candidate_type") or candidate.get("plan_bucket"),
+            "relations": relations,
+            "related_documents": candidate.get("related_documents", []),
+            "source_refs": refs,
+            "source_ref_quality": source_ref_quality_from_refs(refs),
+            "confidence": float(candidate.get("confidence") or 0.74),
+            "review_status": "needs_review",
+        }
+        chunks.append(
+            Chunk(
+                chunk_index=len(chunks),
+                section=unit_type,
+                heading=title or vietnamese_kb_index_heading(unit_type),
+                content=content or title,
+                token_count=len(tokenize(content or title)),
+                metadata=metadata,
+            )
+        )
+
+        action_template = candidate.get("action_template")
+        if isinstance(action_template, dict):
+            action_refs = action_template.get("source_refs") if isinstance(action_template.get("source_refs"), list) else refs
+            action_metadata = {
+                **action_template,
+                "unit_type": "quick_action_rule",
+                "retrieval_scope": "unit",
+                "document_type": classification.document_type,
+                "source_type": classification.source_type,
+                "kb_index": True,
+                "kb_index_candidate_type": "action_template",
+                "source_refs": action_refs,
+                "source_ref_quality": source_ref_quality_from_refs(action_refs),
+                "confidence": float(action_template.get("confidence") or 0.7),
+                "review_status": "needs_review",
+            }
+            action_content = str(action_template.get("copy_template") or action_template.get("description") or action_template.get("name") or "")
+            chunks.append(
+                Chunk(
+                    chunk_index=len(chunks),
+                    section="quick_action_rule",
+                    heading=str(action_template.get("name") or "Action template")[:180],
+                    content=action_content,
+                    token_count=len(tokenize(action_content)),
+                    metadata=action_metadata,
+                )
+            )
+
+    return chunks
+
+
+def excel_source_ref(filename: str, sheet: str, row_start: int, row_end: int, headers: list[str]) -> dict[str, Any]:
+    return {
+        "source_type": "excel",
+        "source_file": filename,
+        "sheet": sheet,
+        "row_start": row_start,
+        "row_end": row_end,
+        "column_names": headers,
+    }
+
+
+def cell_by_header(row_values: dict[str, str], candidates: list[str]) -> str:
+    candidate_set = [normalized_key(candidate) for candidate in candidates]
+    for header, value in row_values.items():
+        key = normalized_key(header)
+        if any(candidate in key for candidate in candidate_set):
+            return value.strip()
+    return ""
+
+
+def first_meaningful_value(values: list[str], headers: list[str]) -> str:
+    for index, value in enumerate(values):
+        text = str(value or "").strip()
+        if not text or URL_RE.search(text):
+            continue
+        header = headers[index] if index < len(headers) else ""
+        if normalized_key(header) in {"stt", "no", "no_"}:
+            continue
+        return clean_link_label(text)
+    return clean_link_label(next((str(value or "").strip() for value in values if str(value or "").strip()), ""))
+
+
+def target_sop_title_from_row(row_values: dict[str, str], related_documents: list[dict[str, Any]]) -> str:
+    explicit = cell_by_header(row_values, ["sop", "link_sop", "ten_quy_trinh_quy_dinh", "quy_dinh_quy_trinh_xu_ly"])
+    cleaned = clean_link_label(explicit)
+    if cleaned and normalized_key(cleaned) not in {"link", "link_quy_dinh", "sop"}:
+        return cleaned
+    for relation in related_documents:
+        title = clean_link_label(str(relation.get("target_title") or ""))
+        if title:
+            return title
+    return ""
+
+
+def relation_candidates_for_kb_row(
+    target_title: str,
+    related_documents: list[dict[str, Any]],
+    relation_type: str,
+    source_ref: dict[str, Any],
+    evidence_text: str,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    items: list[dict[str, Any]] = []
+    if target_title:
+        items.append({"target_title": target_title, "relation_type": relation_type, "relation_source": "imported"})
+    for relation in related_documents:
+        if isinstance(relation, dict):
+            items.append({**relation, "relation_type": relation.get("relation_type") or relation_type})
+    for item in items:
+        title = clean_link_label(str(item.get("target_title") or ""))
+        if not title:
+            continue
+        rel_type = str(item.get("relation_type") or relation_type)
+        key = (normalized_key(title), rel_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(
+            {
+                "target_title": title,
+                "target_url": str(item.get("source_url") or item.get("target_url") or ""),
+                "relation_type": rel_type,
+                "relation_source": str(item.get("relation_source") or "imported"),
+                "confidence": float(item.get("confidence") or 0.78),
+                "status": "unresolved",
+                "source_ref": source_ref,
+                "evidence_text": evidence_text[:500],
+            }
+        )
+    return output
+
+
+def first_relation_url(related_documents: list[dict[str, Any]]) -> str:
+    for relation in related_documents:
+        url = str(relation.get("source_url") or relation.get("target_url") or "").strip()
+        if url:
+            return url
+    return ""
+
+
+def first_url(values: list[str]) -> str:
+    for value in values:
+        match = URL_RE.search(str(value or ""))
+        if match:
+            return match.group(0)
+    return ""
+
+
+def value_for_url(values: list[str], url: str) -> str:
+    return next((str(value or "") for value in values if url and url in str(value or "")), "")
+
+
+def link_label_from_cell_text(value: str) -> str:
+    return clean_link_label(value)
+
+
+def clean_link_label(value: str) -> str:
+    label = URL_RE.sub("", str(value or ""))
+    label = re.sub(r"\(\s*\)", "", label)
+    return " ".join(label.strip(" -:()").split())
+
+
+def split_taxonomy_values(value: str) -> list[str]:
+    parts = re.split(r"[,;/+&]|\s+\+\s+", str(value or ""))
+    return [normalized_key(part) for part in parts if normalized_key(part)]
+
+
+def audience_for_sheet(sheet_name: str) -> list[str]:
+    normalized = normalized_search_text(sheet_name)
+    if normalized == "driver rider":
+        return ["driver", "rider"]
+    if normalized == "driver cleaner":
+        return ["driver", "cleaner"]
+    if normalized == "rider":
+        return ["rider"]
+    if normalized == "cleaner":
+        return ["cleaner"]
+    if normalized == "mcu":
+        return ["merchant"]
+    return []
+
+
+def infer_tool_type(text: str) -> str:
+    normalized = normalized_search_text(text)
+    if any(signal in normalized for signal in ["case", "crm", "admin"]):
+        return "case_management"
+    if any(signal in normalized for signal in ["payment", "refund", "thanh toan", "hoan"]):
+        return "payment"
+    if any(signal in normalized for signal in ["mail", "email", "chat", "zalo", "pancake"]):
+        return "communication"
+    if any(signal in normalized for signal in ["report", "dashboard", "looker", "sheet"]):
+        return "reporting"
+    if any(signal in normalized for signal in ["form", "survey"]):
+        return "form"
+    if any(signal in normalized for signal in ["quy dinh", "sop", "doc", "drive"]):
+        return "document"
+    return "other"
+
+
+def infer_action_type(text: str) -> str:
+    normalized = normalized_search_text(text)
+    if "tasklist" in normalized:
+        return "create_tasklist"
+    if "tao case" in normalized or "create case" in normalized:
+        return "create_case"
+    if any(signal in normalized for signal in ["gui mail", "email", "send email"]):
+        return "send_email"
+    if any(signal in normalized for signal in ["goi kh", "call", "lien he kh"]):
+        return "call_customer"
+    if any(signal in normalized for signal in ["chuyen queue", "transfer", "queue"]):
+        return "transfer_queue"
+    if "ping" in normalized:
+        return "ping_group"
+    if any(signal in normalized for signal in ["macro", "script"]):
+        return "copy_macro"
+    if "link" in normalized or "mo tool" in normalized:
+        return "open_tool"
+    return ""
+
+
+def action_template_from_router(candidate: dict[str, Any], action_type: str) -> dict[str, Any]:
+    title = str(candidate.get("title") or "Action template")
+    return {
+        "id": f"{candidate.get('id', 'row')}_action",
+        "candidate_type": "action_template",
+        "unit_type": "quick_action_rule",
+        "name": title[:120],
+        "action_type": action_type,
+        "description": str(candidate.get("content") or title),
+        "copy_template": action_copy_template(action_type, title, str(candidate.get("target_sop_title") or "")),
+        "related_tool_titles": [relation.get("target_title") for relation in candidate.get("related_documents", []) if relation.get("target_title")],
+        "source_refs": candidate.get("source_refs", []),
+        "source_ref": candidate.get("source_ref", {}),
+        "collection_slug": candidate.get("collection_slug", ""),
+        "collection_name": candidate.get("collection_name", ""),
+        "confidence": 0.68,
+        "review_status": "needs_review",
+    }
+
+
+def action_copy_template(action_type: str, title: str, target_sop_title: str) -> str:
+    if action_type == "create_tasklist":
+        return f"Tạo tasklist theo issue: {title}. Tham chiếu SOP: {target_sop_title or 'chưa liên kết'}."
+    if action_type == "create_case":
+        return f"Tạo case theo issue: {title}. Ghi rõ nguồn xử lý và SOP áp dụng."
+    if action_type == "send_email":
+        return f"Soạn email theo issue: {title}. Kiểm tra SOP liên quan trước khi gửi."
+    if action_type == "transfer_queue":
+        return f"Chuyển queue theo issue: {title}. Kiểm tra đúng queue và ghi chú đầy đủ."
+    if action_type == "ping_group":
+        return f"Ping group xử lý theo issue: {title}. Đính kèm case context cần thiết."
+    return f"Thực hiện action `{action_type}` cho issue: {title}."
+
+
+def infer_kb_risk(text: str) -> str:
+    normalized = normalized_search_text(text)
+    if any(signal in normalized for signal in ["vip", "zt", "qa", "refund", "hoan tien", "thanh toan", "bao mat", "si", "khoa tai khoan"]):
+        return "high"
+    if any(signal in normalized for signal in ["tasklist", "handoff", "chuyen", "escalate"]):
+        return "medium"
+    return "low"
+
+
+def first_kb_plan_source_refs(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    for bucket in ("issue_router_units", "sop_references", "tool_links", "action_templates", "collections"):
+        for item in plan.get(bucket, []) if isinstance(plan.get(bucket), list) else []:
+            if isinstance(item, dict) and isinstance(item.get("source_refs"), list) and item["source_refs"]:
+                return item["source_refs"]
+            if isinstance(item, dict) and isinstance(item.get("source_ref"), dict):
+                return [item["source_ref"]]
+    return []
+
+
+def vietnamese_kb_index_heading(unit_type: str) -> str:
+    return {
+        "issue_router_unit": "Dòng điều hướng vấn đề",
+        "quick_action_rule": "Action template",
+        "sop_reference": "SOP reference",
+        "tool_link": "Tool link",
+        "vip_overlay_rule": "VIP overlay rule",
+        "product_update_note": "Product update note",
+    }.get(unit_type, "KB index candidate")
 
 
 def append_unique_related_document_chunks(chunks: list[Chunk], related_chunks: list[Chunk]) -> list[Chunk]:
@@ -2847,7 +3533,7 @@ def evaluate_refinement_report(chunks: list[Any], document_type: str) -> dict[st
     missing_fields: list[str] = []
     if not any(metadata.get("unit_type") == "full_sop" for metadata in metadata_items):
         missing_fields.append("full_sop")
-    if document_type in {"policy_rule", "policy_table", "workflow_diagram"} and not atomic_units:
+    if document_type in {"policy_rule", "policy_table", "workflow_diagram", "kb_index_workbook"} and not atomic_units:
         missing_fields.append("atomic_units")
     if any(metadata.get("unit_type") == "policy_rule" and not metadata.get("source_refs") for metadata in metadata_items):
         missing_fields.append("policy_rule_source_refs")
@@ -3461,7 +4147,7 @@ def draft_units_payload(source_chunks: list[Any]) -> dict[str, Any]:
 def should_create_structuring_plan(document_type: str, raw_text: str, raw_context: dict[str, Any], source_chunks: list[Any]) -> bool:
     sheet_count = len(raw_context.get("sheets", [])) if isinstance(raw_context.get("sheets"), list) else 0
     return (
-        document_type in {"policy_table", "workflow_diagram"}
+        document_type in {"policy_table", "workflow_diagram", "kb_index_workbook"}
         or (document_type == "policy_rule" and any("high" == str(chunk.metadata.get("risk_level")) for chunk in source_chunks))
         or sheet_count > 1
         or len(raw_text) > 12000
@@ -3483,7 +4169,7 @@ def structuring_plan_payload(classification: Any, source_chunks: list[Any], raw_
         "atomic_unit_candidates": unit_types,
         "document_type": classification.document_type,
         "full_sop_candidate": any(unit_type == "full_sop" for unit_type in unit_types),
-        "human_approval_required": classification.document_type in {"policy_table", "workflow_diagram", "policy_rule"},
+        "human_approval_required": classification.document_type in {"policy_table", "workflow_diagram", "policy_rule", "kb_index_workbook"},
         "metadata_suggestions": {
             "risk_level": risk_level_for_document_type(classification.document_type),
             "source_type": classification.source_type,
@@ -3507,7 +4193,7 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
     ]
     if not has_full_sop:
         hard_blockers.append("missing_full_sop")
-    if document_type in {"policy_rule", "policy_table", "workflow_diagram"} and not atomic_units:
+    if document_type in {"policy_rule", "policy_table", "workflow_diagram", "kb_index_workbook"} and not atomic_units:
         hard_blockers.append("missing_atomic_units")
     if any(str(metadata.get("review_status") or "needs_review") == "needs_review" for metadata in metadata_items):
         hard_blockers.append("unreviewed_units")
@@ -3592,7 +4278,7 @@ def source_ref_quality_from_blocks(blocks: list[dict[str, Any]]) -> str:
 
 
 def risk_level_for_document_type(document_type: str) -> str:
-    if document_type in {"policy_rule", "policy_table", "workflow_diagram"}:
+    if document_type in {"policy_rule", "policy_table", "workflow_diagram", "kb_index_workbook"}:
         return "high"
     if document_type in {"macro_script", "text_sop"}:
         return "medium"

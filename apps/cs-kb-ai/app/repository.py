@@ -28,8 +28,14 @@ RELATION_TYPES = (
     "routes_to",
     "escalates_to",
     "uses_macro",
+    "uses_tool",
+    "has_action_template",
+    "has_case_reason",
     "exception_of",
     "supersedes",
+    "child_of",
+    "parent_of",
+    "modifies",
     "related_to",
     "possible_conflict",
 )
@@ -49,9 +55,15 @@ RELATION_TYPE_PRIORITY = {
     "routes_to": 4,
     "escalates_to": 5,
     "uses_macro": 6,
-    "references": 7,
-    "related_to": 8,
-    "possible_conflict": 9,
+    "uses_tool": 7,
+    "has_action_template": 8,
+    "has_case_reason": 9,
+    "references": 10,
+    "child_of": 11,
+    "parent_of": 12,
+    "modifies": 13,
+    "related_to": 14,
+    "possible_conflict": 15,
 }
 TEXT_RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
@@ -78,6 +90,24 @@ TEXT_RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "routes_to",
         "operational_handoff",
     ),
+)
+
+DEFAULT_KB_COLLECTIONS = (
+    ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
+    ("customer-rider-operations", "Customer / Rider Operations", "audience"),
+    ("driver-operations", "Driver Operations", "audience"),
+    ("merchant-mcu-operations", "Merchant / MCU Operations", "audience"),
+    ("cleaner-operations", "Cleaner Operations", "audience"),
+    ("payment-refund", "Payment & Refund", "task"),
+    ("account-verification", "Account & Verification", "task"),
+    ("trip-order-issues", "Trip / Order Issues", "task"),
+    ("promotion-voucher", "Promotion / Voucher", "task"),
+    ("social-call-email-handling", "Social / Call / Email Handling", "channel"),
+    ("tech-bpla-msc-handoff", "Tech / BPLA / MSC Handoff", "owner"),
+    ("qa-zt-compliance", "QA / ZT / Compliance", "risk"),
+    ("vip-customer-handling", "VIP Customer Handling", "risk"),
+    ("tool-directory", "Tool Directory", "tool"),
+    ("product-updates", "Product Updates", "domain"),
 )
 
 
@@ -129,7 +159,7 @@ def ensure_schema() -> None:
               content_type text NOT NULL,
               status text NOT NULL DEFAULT 'active',
               current_version_id uuid,
-              metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+              metadata jsonb NOT NULL DEFAULT '{{}}'::jsonb,
               created_at timestamptz NOT NULL DEFAULT now(),
               updated_at timestamptz NOT NULL DEFAULT now()
             )
@@ -209,7 +239,7 @@ def ensure_schema() -> None:
             """
         )
         conn.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS ai_document_relations (
               id uuid PRIMARY KEY,
               source_document_id uuid NOT NULL REFERENCES ai_documents(id) ON DELETE CASCADE,
@@ -225,11 +255,11 @@ def ensure_schema() -> None:
               reviewed_by text,
               reviewed_at timestamptz,
               rejection_reason text NOT NULL DEFAULT '',
-              metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+              metadata jsonb NOT NULL DEFAULT '{{}}'::jsonb,
               created_at timestamptz NOT NULL DEFAULT now(),
               updated_at timestamptz NOT NULL DEFAULT now(),
               CONSTRAINT ai_document_relations_type_check
-                CHECK (relation_type IN ('references', 'requires', 'must_follow', 'routes_to', 'escalates_to', 'uses_macro', 'exception_of', 'supersedes', 'related_to', 'possible_conflict')),
+                CHECK (relation_type IN ({RELATION_TYPE_SQL})),
               CONSTRAINT ai_document_relations_status_check
                 CHECK (status IN ('suggested', 'unresolved', 'approved', 'rejected', 'archived')),
               UNIQUE (source_version_id, source_chunk_id, target_title_normalized, relation_type)
@@ -243,10 +273,10 @@ def ensure_schema() -> None:
             """
         )
         conn.execute(
-            """
+            f"""
             ALTER TABLE ai_document_relations
             ADD CONSTRAINT ai_document_relations_type_check
-            CHECK (relation_type IN ('references', 'requires', 'must_follow', 'routes_to', 'escalates_to', 'uses_macro', 'exception_of', 'supersedes', 'related_to', 'possible_conflict'))
+            CHECK (relation_type IN ({RELATION_TYPE_SQL}))
             """
         )
         conn.execute(
@@ -333,6 +363,7 @@ def ensure_schema() -> None:
             )
             """
         )
+        ensure_kb_index_schema(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_documents_status ON ai_documents(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_versions_status ON ai_document_versions(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_document_version ON ai_chunks(document_id, version_id)")
@@ -350,6 +381,100 @@ def ensure_schema() -> None:
         )
         ensure_search_taxonomy_schema(conn)
         seed_search_taxonomy(conn)
+
+
+def ensure_kb_index_schema(conn: Connection[Any]) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kb_collections (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          name text NOT NULL,
+          slug text NOT NULL UNIQUE,
+          collection_type text NOT NULL DEFAULT 'domain',
+          description text NOT NULL DEFAULT '',
+          owner_team text,
+          status text NOT NULL DEFAULT 'active',
+          rules jsonb NOT NULL DEFAULT '{}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kb_collection_items (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          collection_id uuid NOT NULL REFERENCES kb_collections(id) ON DELETE CASCADE,
+          item_type text NOT NULL,
+          item_id uuid NOT NULL,
+          source text NOT NULL DEFAULT 'manual',
+          confidence numeric,
+          status text NOT NULL DEFAULT 'suggested',
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (collection_id, item_type, item_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_links (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          name text NOT NULL,
+          url text NOT NULL,
+          tool_type text NOT NULL DEFAULT 'other',
+          description text,
+          owner_team text,
+          status text NOT NULL DEFAULT 'active',
+          source_document_id uuid REFERENCES ai_documents(id) ON DELETE SET NULL,
+          source_version_id uuid REFERENCES ai_document_versions(id) ON DELETE SET NULL,
+          source_unit_id uuid REFERENCES ai_chunks(id) ON DELETE SET NULL,
+          source_ref jsonb,
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (url)
+        )
+        """
+    )
+    conn.execute("ALTER TABLE tool_links ADD COLUMN IF NOT EXISTS source_version_id uuid REFERENCES ai_document_versions(id) ON DELETE SET NULL")
+    conn.execute("ALTER TABLE tool_links ADD COLUMN IF NOT EXISTS source_unit_id uuid REFERENCES ai_chunks(id) ON DELETE SET NULL")
+    conn.execute("ALTER TABLE tool_links ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS action_templates (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          name text NOT NULL,
+          action_type text NOT NULL,
+          description text NOT NULL DEFAULT '',
+          fields jsonb NOT NULL DEFAULT '{}'::jsonb,
+          copy_template text,
+          related_tool_ids uuid[] NOT NULL DEFAULT ARRAY[]::uuid[],
+          source_unit_id uuid REFERENCES ai_chunks(id) ON DELETE SET NULL,
+          status text NOT NULL DEFAULT 'draft',
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute("ALTER TABLE action_templates ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_collection_items_collection ON kb_collection_items(collection_id, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_collection_items_item ON kb_collection_items(item_type, item_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_links_status ON tool_links(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_action_templates_status ON action_templates(status)")
+    for slug, name, collection_type in DEFAULT_KB_COLLECTIONS:
+        conn.execute(
+            """
+            INSERT INTO kb_collections (slug, name, collection_type, description, status, rules)
+            VALUES (%s, %s, %s, '', 'active', '{}'::jsonb)
+            ON CONFLICT (slug) DO UPDATE SET
+              name = EXCLUDED.name,
+              collection_type = EXCLUDED.collection_type,
+              updated_at = now()
+            """,
+            (slug, name, collection_type),
+        )
 
 
 def health_check() -> dict[str, Any]:
@@ -1085,10 +1210,22 @@ def normalize_relation_type(value: Any, content: str = "") -> str:
         return "escalates_to"
     if normalized in {"uses_macro", "uses macro", "macro", "macro_script", "macro script", "script"}:
         return "uses_macro"
+    if normalized in {"uses_tool", "uses tool", "tool", "tool_link", "tool link", "cong cu", "he thong"}:
+        return "uses_tool"
+    if normalized in {"has_action_template", "action_template", "action template", "quick_action", "quick action"}:
+        return "has_action_template"
+    if normalized in {"has_case_reason", "case_reason", "case reason", "ly do case"}:
+        return "has_case_reason"
     if normalized in {"exception_of", "exception"}:
         return "exception_of"
     if normalized in {"supersedes", "replace", "replaces"}:
         return "supersedes"
+    if normalized in {"child_of", "child of", "belongs_to", "belongs to"}:
+        return "child_of"
+    if normalized in {"parent_of", "parent of", "contains"}:
+        return "parent_of"
+    if normalized in {"modifies", "modify", "updates", "update"}:
+        return "modifies"
     if normalized in {"possible_conflict", "possible conflict", "conflict", "conflicts", "mau thuan", "xung dot"}:
         return "possible_conflict"
     content_norm = normalize_phrase(content)
@@ -1424,6 +1561,8 @@ def has_required_source_ref(document_type: str, metadata: dict[str, Any]) -> boo
         refs = []
     if document_type == "policy_table":
         return bool(metadata.get("source_sheet")) or any(isinstance(ref, dict) and ref.get("sheet") for ref in refs)
+    if document_type == "kb_index_workbook":
+        return any(isinstance(ref, dict) and ref.get("sheet") and (ref.get("row_start") or ref.get("row_end")) for ref in refs)
     if document_type == "workflow_diagram":
         return bool(metadata.get("source_page") or metadata.get("page_number")) or any(
             isinstance(ref, dict) and ref.get("page") for ref in refs
@@ -1839,7 +1978,7 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
 
     if not has_full_sop:
         failures.append("missing_full_sop_layer")
-    if version["document_type"] in {"policy_table", "policy_rule", "workflow_diagram"} and atomic_units == 0:
+    if version["document_type"] in {"policy_table", "policy_rule", "workflow_diagram", "kb_index_workbook"} and atomic_units == 0:
         failures.append("missing_production_atomic_units")
     if degraded_unconverted:
         failures.append(f"{degraded_unconverted}_degraded_units_need_manual_curation")
@@ -1871,7 +2010,7 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         failures.append("missing_effective_from")
     if has_historical_sheets and not has_effective_from:
         failures.append("historical_sheets_without_current_effective_date")
-    high_risk_publish_scope = version["document_type"] in {"policy_rule", "policy_table", "workflow_diagram"} or has_high_risk_signal
+    high_risk_publish_scope = version["document_type"] in {"policy_rule", "policy_table", "workflow_diagram", "kb_index_workbook"} or has_high_risk_signal
     failures.extend(unresolved_relation_publish_gate_failures_tx(conn, version_id, high_risk_publish_scope))
 
     failures = list(dict.fromkeys(failures))
@@ -2220,7 +2359,242 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str, force
             """,
             (published["document_type"], version_id),
         )
+    if published["document_type"] == "kb_index_workbook":
+        materialize_kb_index_version_tx(conn, str(published["document_id"]), version_id, actor)
     return dict(published)
+
+
+def materialize_kb_index_version_tx(conn: Connection[Any], document_id: str, version_id: str, actor: str) -> dict[str, int]:
+    conn.row_factory = dict_row
+    rows = conn.execute(
+        """
+        SELECT id::text AS chunk_id,
+               heading,
+               content,
+               metadata
+        FROM ai_chunks
+        WHERE document_id = %s
+          AND version_id = %s
+          AND COALESCE(metadata->>'review_status', '') = 'approved'
+          AND COALESCE(metadata->>'kb_index', 'false') = 'true'
+        ORDER BY chunk_index
+        """,
+        (document_id, version_id),
+    ).fetchall()
+    collections = 0
+    collection_items = 0
+    tools = 0
+    actions = 0
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        collection_slug = str(metadata.get("collection_slug") or "").strip()
+        collection_name = str(metadata.get("collection_name") or collection_slug or "").strip()
+        if collection_slug and collection_name:
+            collection_id = upsert_kb_collection_tx(
+                conn,
+                slug=collection_slug,
+                name=collection_name,
+                collection_type=str(metadata.get("collection_type") or "domain"),
+                description=str(metadata.get("description") or ""),
+                owner_team=str(metadata.get("owner_team") or ""),
+                rules={"source_document_id": document_id, "source_version_id": version_id},
+            )
+            collections += 1
+            link_kb_collection_item_tx(
+                conn,
+                collection_id=collection_id,
+                item_type="sop_unit",
+                item_id=str(row["chunk_id"]),
+                source="imported",
+                confidence=float(metadata.get("confidence") or 0) if metadata.get("confidence") is not None else None,
+                status="approved",
+            )
+            collection_items += 1
+
+        unit_type = str(metadata.get("unit_type") or "")
+        if unit_type == "tool_link":
+            upsert_tool_link_tx(conn, document_id, version_id, row, metadata)
+            tools += 1
+        if unit_type == "quick_action_rule":
+            upsert_action_template_tx(conn, row, metadata)
+            actions += 1
+
+    audit_tx(
+        conn,
+        actor=actor,
+        action="kb_index_materialized",
+        entity_type="ai_document_version",
+        entity_id=version_id,
+        metadata={
+            "document_id": document_id,
+            "collections": collections,
+            "collection_items": collection_items,
+            "tool_links": tools,
+            "action_templates": actions,
+        },
+    )
+    return {"collections": collections, "collection_items": collection_items, "tool_links": tools, "action_templates": actions}
+
+
+def upsert_kb_collection_tx(
+    conn: Connection[Any],
+    *,
+    slug: str,
+    name: str,
+    collection_type: str,
+    description: str,
+    owner_team: str,
+    rules: dict[str, Any],
+) -> str:
+    row = conn.execute(
+        """
+        INSERT INTO kb_collections (slug, name, collection_type, description, owner_team, status, rules)
+        VALUES (%s, %s, %s, %s, NULLIF(%s, ''), 'active', %s::jsonb)
+        ON CONFLICT (slug) DO UPDATE SET
+          name = EXCLUDED.name,
+          collection_type = EXCLUDED.collection_type,
+          description = COALESCE(NULLIF(EXCLUDED.description, ''), kb_collections.description),
+          owner_team = COALESCE(EXCLUDED.owner_team, kb_collections.owner_team),
+          rules = kb_collections.rules || EXCLUDED.rules,
+          updated_at = now()
+        RETURNING id::text AS id
+        """,
+        (slug, name, collection_type or "domain", description, owner_team, json.dumps(rules)),
+    ).fetchone()
+    return str(row["id"])
+
+
+def link_kb_collection_item_tx(
+    conn: Connection[Any],
+    *,
+    collection_id: str,
+    item_type: str,
+    item_id: str,
+    source: str,
+    confidence: float | None,
+    status: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO kb_collection_items (collection_id, item_type, item_id, source, confidence, status)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (collection_id, item_type, item_id) DO UPDATE SET
+          source = EXCLUDED.source,
+          confidence = EXCLUDED.confidence,
+          status = EXCLUDED.status,
+          updated_at = now()
+        """,
+        (collection_id, item_type, item_id, source, confidence, status),
+    )
+
+
+def upsert_tool_link_tx(conn: Connection[Any], document_id: str, version_id: str, row: dict[str, Any], metadata: dict[str, Any]) -> str | None:
+    url = str(metadata.get("url") or "").strip()
+    if not url:
+        return None
+    source_refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    source_ref = source_refs[0] if source_refs and isinstance(source_refs[0], dict) else {}
+    result = conn.execute(
+        """
+        INSERT INTO tool_links (
+          name, url, tool_type, description, owner_team, status,
+          source_document_id, source_version_id, source_unit_id, source_ref, metadata
+        )
+        VALUES (%s, %s, %s, %s, NULLIF(%s, ''), 'active', %s, %s, %s, %s::jsonb, %s::jsonb)
+        ON CONFLICT (url) DO UPDATE SET
+          name = EXCLUDED.name,
+          tool_type = EXCLUDED.tool_type,
+          description = EXCLUDED.description,
+          owner_team = COALESCE(EXCLUDED.owner_team, tool_links.owner_team),
+          status = 'active',
+          source_document_id = EXCLUDED.source_document_id,
+          source_version_id = EXCLUDED.source_version_id,
+          source_unit_id = EXCLUDED.source_unit_id,
+          source_ref = EXCLUDED.source_ref,
+          metadata = tool_links.metadata || EXCLUDED.metadata,
+          updated_at = now()
+        RETURNING id::text AS id
+        """,
+        (
+            str(metadata.get("name") or row.get("heading") or "Tool"),
+            url,
+            str(metadata.get("tool_type") or "other"),
+            str(metadata.get("description") or row.get("content") or ""),
+            str(metadata.get("owner_team") or ""),
+            document_id,
+            version_id,
+            str(row["chunk_id"]),
+            json.dumps(source_ref),
+            json.dumps({"source_chunk_id": str(row["chunk_id"]), "collection_slug": metadata.get("collection_slug", "")}),
+        ),
+    ).fetchone()
+    return str(result["id"]) if result else None
+
+
+def upsert_action_template_tx(conn: Connection[Any], row: dict[str, Any], metadata: dict[str, Any]) -> str | None:
+    name = str(metadata.get("name") or row.get("heading") or "").strip()
+    action_type = str(metadata.get("action_type") or "").strip()
+    if not name or not action_type:
+        return None
+    existing = conn.execute(
+        """
+        SELECT id::text AS id
+        FROM action_templates
+        WHERE source_unit_id = %s
+        """,
+        (str(row["chunk_id"]),),
+    ).fetchone()
+    related_tool_ids = [str(item) for item in metadata.get("related_tool_ids", []) if str(item)]
+    if existing:
+        conn.execute(
+            """
+            UPDATE action_templates
+            SET name = %s,
+                action_type = %s,
+                description = %s,
+                fields = %s::jsonb,
+                copy_template = %s,
+                related_tool_ids = %s::uuid[],
+                status = 'approved',
+                metadata = metadata || %s::jsonb,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (
+                name,
+                action_type,
+                str(metadata.get("description") or row.get("content") or ""),
+                json.dumps(metadata.get("fields") if isinstance(metadata.get("fields"), dict) else {}),
+                str(metadata.get("copy_template") or ""),
+                related_tool_ids,
+                json.dumps({"collection_slug": metadata.get("collection_slug", "")}),
+                existing["id"],
+            ),
+        )
+        return str(existing["id"])
+    result = conn.execute(
+        """
+        INSERT INTO action_templates (
+          name, action_type, description, fields, copy_template,
+          related_tool_ids, source_unit_id, status, metadata
+        )
+        VALUES (%s, %s, %s, %s::jsonb, %s, %s::uuid[], %s, 'approved', %s::jsonb)
+        RETURNING id::text AS id
+        """,
+        (
+            name,
+            action_type,
+            str(metadata.get("description") or row.get("content") or ""),
+            json.dumps(metadata.get("fields") if isinstance(metadata.get("fields"), dict) else {}),
+            str(metadata.get("copy_template") or ""),
+            related_tool_ids,
+            str(row["chunk_id"]),
+            json.dumps({"collection_slug": metadata.get("collection_slug", "")}),
+        ),
+    ).fetchone()
+    return str(result["id"]) if result else None
 
 
 def archive_document(document_id: str, actor: str) -> None:
@@ -2280,6 +2654,360 @@ def list_documents() -> list[dict[str, Any]]:
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def list_kb_collections() -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT c.id::text AS id,
+                   c.name,
+                   c.slug,
+                   c.collection_type,
+                   COALESCE(c.description, '') AS description,
+                   COALESCE(c.owner_team, '') AS owner_team,
+                   c.status,
+                   c.rules,
+                   COUNT(i.id)::int AS item_count,
+                   COUNT(*) FILTER (
+                     WHERE COALESCE(ch.metadata->>'risk_level', '') IN ('high', 'critical')
+                   )::int AS high_risk_count,
+                   COUNT(DISTINCT r.id) FILTER (
+                     WHERE r.status IN ('unresolved', 'suggested')
+                   )::int AS unresolved_relation_count,
+                   c.created_at,
+                   c.updated_at
+            FROM kb_collections c
+            LEFT JOIN kb_collection_items i ON i.collection_id = c.id AND i.status = 'approved'
+            LEFT JOIN ai_chunks ch ON i.item_type = 'sop_unit' AND ch.id = i.item_id
+            LEFT JOIN ai_document_relations r ON r.source_chunk_id = ch.id AND r.status IN ('unresolved', 'suggested')
+            WHERE c.status = 'active'
+            GROUP BY c.id
+            ORDER BY c.collection_type, c.name
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_kb_collection(collection_id_or_slug: str) -> dict[str, Any]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        row = conn.execute(
+            """
+            SELECT c.id::text AS id,
+                   c.name,
+                   c.slug,
+                   c.collection_type,
+                   COALESCE(c.description, '') AS description,
+                   COALESCE(c.owner_team, '') AS owner_team,
+                   c.status,
+                   c.rules,
+                   COUNT(i.id)::int AS item_count,
+                   COUNT(*) FILTER (
+                     WHERE COALESCE(ch.metadata->>'risk_level', '') IN ('high', 'critical')
+                   )::int AS high_risk_count,
+                   COUNT(DISTINCT r.id) FILTER (
+                     WHERE r.status IN ('unresolved', 'suggested')
+                   )::int AS unresolved_relation_count,
+                   c.created_at,
+                   c.updated_at
+            FROM kb_collections c
+            LEFT JOIN kb_collection_items i ON i.collection_id = c.id AND i.status = 'approved'
+            LEFT JOIN ai_chunks ch ON i.item_type = 'sop_unit' AND ch.id = i.item_id
+            LEFT JOIN ai_document_relations r ON r.source_chunk_id = ch.id AND r.status IN ('unresolved', 'suggested')
+            WHERE c.id::text = %s OR c.slug = %s
+            GROUP BY c.id
+            """,
+            (collection_id_or_slug, collection_id_or_slug),
+        ).fetchone()
+        if not row:
+            raise LookupError("collection_not_found")
+        collection = dict(row)
+        collection["items"] = collection_items_tx(conn, collection["id"])
+        collection["issue_router_units"] = list_issue_router(collection=collection["slug"], limit=100)
+        collection["tools"] = list_tool_links(collection=collection["slug"])
+        collection["action_templates"] = list_action_templates(collection=collection["slug"])
+        collection["relations"] = list_document_relations_for_collection_tx(conn, collection["slug"])
+        return collection
+
+
+def collection_items_tx(conn: Connection[Any], collection_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT i.id::text AS id,
+               i.item_type,
+               i.item_id::text AS item_id,
+               i.source,
+               i.confidence::float AS confidence,
+               i.status,
+               ch.heading,
+               ch.section,
+               ch.metadata,
+               d.title AS document_title
+        FROM kb_collection_items i
+        LEFT JOIN ai_chunks ch ON i.item_type = 'sop_unit' AND ch.id = i.item_id
+        LEFT JOIN ai_documents d ON d.id = ch.document_id
+        WHERE i.collection_id = %s
+          AND i.status = 'approved'
+        ORDER BY i.updated_at DESC
+        """,
+        (collection_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_document_relations_for_collection_tx(conn: Connection[Any], collection_slug: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT r.id::text AS id,
+               r.source_document_id::text AS source_document_id,
+               r.source_version_id::text AS source_version_id,
+               r.source_chunk_id::text AS source_chunk_id,
+               r.target_title,
+               r.relation_type,
+               r.status,
+               r.metadata,
+               r.created_at,
+               r.updated_at
+        FROM ai_document_relations r
+        JOIN ai_chunks ch ON ch.id = r.source_chunk_id
+        WHERE ch.metadata->>'collection_slug' = %s
+        ORDER BY r.updated_at DESC
+        """,
+        (collection_slug,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def unresolved_relations_for_chunks(chunk_ids: list[str]) -> list[dict[str, Any]]:
+    ids = [item for item in dict.fromkeys(chunk_ids) if item]
+    if not ids:
+        return []
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT id::text AS id,
+                   source_chunk_id::text AS source_chunk_id,
+                   target_title,
+                   relation_type,
+                   status,
+                   metadata
+            FROM ai_document_relations
+            WHERE source_chunk_id::text = ANY(%s)
+              AND status IN ('unresolved', 'suggested')
+            ORDER BY updated_at DESC
+            LIMIT 20
+            """,
+            (ids,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def list_issue_router(
+    query: str = "",
+    audience: list[str] | None = None,
+    vertical: list[str] | None = None,
+    collection: str = "",
+    task_type: list[str] | None = None,
+    risk_level: str = "",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    clauses = [
+        "d.status = 'active'",
+        "v.status = 'published'",
+        "d.current_version_id = v.id",
+        "COALESCE(c.metadata->>'review_status', '') = 'approved'",
+        "COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)",
+        "COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'",
+        "COALESCE(c.metadata->>'unit_type', '') = ANY(%s)",
+    ]
+    params: list[Any] = [["structured", "manually_curated"], ["issue_router_unit", "vip_overlay_rule", "product_update_note"]]
+    if query:
+        clauses.append("immutable_unaccent(lower(concat_ws(' ', c.heading, c.content, c.metadata::text))) LIKE immutable_unaccent(lower(%s))")
+        params.append(f"%{query}%")
+    if audience:
+        clauses.append("(c.metadata->'audience') ?| %s")
+        params.append(audience)
+    if vertical:
+        clauses.append("(c.metadata->'vertical') ?| %s")
+        params.append(vertical)
+    if collection:
+        clauses.append("c.metadata->>'collection_slug' = %s")
+        params.append(collection)
+    if task_type:
+        clauses.append("(c.metadata->'task_type') ?| %s")
+        params.append(task_type)
+    if risk_level:
+        clauses.append("COALESCE(c.metadata->>'risk_level', '') = %s")
+        params.append(risk_level)
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT c.id::text AS chunk_id,
+                   c.document_id::text AS document_id,
+                   c.version_id::text AS version_id,
+                   c.heading AS title,
+                   c.content,
+                   c.metadata,
+                   COALESCE(MAX(r.status), '') AS relation_status,
+                   ARRAY_REMOVE(ARRAY_AGG(DISTINCT r.id::text), NULL) AS relation_ids,
+                   CASE
+                     WHEN %s <> '' AND immutable_unaccent(lower(c.heading)) LIKE immutable_unaccent(lower(%s)) THEN 2.0
+                     WHEN %s <> '' AND immutable_unaccent(lower(c.content)) LIKE immutable_unaccent(lower(%s)) THEN 1.0
+                     ELSE 0.0
+                   END AS score
+            FROM ai_chunks c
+            JOIN ai_documents d ON d.id = c.document_id
+            JOIN ai_document_versions v ON v.id = c.version_id
+            LEFT JOIN ai_document_relations r ON r.source_chunk_id = c.id
+            WHERE {' AND '.join(clauses)}
+            GROUP BY c.id, d.updated_at
+            ORDER BY score DESC, d.updated_at DESC
+            LIMIT %s
+            """,
+            [query, f"%{query}%", query, f"%{query}%", *params, limit],
+        ).fetchall()
+        if query:
+            audit_tx(
+                conn,
+                actor="system",
+                action="issue_router_search",
+                entity_type="kb_index",
+                entity_id=str(uuid.uuid4()),
+                metadata={"query": query, "result_count": len(rows), "filters": {"audience": audience or [], "vertical": vertical or [], "collection": collection, "task_type": task_type or [], "risk_level": risk_level}},
+            )
+        return [issue_router_row(row) for row in rows]
+
+
+def issue_router_row(row: dict[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source_refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    return {
+        "chunk_id": str(row.get("chunk_id") or ""),
+        "document_id": str(row.get("document_id") or ""),
+        "version_id": str(row.get("version_id") or ""),
+        "title": str(row.get("title") or ""),
+        "issue_text": str(metadata.get("issue_text") or row.get("title") or ""),
+        "content": str(row.get("content") or ""),
+        "audience": list(metadata.get("audience") or []),
+        "vertical": list(metadata.get("vertical") or []),
+        "case_type": list(metadata.get("case_type") or []),
+        "task_type": list(metadata.get("task_type") or []),
+        "collection": str(metadata.get("collection_name") or metadata.get("collection_slug") or ""),
+        "target_sop_title": str(metadata.get("target_sop_title") or ""),
+        "target_sop_id": metadata.get("target_sop_id"),
+        "tool_ids": list(metadata.get("tool_ids") or []),
+        "relation_ids": list(row.get("relation_ids") or []),
+        "relation_status": str(row.get("relation_status") or ""),
+        "risk_level": str(metadata.get("risk_level") or ""),
+        "review_status": str(metadata.get("review_status") or ""),
+        "source_ref": source_refs[0] if source_refs and isinstance(source_refs[0], dict) else {},
+        "metadata": metadata,
+        "score": float(row.get("score") or 0),
+    }
+
+
+def list_tool_links(status: str = "active", collection: str = "") -> list[dict[str, Any]]:
+    clauses = ["t.status = %s"]
+    params: list[Any] = [status]
+    if collection:
+        clauses.append("t.metadata->>'collection_slug' = %s")
+        params.append(collection)
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT t.id::text AS id,
+                   t.name,
+                   t.url,
+                   t.tool_type,
+                   COALESCE(t.description, '') AS description,
+                   COALESCE(t.owner_team, '') AS owner_team,
+                   t.status,
+                   t.source_document_id::text AS source_document_id,
+                   t.source_version_id::text AS source_version_id,
+                   COALESCE(t.source_ref, '{{}}'::jsonb) AS source_ref,
+                   t.metadata,
+                   t.created_at,
+                   t.updated_at
+            FROM tool_links t
+            WHERE {' AND '.join(clauses)}
+            ORDER BY t.tool_type, t.name
+            """,
+            params,
+        ).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["used_by"] = tool_used_by_tx(conn, item["id"])
+            output.append(item)
+        return output
+
+
+def tool_used_by_tx(conn: Connection[Any], tool_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT ch.id::text AS chunk_id,
+               ch.heading,
+               ch.metadata,
+               d.title AS document_title
+        FROM tool_links t
+        JOIN ai_chunks ch ON ch.id = t.source_unit_id
+        JOIN ai_documents d ON d.id = ch.document_id
+        WHERE t.id = %s
+        LIMIT 20
+        """,
+        (tool_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_action_templates(status: str = "approved", collection: str = "") -> list[dict[str, Any]]:
+    clauses = ["status = %s"]
+    params: list[Any] = [status]
+    if collection:
+        clauses.append("metadata->>'collection_slug' = %s")
+        params.append(collection)
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT id::text AS id,
+                   name,
+                   action_type,
+                   description,
+                   fields,
+                   COALESCE(copy_template, '') AS copy_template,
+                   related_tool_ids::text[] AS related_tool_ids,
+                   source_unit_id::text AS source_unit_id,
+                   status,
+                   metadata,
+                   created_at,
+                   updated_at
+            FROM action_templates
+            WHERE {' AND '.join(clauses)}
+            ORDER BY action_type, name
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def record_kb_event(action: str, entity_type: str, entity_id: str | None, actor: str, metadata: dict[str, Any] | None = None) -> dict[str, str]:
+    event_id = str(uuid.uuid4())
+    with connection() as conn:
+        audit_tx(
+            conn,
+            actor=actor or "system",
+            action=action,
+            entity_type=entity_type or "kb_index",
+            entity_id=entity_id or event_id,
+            metadata=metadata or {},
+        )
+    return {"id": event_id, "status": "recorded"}
 
 
 def list_document_relations(status: str = "unresolved") -> list[dict[str, Any]]:
@@ -3687,6 +4415,15 @@ def filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
         clauses.append("(d.metadata->>'category' = ANY(%s) OR c.metadata->>'category' = ANY(%s))")
         params.append(filters.category)
         params.append(filters.category)
+    if filters.collections:
+        clauses.append("c.metadata->>'collection_slug' = ANY(%s)")
+        params.append(filters.collections)
+    if filters.task_types:
+        clauses.append("(c.metadata->'task_type') ?| %s")
+        params.append(filters.task_types)
+    if filters.unit_types:
+        clauses.append("COALESCE(c.metadata->>'unit_type', c.section) = ANY(%s)")
+        params.append(filters.unit_types)
 
     return " AND ".join(clauses), params
 

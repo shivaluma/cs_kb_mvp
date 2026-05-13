@@ -35,7 +35,7 @@ type WorkflowGraphMetadata = {
 type WorkflowEdgeMetadata = NonNullable<WorkflowGraphMetadata["edges"]>[number];
 type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
 type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
-type DocumentStep = "view" | "gate" | "workflow" | "sop" | "publish" | "review" | "chunks";
+type DocumentStep = "view" | "gate" | "workflow" | "sop" | "publish" | "review" | "kbIndex" | "chunks";
 type ReviewFilter = "needs_review" | "reviewed" | "approved" | "source_refs" | "atomic" | "all";
 type RequiredWorkflowUnit = {
   key: string;
@@ -58,6 +58,15 @@ type SourceEvidenceViewPayload = {
   sections?: Array<Record<string, unknown>>;
   title?: string;
   warnings?: string[];
+};
+type KBIndexPlanPayload = {
+  collections?: Array<Record<string, unknown>>;
+  issue_router_units?: Array<Record<string, unknown>>;
+  sop_references?: Array<Record<string, unknown>>;
+  tool_links?: Array<Record<string, unknown>>;
+  action_templates?: Array<Record<string, unknown>>;
+  unresolved_targets?: Array<Record<string, unknown>>;
+  summary?: Record<string, number | string>;
 };
 
 export function DocumentsWorkspace({
@@ -178,6 +187,8 @@ export function DocumentsWorkspace({
   const ownerAssigned = Boolean(selectedDocument?.metadata?.owner_team || selectedDocument?.metadata?.ownerTeam);
   const policyRequiresGovernance = ["policy_rule", "policy_table"].includes(String(selectedDocument?.latest_document_type ?? ""));
   const workflowRequiresGraph = selectedDocument?.latest_document_type === "workflow_diagram";
+  const isKbIndexWorkbook = selectedDocument?.latest_document_type === "kb_index_workbook";
+  const kbIndexPlan = useMemo(() => kbIndexPlanPayload(extractionPipeline), [extractionPipeline]);
   const selectedExtractionIssue = extractionIssue(selectedDocument);
   const workflowGraphConfidence = Number(workflowGraphUnit?.metadata.graph_confidence ?? workflowGraph?.graph_confidence ?? workflowGraphUnit?.confidence ?? 0);
   const workflowGraphLowConfidence = workflowRequiresGraph && Boolean(workflowGraphUnit) && workflowGraphConfidence > 0 && workflowGraphConfidence < 0.7;
@@ -758,7 +769,7 @@ export function DocumentsWorkspace({
 
         <Tabs className="space-y-4" onValueChange={(value) => setDocumentStep(value as DocumentStep)} value={documentStep}>
           <div className="sticky top-4 z-20 rounded-xl border bg-background/95 p-2 shadow-sm backdrop-blur">
-            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-4 xl:grid-cols-7">
+            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-4 xl:grid-cols-8">
               <TabsTrigger value="view">0. View</TabsTrigger>
               <TabsTrigger className="gap-2" value="review">
                 1. Review
@@ -776,6 +787,16 @@ export function DocumentsWorkspace({
                   </span>
                 ) : null}
               </TabsTrigger>
+              {isKbIndexWorkbook ? (
+                <TabsTrigger className="gap-2" value="kbIndex">
+                  2. Index
+                  {kbIndexPlan?.summary?.unresolved_target_count ? (
+                    <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {String(kbIndexPlan.summary.unresolved_target_count)}
+                    </span>
+                  ) : null}
+                </TabsTrigger>
+              ) : null}
               <TabsTrigger value="sop">3. SOP page</TabsTrigger>
               <TabsTrigger className="gap-2" value="gate">
                 4. Verify
@@ -967,6 +988,17 @@ export function DocumentsWorkspace({
               )}
             </CardContent>
           </Card>
+          </TabsContent>
+
+          <TabsContent className="mt-0 space-y-4" value="kbIndex">
+            <KBIndexReviewPanel
+              canEdit={canEditSelectedVersion}
+              defaultEffectiveFrom={defaultEffectiveFrom}
+              kbIndexPlan={kbIndexPlan}
+              onUpdateExtractionUnit={onUpdateExtractionUnit}
+              savingUnitId={savingUnitId}
+              units={extractionUnits}
+            />
           </TabsContent>
 
           <TabsContent className="mt-0 space-y-4" value="workflow">
@@ -1728,6 +1760,107 @@ function SourceDocumentView({
   );
 }
 
+function KBIndexReviewPanel({
+  canEdit,
+  defaultEffectiveFrom,
+  kbIndexPlan,
+  onUpdateExtractionUnit,
+  savingUnitId,
+  units,
+}: {
+  canEdit: boolean;
+  defaultEffectiveFrom: string;
+  kbIndexPlan: KBIndexPlanPayload | null;
+  onUpdateExtractionUnit: (unit: ExtractionUnit, update: ExtractionUnitUpdate) => void;
+  savingUnitId: string;
+  units: ExtractionUnit[];
+}) {
+  const kbUnits = units.filter((unit) => unit.metadata?.kb_index === true || String(unit.metadata?.document_type ?? "") === "kb_index_workbook");
+  const buckets = [
+    { key: "collections", label: "Collections", units: kbUnits.filter((unit) => String(unit.metadata?.kb_index_candidate_type ?? "") === "collections") },
+    { key: "issue_router_units", label: "Issue Router Units", units: kbUnits.filter((unit) => ["issue_router_unit", "vip_overlay_rule", "product_update_note"].includes(unit.unit_type)) },
+    { key: "sop_references", label: "SOP References", units: kbUnits.filter((unit) => unit.unit_type === "sop_reference") },
+    { key: "tool_links", label: "Tool Links", units: kbUnits.filter((unit) => unit.unit_type === "tool_link") },
+    { key: "action_templates", label: "Action Templates", units: kbUnits.filter((unit) => unit.unit_type === "quick_action_rule") },
+  ];
+  const unresolvedTargets = kbIndexPlan?.unresolved_targets ?? [];
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader className="border-b">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle>Workbook index review</CardTitle>
+              <CardDescription>
+                Review imported collections, issue routers, SOP references, tools, actions, and unresolved targets before publish materializes them.
+              </CardDescription>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="secondary">{kbUnits.length} candidates</Badge>
+              <Badge variant="outline">{unresolvedTargets.length} unresolved targets</Badge>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="grid gap-3 pt-4 md:grid-cols-3 xl:grid-cols-6">
+          <DocumentFact label="Collections" value={String(kbIndexPlan?.summary?.collection_count ?? buckets[0].units.length)} />
+          <DocumentFact label="Routers" value={String(kbIndexPlan?.summary?.issue_router_unit_count ?? buckets[1].units.length)} />
+          <DocumentFact label="SOP refs" value={String(kbIndexPlan?.summary?.sop_reference_count ?? buckets[2].units.length)} />
+          <DocumentFact label="Tools" value={String(kbIndexPlan?.summary?.tool_link_count ?? buckets[3].units.length)} />
+          <DocumentFact label="Actions" value={String(kbIndexPlan?.summary?.action_template_count ?? buckets[4].units.length)} />
+          <DocumentFact label="Unresolved" value={String(kbIndexPlan?.summary?.unresolved_target_count ?? unresolvedTargets.length)} />
+        </CardContent>
+      </Card>
+
+      {unresolvedTargets.length ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Unresolved Relations</CardTitle>
+            <CardDescription>These source rows mention a target SOP but no approved target is linked yet.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2 md:grid-cols-2">
+            {unresolvedTargets.slice(0, 12).map((target, index) => (
+              <div className="rounded-md border p-3 text-sm" key={`${String(target.target_title ?? "target")}-${index}`}>
+                <div className="font-medium">{String(target.target_title ?? "Unknown target")}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {String(target.relation_type ?? "references")} · {String(target.source_sheet ?? "")} row {String(target.source_row ?? "")}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {buckets.map((bucket) => (
+        <Card key={bucket.key}>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between gap-3 text-base">
+              {bucket.label}
+              <Badge variant="outline">{bucket.units.length}</Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {bucket.units.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No candidates in this group.</p>
+            ) : (
+              bucket.units.map((unit) => (
+                <ExtractionReviewEditor
+                  defaultEffectiveFrom={defaultEffectiveFrom}
+                  disabled={!canEdit}
+                  key={unit.unit_id}
+                  onSave={onUpdateExtractionUnit}
+                  saving={savingUnitId === unit.unit_id}
+                  unit={unit}
+                />
+              ))
+            )}
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
 function SourceViewer({
   extractionUnits,
   loading,
@@ -1940,6 +2073,15 @@ function sourceEvidenceViewPayload(jobs: ExtractionJobSummary[]): SourceEvidence
     return null;
   }
   return payload as SourceEvidenceViewPayload;
+}
+
+function kbIndexPlanPayload(jobs: ExtractionJobSummary[]): KBIndexPlanPayload | null {
+  const output = jobs.flatMap((job) => job.outputs ?? []).find((artifact) => artifact.artifact_type === "kb_index_plan");
+  const payload = output?.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  return payload as KBIndexPlanPayload;
 }
 
 function HelpTooltip({ text }: { text: string }) {

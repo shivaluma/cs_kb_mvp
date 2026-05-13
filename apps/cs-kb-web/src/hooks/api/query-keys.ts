@@ -19,4 +19,9 @@ export const queryKeys = {
   search: (query: string, filters: FilterState) => ["search", query, filters] as const,
   retrieval: (query: string, mode: string, filters: FilterState) =>
     ["retrieval", query, mode, filters] as const,
+  collections: ["kb-collections"] as const,
+  collection: (id: string) => ["kb-collection", id] as const,
+  issueRouter: (params: Record<string, string>) => ["issue-router", params] as const,
+  tools: (collection: string) => ["tool-links", collection] as const,
+  actionTemplates: (collection: string) => ["action-templates", collection] as const,
 };

@@ -171,6 +171,51 @@ export function LookupWorkspace({
                         ))}
                       </div>
                     ) : null}
+                    {groupedResults.issueRouter.length > 0 ? (
+                      <div className="space-y-2">
+                        <ResultGroupHeader count={groupedResults.issueRouter.length} title="Issue Router Match" />
+                        {groupedResults.issueRouter.map((match) => (
+                          <DocumentMatchButton
+                            key={match.chunk_id}
+                            match={match}
+                            onClick={() => onSelectDocumentMatch(match)}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => openFullSop(match)}
+                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                    {groupedResults.tool.length > 0 ? (
+                      <div className="space-y-2">
+                        <ResultGroupHeader count={groupedResults.tool.length} title="Tool Link" />
+                        {groupedResults.tool.map((match) => (
+                          <DocumentMatchButton
+                            key={match.chunk_id}
+                            match={match}
+                            onClick={() => onSelectDocumentMatch(match)}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => openFullSop(match)}
+                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                    {groupedResults.action.length > 0 ? (
+                      <div className="space-y-2">
+                        <ResultGroupHeader count={groupedResults.action.length} title="Action Template" />
+                        {groupedResults.action.map((match) => (
+                          <DocumentMatchButton
+                            key={match.chunk_id}
+                            match={match}
+                            onClick={() => onSelectDocumentMatch(match)}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => openFullSop(match)}
+                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
                     {(groupedResults.parent.length > 0 || listSource.length > 0) ? (
                       <div className="space-y-2">
                         <ResultGroupHeader count={groupedResults.parent.length + listSource.length} title="Parent SOP" />
@@ -379,6 +424,12 @@ function groupRetrievalResults(results: RetrievalResult[]) {
     (groups, result) => {
       if (isDocumentLayer(result)) {
         groups.parent.push(result);
+      } else if (isIssueRouterMatch(result)) {
+        groups.issueRouter.push(result);
+      } else if (isToolMatch(result)) {
+        groups.tool.push(result);
+      } else if (isActionTemplateMatch(result)) {
+        groups.action.push(result);
       } else if (isExactRuleMatch(result)) {
         groups.exact.push(result);
       } else {
@@ -388,6 +439,9 @@ function groupRetrievalResults(results: RetrievalResult[]) {
     },
     {
       exact: [] as RetrievalResult[],
+      issueRouter: [] as RetrievalResult[],
+      tool: [] as RetrievalResult[],
+      action: [] as RetrievalResult[],
       parent: [] as RetrievalResult[],
       related: [] as RetrievalResult[],
     },
@@ -398,6 +452,21 @@ function isDocumentLayer(match: RetrievalResult) {
   const scope = String(match.metadata.retrieval_scope ?? "unit");
   const unitType = String(match.metadata.unit_type ?? match.section);
   return scope === "document" || unitType === "full_sop";
+}
+
+function isIssueRouterMatch(match: RetrievalResult) {
+  const unitType = String(match.metadata.unit_type ?? match.section);
+  return ["issue_router_unit", "sop_reference", "vip_overlay_rule", "product_update_note"].includes(unitType);
+}
+
+function isToolMatch(match: RetrievalResult) {
+  const unitType = String(match.metadata.unit_type ?? match.section);
+  return unitType === "tool_link";
+}
+
+function isActionTemplateMatch(match: RetrievalResult) {
+  const unitType = String(match.metadata.unit_type ?? match.section);
+  return unitType === "quick_action_rule";
 }
 
 function isExactRuleMatch(match: RetrievalResult) {

@@ -1,4 +1,16 @@
-import { Bot, FileText, GitBranch, LayoutDashboard, MessageSquareText, Search, WandSparkles } from "lucide-react";
+import {
+  Bot,
+  Boxes,
+  FileText,
+  GitBranch,
+  GraduationCap,
+  LayoutDashboard,
+  MessageSquareText,
+  Route,
+  Search,
+  WandSparkles,
+  Wrench,
+} from "lucide-react";
 
 import type { FilterState, SynonymDraft, UploadState } from "@/types";
 
@@ -6,6 +18,10 @@ export const workspacePaths = {
   dashboard: "/",
   lookup: "/lookup",
   chat: "/chat",
+  issueRouter: "/issue-router",
+  tools: "/tools",
+  collections: "/collections",
+  onboarding: "/onboarding",
   documents: "/documents",
   relations: "/relations",
   synonyms: "/synonyms",
@@ -74,6 +90,34 @@ export const navItems = [
     label: "SOP Chat",
     icon: MessageSquareText,
     description: "Grounded assistant that answers only from published curated SOP units.",
+  },
+  {
+    id: "issueRouter",
+    path: workspacePaths.issueRouter,
+    label: "Issue Router",
+    icon: Route,
+    description: "Find the right SOP, quick action, and tools for an operational issue.",
+  },
+  {
+    id: "tools",
+    path: workspacePaths.tools,
+    label: "Tool Directory",
+    icon: Wrench,
+    description: "Approved CS working links, systems, forms, and their SOP usage.",
+  },
+  {
+    id: "collections",
+    path: workspacePaths.collections,
+    label: "Collections",
+    icon: Boxes,
+    description: "Operational groupings by audience, task, channel, owner, and risk.",
+  },
+  {
+    id: "onboarding",
+    path: workspacePaths.onboarding,
+    label: "CS Onboarding",
+    icon: GraduationCap,
+    description: "Start points for new CS agents: core rules, common tasks, and tools.",
   },
   {
     id: "documents",

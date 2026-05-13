@@ -57,6 +57,12 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ai/relations", h.proxyAI("/ai/v1/relations"))
 	mux.HandleFunc("POST /api/v1/ai/relations/{id}/assign", h.proxyAIRelationAction("assign"))
 	mux.HandleFunc("POST /api/v1/ai/relations/{id}/reject", h.proxyAIRelationAction("reject"))
+	mux.HandleFunc("GET /api/v1/ai/collections", h.proxyAI("/ai/v1/collections"))
+	mux.HandleFunc("GET /api/v1/ai/collections/{id}", h.proxyAICollectionDetail)
+	mux.HandleFunc("GET /api/v1/ai/issue-router", h.proxyAI("/ai/v1/issue-router"))
+	mux.HandleFunc("GET /api/v1/ai/tools", h.proxyAI("/ai/v1/tools"))
+	mux.HandleFunc("GET /api/v1/ai/action-templates", h.proxyAI("/ai/v1/action-templates"))
+	mux.HandleFunc("POST /api/v1/ai/kb-events", h.proxyAI("/ai/v1/kb-events"))
 	mux.HandleFunc("POST /api/v1/ai/documents/metadata-preview", h.proxyAIDocumentMetadataPreview)
 	mux.HandleFunc("POST /api/v1/ai/documents/upload", h.proxyAIDocumentUpload)
 	mux.HandleFunc("POST /api/v1/ai/documents/upload-async", h.proxyAIDocumentUploadAsync)
@@ -374,6 +380,10 @@ func (h *Handler) proxyAIDocumentChunks(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) proxyAIDocumentExtractionUnits(w http.ResponseWriter, r *http.Request) {
 	h.proxyAI("/ai/v1/documents/"+r.PathValue("id")+"/extraction-units")(w, r)
+}
+
+func (h *Handler) proxyAICollectionDetail(w http.ResponseWriter, r *http.Request) {
+	h.proxyAI("/ai/v1/collections/"+r.PathValue("id"))(w, r)
 }
 
 func (h *Handler) proxyAIExtractionUnitUpdate(w http.ResponseWriter, r *http.Request) {

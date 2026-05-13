@@ -107,6 +107,16 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         answer_text = answer.answer
         steps = answer.steps
         confidence = answer.confidence
+    unresolved_dependencies = repository.unresolved_relations_for_chunks([result.chunk_id for result in cited_results or retrieval.results])
+    if unresolved_dependencies:
+        warnings.append("matched_source_has_unresolved_dependency")
+        dependency_titles = list(dict.fromkeys([str(item.get("target_title") or "") for item in unresolved_dependencies if item.get("target_title")]))[:3]
+        if dependency_titles:
+            answer_text = (
+                f"{answer_text}\n\n"
+                "Lưu ý: Source có nhắc tới SOP/tài liệu liên quan chưa được link trong KB: "
+                f"{'; '.join(dependency_titles)}. Không dùng nội dung của dependency này cho câu trả lời cho tới khi relation được duyệt."
+            )
 
     response = GroundedChatResponse(
         question=request.question,

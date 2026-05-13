@@ -33,7 +33,12 @@ from app.schemas import (
     ExtractionUnitUpdateRequest,
     GroundedChatRequest,
     GroundedChatResponse,
+    ActionTemplateSummary,
+    IssueRouterItem,
     IndexSOPVersionRequest,
+    KBCollectionDetail,
+    KBCollectionSummary,
+    KBEventRequest,
     PublishVersionRequest,
     RejectRelationRequest,
     RetrievalFilters,
@@ -49,6 +54,7 @@ from app.schemas import (
     SynonymSuggestion,
     SynonymSuggestionAcceptRequest,
     SynonymSuggestionGenerateRequest,
+    ToolLinkSummary,
     VersionRawTextResponse,
     VersionSummary,
 )
@@ -697,6 +703,62 @@ def reject_relation(relation_id: str, payload: RejectRelationRequest | None = No
         return DocumentRelation(**repository.reject_document_relation(relation_id, data.actor, data.rejection_reason))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/ai/v1/collections", response_model=list[KBCollectionSummary])
+def list_collections() -> list[KBCollectionSummary]:
+    return [KBCollectionSummary(**row) for row in repository.list_kb_collections()]
+
+
+@app.get("/ai/v1/collections/{collection_id}", response_model=KBCollectionDetail)
+def get_collection(collection_id: str) -> KBCollectionDetail:
+    try:
+        return KBCollectionDetail(**repository.get_kb_collection(collection_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/ai/v1/issue-router", response_model=list[IssueRouterItem])
+def list_issue_router(
+    query: str = "",
+    audience: str = "",
+    vertical: str = "",
+    collection: str = "",
+    task_type: str = "",
+    risk_level: str = "",
+    limit: int = 50,
+) -> list[IssueRouterItem]:
+    return [
+        IssueRouterItem(**row)
+        for row in repository.list_issue_router(
+            query=query,
+            audience=split_query_values(audience),
+            vertical=split_query_values(vertical),
+            collection=collection,
+            task_type=split_query_values(task_type),
+            risk_level=risk_level,
+            limit=min(max(limit, 1), 100),
+        )
+    ]
+
+
+@app.get("/ai/v1/tools", response_model=list[ToolLinkSummary])
+def list_tools(status: str = "active", collection: str = "") -> list[ToolLinkSummary]:
+    return [ToolLinkSummary(**row) for row in repository.list_tool_links(status=status, collection=collection)]
+
+
+@app.get("/ai/v1/action-templates", response_model=list[ActionTemplateSummary])
+def list_action_templates(status: str = "approved", collection: str = "") -> list[ActionTemplateSummary]:
+    return [ActionTemplateSummary(**row) for row in repository.list_action_templates(status=status, collection=collection)]
+
+
+@app.post("/ai/v1/kb-events")
+def record_kb_event(payload: KBEventRequest) -> dict[str, str]:
+    return repository.record_kb_event(payload.action, payload.entity_type, payload.entity_id, payload.actor, payload.metadata)
+
+
+def split_query_values(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 @app.get("/ai/v1/documents/{document_id}/versions", response_model=list[VersionSummary])

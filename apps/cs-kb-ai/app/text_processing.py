@@ -57,6 +57,8 @@ def classify_document(filename: str, content_type: str, raw_text: str = "") -> D
     normalized = normalize_phrase(raw_text[:5000])
 
     if is_spreadsheet_file(lower_name, content_type):
+        if looks_like_kb_index_workbook(raw_text):
+            return DocumentClassification("kb_index_workbook", "excel_workbook", 0.94, True)
         return DocumentClassification("policy_table", "spreadsheet", 0.92, True)
     if is_image_file(lower_name, content_type):
         return DocumentClassification(
@@ -156,6 +158,31 @@ def looks_like_policy_rule(lower_name: str, normalized_text: str) -> bool:
         any(term in source for term in ["=>", "->", "|"]),
     ]
     return sum(1 for hit in signals if hit) >= 3
+
+
+def looks_like_kb_index_workbook(raw_text: str) -> bool:
+    sheet_names = {
+        normalize_phrase(match.group(1))
+        for match in re.finditer(r"^#\s+(.+?)\s*$", raw_text or "", flags=re.MULTILINE)
+    }
+    expected = {
+        "overal",
+        "quy dinh lam viec ccu pcu",
+        "quy dinh chung",
+        "driver rider",
+        "driver cleaner",
+        "rider",
+        "cleaner",
+        "mcu",
+        "link lam viec",
+        "vip",
+        "tinh nang san pham moi",
+    }
+    hits = sum(1 for name in sheet_names if name in expected)
+    has_router_terms = any(name in sheet_names for name in {"driver rider", "rider", "mcu", "cleaner"})
+    has_tool_sheet = "link lam viec" in sheet_names
+    has_sop_index = any(name in sheet_names for name in {"quy dinh chung", "quy dinh lam viec ccu pcu"})
+    return hits >= 4 and (has_tool_sheet or has_router_terms) and has_sop_index
 
 
 def extract_pdf_text(data: bytes) -> str:
@@ -849,6 +876,12 @@ def vietnamese_unit_title(unit_type: str) -> str:
         "operational_note": "Lưu ý vận hành",
         "security_note": "Lưu ý bảo mật",
         "related_document": "Tài liệu liên quan",
+        "issue_router_unit": "Dòng điều hướng vấn đề",
+        "quick_action_rule": "Hành động nhanh",
+        "sop_reference": "Tham chiếu SOP",
+        "tool_link": "Công cụ làm việc",
+        "vip_overlay_rule": "Quy định VIP",
+        "product_update_note": "Ghi chú tính năng mới",
     }
     return titles.get(unit_type, "Đơn vị trích xuất cần review")
 

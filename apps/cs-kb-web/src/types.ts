@@ -208,8 +208,14 @@ export type RelationType =
   | "routes_to"
   | "escalates_to"
   | "uses_macro"
+  | "uses_tool"
+  | "has_action_template"
+  | "has_case_reason"
   | "exception_of"
   | "supersedes"
+  | "child_of"
+  | "parent_of"
+  | "modifies"
   | "related_to"
   | "possible_conflict";
 
@@ -460,4 +466,84 @@ export type SynonymDraft = {
   domain: string;
   audience: string;
   terms: string;
+};
+
+export type KBCollectionSummary = {
+  id: string;
+  name: string;
+  slug: string;
+  collection_type: string;
+  description: string;
+  owner_team: string;
+  status: string;
+  rules: Record<string, unknown>;
+  item_count: number;
+  high_risk_count: number;
+  unresolved_relation_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KBCollectionDetail = KBCollectionSummary & {
+  items: Array<Record<string, unknown>>;
+  issue_router_units: IssueRouterItem[];
+  tools: ToolLinkSummary[];
+  action_templates: ActionTemplateSummary[];
+  relations: Array<Record<string, unknown>>;
+};
+
+export type IssueRouterItem = {
+  chunk_id: string;
+  document_id: string;
+  version_id: string;
+  title: string;
+  issue_text: string;
+  content: string;
+  audience: string[];
+  vertical: string[];
+  case_type: string[];
+  task_type: string[];
+  collection: string;
+  target_sop_title: string;
+  target_sop_id?: string | null;
+  tool_ids: string[];
+  relation_ids: string[];
+  relation_status: string;
+  risk_level: string;
+  review_status: string;
+  source_ref: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  score: number;
+};
+
+export type ToolLinkSummary = {
+  id: string;
+  name: string;
+  url: string;
+  tool_type: string;
+  description: string;
+  owner_team: string;
+  status: string;
+  used_by: Array<Record<string, unknown>>;
+  source_document_id?: string | null;
+  source_version_id?: string | null;
+  source_ref: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ActionTemplateSummary = {
+  id: string;
+  name: string;
+  action_type: string;
+  description: string;
+  fields: Record<string, unknown>;
+  copy_template: string;
+  related_tool_ids: string[];
+  source_unit_id?: string | null;
+  status: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
 };

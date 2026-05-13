@@ -16,6 +16,7 @@ DocumentType = Literal[
     "policy_table",
     "policy_rule",
     "workflow_diagram",
+    "kb_index_workbook",
     "asset_sop",
     "macro_script",
     "training_material",
@@ -30,8 +31,14 @@ RelationType = Literal[
     "routes_to",
     "escalates_to",
     "uses_macro",
+    "uses_tool",
+    "has_action_template",
+    "has_case_reason",
     "exception_of",
     "supersedes",
+    "child_of",
+    "parent_of",
+    "modifies",
     "related_to",
     "possible_conflict",
 ]
@@ -60,6 +67,12 @@ ExtractionUnitType = Literal[
     "compliance_note",
     "warning",
     "related_document",
+    "issue_router_unit",
+    "quick_action_rule",
+    "sop_reference",
+    "tool_link",
+    "vip_overlay_rule",
+    "product_update_note",
     "follow_up_rule",
     "text_section",
     "candidate_section",
@@ -902,8 +915,99 @@ class RetrievalFilters(BaseModel):
     category: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     case_reasons: list[str] = Field(default_factory=list)
+    collections: list[str] = Field(default_factory=list)
+    task_types: list[str] = Field(default_factory=list)
+    unit_types: list[str] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list)
     status: list[VersionStatus] = Field(default_factory=lambda: ["published"])
+
+
+class KBCollectionSummary(BaseModel):
+    id: str
+    name: str
+    slug: str
+    collection_type: str
+    description: str = ""
+    owner_team: str = ""
+    status: str = "active"
+    rules: dict[str, Any] = Field(default_factory=dict)
+    item_count: int = 0
+    high_risk_count: int = 0
+    unresolved_relation_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class KBCollectionDetail(KBCollectionSummary):
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    issue_router_units: list[dict[str, Any]] = Field(default_factory=list)
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    action_templates: list[dict[str, Any]] = Field(default_factory=list)
+    relations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class IssueRouterItem(BaseModel):
+    chunk_id: str
+    document_id: str
+    version_id: str
+    title: str
+    issue_text: str = ""
+    content: str = ""
+    audience: list[str] = Field(default_factory=list)
+    vertical: list[str] = Field(default_factory=list)
+    case_type: list[str] = Field(default_factory=list)
+    task_type: list[str] = Field(default_factory=list)
+    collection: str = ""
+    target_sop_title: str = ""
+    target_sop_id: str | None = None
+    tool_ids: list[str] = Field(default_factory=list)
+    relation_ids: list[str] = Field(default_factory=list)
+    relation_status: str = ""
+    risk_level: str = ""
+    review_status: str = ""
+    source_ref: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    score: float = 0.0
+
+
+class ToolLinkSummary(BaseModel):
+    id: str
+    name: str
+    url: str
+    tool_type: str = "other"
+    description: str = ""
+    owner_team: str = ""
+    status: str = "active"
+    used_by: list[dict[str, Any]] = Field(default_factory=list)
+    source_document_id: str | None = None
+    source_version_id: str | None = None
+    source_ref: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ActionTemplateSummary(BaseModel):
+    id: str
+    name: str
+    action_type: str
+    description: str = ""
+    fields: dict[str, Any] = Field(default_factory=dict)
+    copy_template: str = ""
+    related_tool_ids: list[str] = Field(default_factory=list)
+    source_unit_id: str | None = None
+    status: str = "draft"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class KBEventRequest(BaseModel):
+    action: str = Field(min_length=1, max_length=120)
+    entity_type: str = Field(default="kb_index", max_length=120)
+    entity_id: str | None = None
+    actor: str = "cs-ops-ui"
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class RetrievalRequest(BaseModel):

@@ -949,6 +949,92 @@ def normalize_rule_table_response_payload(parsed: Any) -> tuple[Any, list[str]]:
     return parsed, warnings
 
 
+def repair_spreadsheet_source_refs_from_raw_text(
+    units: list[dict[str, Any]],
+    filename: str,
+    raw_text: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
+        return units, []
+    line_to_sheet = raw_text_line_to_sheet(raw_text)
+    if not line_to_sheet:
+        return units, []
+
+    repaired_count = 0
+    repaired_units: list[dict[str, Any]] = []
+    for unit in units:
+        if not isinstance(unit, dict):
+            repaired_units.append(unit)
+            continue
+        unit_copy = dict(unit)
+        metadata = unit_copy.get("metadata") if isinstance(unit_copy.get("metadata"), dict) else {}
+        refs = unit_copy.get("source_refs") or metadata.get("source_refs") or []
+        repaired_refs: list[Any] = []
+        unit_repaired = False
+        for ref in refs:
+            if not isinstance(ref, dict):
+                repaired_refs.append(ref)
+                continue
+            ref_copy = dict(ref)
+            if not ref_copy.get("sheet"):
+                line_start = int_or_none(ref_copy.get("line_start"))
+                line_end = int_or_none(ref_copy.get("line_end")) or line_start
+                sheet = sheet_for_line(line_to_sheet, line_start)
+                if sheet:
+                    ref_copy["source_type"] = "excel"
+                    ref_copy["source_file"] = ref_copy.get("source_file") or filename
+                    ref_copy["sheet"] = sheet
+                    if line_start and not ref_copy.get("line_start"):
+                        ref_copy["line_start"] = line_start
+                    if line_end and not ref_copy.get("line_end"):
+                        ref_copy["line_end"] = line_end
+                    repaired_count += 1
+                    unit_repaired = True
+            repaired_refs.append(ref_copy)
+
+        if repaired_refs:
+            unit_copy["source_refs"] = repaired_refs
+            unit_copy["metadata"] = {
+                **metadata,
+                "source_refs": repaired_refs,
+                **({"source_ref_repaired_from": "raw_text_line_sheet_context"} if unit_repaired else {}),
+            }
+        repaired_units.append(unit_copy)
+
+    warnings = [f"source_refs_repaired_from_text_lines:{repaired_count}"] if repaired_count else []
+    return repaired_units, warnings
+
+
+def raw_text_line_to_sheet(raw_text: str) -> dict[int, str]:
+    line_to_sheet: dict[int, str] = {}
+    current_sheet = ""
+    for line_number, line in enumerate(raw_text.splitlines(), start=1):
+        match = re.match(r"^#\s+(.+?)\s*$", line)
+        if match:
+            current_sheet = match.group(1).strip()
+        if current_sheet:
+            line_to_sheet[line_number] = current_sheet
+    return line_to_sheet
+
+
+def sheet_for_line(line_to_sheet: dict[int, str], line_number: int | None) -> str:
+    if not line_number:
+        return ""
+    if line_number in line_to_sheet:
+        return line_to_sheet[line_number]
+    prior_lines = [candidate for candidate in line_to_sheet if candidate <= line_number]
+    if not prior_lines:
+        return ""
+    return line_to_sheet[max(prior_lines)]
+
+
+def int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def format_source_evidence_view(
     filename: str,
     raw_text: str,
@@ -1085,7 +1171,7 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         "- Trả JSON theo shape policy table ở trên: full_sop object + units array + warnings/metadata_suggestions/coverage_report. Không bỏ full_sop.\n"
         "- title là nhãn ngắn 4-10 từ để agent scan/search; không copy nguyên câu content vào title.\n"
         "- Phải có đúng 1 unit_type=\"full_sop\" với metadata.retrieval_scope=\"document\".\n"
-        "- Mỗi unit bắt buộc có source_refs. Excel cần source_refs[].sheet và row_start/row_end nếu rule đến từ dòng cụ thể. full_sop có thể dùng sheet/row range tổng.\n"
+        "- Mỗi unit bắt buộc có source_refs. Nếu file là Excel, tuyệt đối không dùng source_type=\"text\" cho source_refs; phải dùng source_type=\"excel\" và source_refs[].sheet. Thêm row_start/row_end nếu rule đến từ dòng cụ thể. full_sop có thể dùng sheet/row range tổng.\n"
         "- Tạo các unit nhỏ cho từng rule/action quan trọng với unit_type như routing_rule, validation_rule, handling_rule, warning, macro_script.\n"
         "- Nếu source là policy matrix/table, mỗi dòng logic của bảng phải thành một policy_rule hoặc exception_rule atomic unit. Không tách ví dụ thành unit riêng; attach examples vào rule cha gần nhất.\n"
         "- Với bảng quy định làm tròn/threshold, trích metadata rounding_threshold, rounding_directions, rounding_applies, service, case_type, tags, aliases nếu có căn cứ trong source.\n"
@@ -1138,16 +1224,21 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         payload_model = ExtractedUnitsPayload.model_validate(normalized_payload)
         normalized = [normalize_unit(unit.model_dump()) for unit in payload_model.units]
         usable = [unit for unit in normalized if unit["content"]]
+        usable, source_ref_repair_warnings = repair_spreadsheet_source_refs_from_raw_text(usable, filename, raw_text)
         if not any(unit["unit_type"] == "full_sop" for unit in usable):
             output_warnings = ["openrouter_missing_full_sop_unit"]
             error = "openrouter_missing_full_sop_unit"
             return [], output_warnings
         missing_refs = source_ref_validation_errors(usable, filename)
         if missing_refs:
-            output_warnings = missing_refs
+            output_warnings = [*source_ref_repair_warnings, *missing_refs]
             error = ",".join(missing_refs)
-            return [], missing_refs
-        warnings = ["openrouter_rule_table_extraction_used", *[f"model_warning:{warning}" for warning in model_warnings]]
+            return [], output_warnings
+        warnings = [
+            "openrouter_rule_table_extraction_used",
+            *source_ref_repair_warnings,
+            *[f"model_warning:{warning}" for warning in model_warnings],
+        ]
         if repaired:
             warnings.append("openrouter_json_repair_used")
         output_warnings = warnings
@@ -1174,7 +1265,10 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
                 "normalized_unit_types": sorted({str(unit.get("unit_type") or "") for unit in normalized if isinstance(unit, dict)}),
                 "parsed_response": json_preview(parsed) if parsed is not None else None,
                 "raw_response": ai_response_preview(content),
-                "repairs": {"json_repair_used": repaired},
+                "repairs": {
+                    "json_repair_used": repaired,
+                    "source_ref_repairs": [warning for warning in output_warnings if warning.startswith("source_refs_repaired_from_text_lines")],
+                },
                 "status": status,
                 "warnings": output_warnings[:40],
             }
@@ -1251,13 +1345,17 @@ def refine_extracted_units(
         payload_model = ExtractionRefinementPayload.model_validate(parsed)
         normalized = [normalize_unit(unit.model_dump()) for unit in payload_model.units]
         usable = [unit for unit in normalized if unit["content"]]
+        usable, source_ref_repair_warnings = repair_spreadsheet_source_refs_from_raw_text(usable, filename, raw_text)
         if not any(unit["unit_type"] == "full_sop" for unit in usable):
             return [], {"llm_refine_status": "rejected", "reason": "missing_full_sop"}, ["openrouter_refine_missing_full_sop"]
         missing_refs = source_ref_validation_errors(usable, filename)
         if missing_refs:
-            return [], {"llm_refine_status": "rejected", "reason": "missing_source_refs", "errors": missing_refs}, missing_refs
+            return [], {"llm_refine_status": "rejected", "reason": "missing_source_refs", "errors": missing_refs}, [
+                *source_ref_repair_warnings,
+                *missing_refs,
+            ]
         report = {"llm_refine_status": "completed", **payload_model.refinement_report}
-        warnings = ["openrouter_refine_used", *payload_model.warnings]
+        warnings = ["openrouter_refine_used", *source_ref_repair_warnings, *payload_model.warnings]
         if repaired:
             warnings.append("openrouter_refine_json_repair_used")
         return usable, report, warnings

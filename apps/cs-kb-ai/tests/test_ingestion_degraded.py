@@ -95,6 +95,49 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(payload.units[0].metadata["metadata_suggestions"]["sub_type"], "financial_threshold_matrix")
         self.assertEqual(payload.units[1].unit_type, "policy_rule")
 
+    def test_excel_text_line_source_refs_are_repaired_to_sheet_context(self) -> None:
+        raw_text = "\n".join(
+            [
+                "# Hotline(chưa áp dụng)",
+                "",
+                "## Kênh liên hệ: Hotline 1900232345",
+                "Ngữ cảnh: Quy định xác minh tài khoản",
+                "",
+                "# Quy trình xác minh từ 02072025",
+                "",
+                "## Kênh: Call In App, Non-voice In App, Chat in app, chat Social",
+                "Link: https://example.test/cia-chat.pdf",
+            ]
+        )
+        units = [
+            {
+                "unit_type": "full_sop",
+                "title": "Quy định xác minh tài khoản",
+                "content": "Workbook xác minh tài khoản.",
+                "metadata": {},
+                "source_refs": [{"source_type": "text", "source_file": "rules.xlsx", "line_start": 1, "line_end": 9}],
+            },
+            {
+                "unit_type": "related_document",
+                "title": "Quy trình xác minh từ 02072025",
+                "content": "Link tài liệu liên quan.",
+                "metadata": {},
+                "source_refs": [{"source_type": "text", "source_file": "rules.xlsx", "line_start": 8, "line_end": 9}],
+            },
+        ]
+
+        repaired, repair_warnings = openrouter.repair_spreadsheet_source_refs_from_raw_text(
+            units,
+            "rules.xlsx",
+            raw_text,
+        )
+
+        self.assertEqual(repair_warnings, ["source_refs_repaired_from_text_lines:2"])
+        self.assertEqual(repaired[0]["source_refs"][0]["source_type"], "excel")
+        self.assertEqual(repaired[0]["source_refs"][0]["sheet"], "Hotline(chưa áp dụng)")
+        self.assertEqual(repaired[1]["source_refs"][0]["sheet"], "Quy trình xác minh từ 02072025")
+        self.assertEqual(openrouter.source_ref_validation_errors(repaired, "rules.xlsx"), [])
+
     def test_ai_breakdown_artifact_is_persisted_for_structuring_attempt(self) -> None:
         def fake_rule_extractor(_filename: str, _raw_text: str):
             openrouter.record_ai_breakdown(
@@ -282,6 +325,49 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(enrichment["extraction_status"], "structured")
         self.assertGreaterEqual(len(related_units), 2)
         self.assertIn("Source URL:", related_units[0]["content"])
+
+    def test_cs_daily_use_workbook_creates_kb_index_plan_and_candidates(self) -> None:
+        ingestion.format_source_evidence_view = lambda **_kwargs: ({}, [], "")
+        data = cs_daily_use_workbook_bytes()
+
+        _raw, _digest, chunks, warnings, enrichment = ingestion.prepare_document_version(
+            filename="CS daily use 2026.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            data=data,
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        self.assertEqual(enrichment["document_type"], "kb_index_workbook")
+        self.assertEqual(enrichment["source_type"], "excel_workbook")
+        self.assertEqual(enrichment["extraction_status"], "structured")
+        self.assertIn("kb_index_plan_extraction_used", warnings)
+
+        plan = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "kb_index_plan")
+        self.assertEqual(plan["stage"], "plan")
+        self.assertGreaterEqual(plan["payload"]["summary"]["collection_count"], 5)
+        self.assertGreaterEqual(plan["payload"]["summary"]["issue_router_unit_count"], 2)
+        self.assertGreaterEqual(plan["payload"]["summary"]["tool_link_count"], 1)
+        self.assertGreaterEqual(plan["payload"]["summary"]["unresolved_target_count"], 1)
+
+        unit_types = {chunk["metadata"].get("unit_type") for chunk in chunks}
+        self.assertIn("issue_router_unit", unit_types)
+        self.assertIn("sop_reference", unit_types)
+        self.assertIn("tool_link", unit_types)
+        self.assertIn("vip_overlay_rule", unit_types)
+        self.assertIn("product_update_note", unit_types)
+        self.assertIn("quick_action_rule", unit_types)
+
+        router = next(chunk for chunk in chunks if chunk["metadata"].get("unit_type") == "issue_router_unit")
+        self.assertEqual(router["metadata"]["source_refs"][0]["source_type"], "excel")
+        self.assertEqual(router["metadata"]["source_refs"][0]["sheet"], "Driver + Rider")
+        self.assertEqual(router["metadata"]["source_refs"][0]["row_start"], 2)
+        self.assertEqual(router["metadata"]["collection_slug"], "trip-order-issues")
+        self.assertIn("requires", {relation["relation_type"] for relation in router["metadata"]["relations"]})
+
+        tool = next(chunk for chunk in chunks if chunk["metadata"].get("unit_type") == "tool_link")
+        self.assertEqual(tool["metadata"]["url"], "https://tools.example.com/admin")
+        self.assertNotEqual(tool["metadata"].get("unit_type"), "sop_reference")
+        self.assertEqual(tool["metadata"]["source_refs"][0]["sheet"], "Link làm việc")
 
     def test_degraded_policy_text_does_not_duplicate_warning_clone_content(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
@@ -1126,6 +1212,74 @@ def workbook_with_hyperlinks_bytes() -> bytes:
     worksheet.append(["Hotline 1900232345", "Link"])
     worksheet["B3"].hyperlink = "https://example.com/hotline.xlsx"
     worksheet["B3"].hyperlink.display = "Xác minh tài khoản kênh hotline.xlsx"
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def cs_daily_use_workbook_bytes() -> bytes:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+
+    sheets = {
+        "Overal": [
+            ["Quy định/quy trình xử lý", "Số lượng"],
+            ["Quy định làm việc CCU,PCU", "2"],
+            ["Link làm việc", "1"],
+        ],
+        "Quy định làm việc CCU,PCU": [
+            ["STT", "Tên quy trình/quy định", "Nội dung", "Note"],
+            ["1", "Quy định sử dụng tasklist", "CS tạo tasklist theo đúng quy định", ""],
+        ],
+        "Quy định chung": [
+            ["STT", "Vấn đề", "SOP"],
+            ["1", "Xác minh tài khoản", "Quy định xác minh tài khoản"],
+        ],
+        "Driver + Rider": [
+            ["STT", "Vấn đề", "Service", "SOP", "File làm việc liên quan", "Note"],
+            ["1", "Tạo tasklist Tech khi app lỗi", "beFood", "Quy định sử dụng tasklist", "Link", "CS tạo tasklist và ping Tech"],
+        ],
+        "Driver+Cleaner": [
+            ["STT", "Vấn đề", "Service", "SOP", "File làm việc liên quan", "Note"],
+            ["1", "Chuyển queue khi cần cleaner xử lý", "Delivery", "Quy trình chuyển queue Cleaner", "Link", ""],
+        ],
+        "Rider": [
+            ["Vấn đề", "Service", "SOP", "File làm việc liên quan", "Note"],
+            ["Khách hỏi hoàn tiền", "Payment", "Quy định hoàn tiền", "Link", ""],
+        ],
+        "Cleaner": [
+            ["Vấn đề", "Service", "SOP", "File làm việc liên quan", "Note"],
+            ["Cleaner báo không nhận job", "Delivery", "Quy trình Cleaner", "Link", ""],
+        ],
+        "MCU": [
+            ["Vấn đề", "SOP"],
+            ["Merchant cần cập nhật menu", "Quy trình MCU cập nhật menu"],
+        ],
+        "Link làm việc": [
+            ["Nhóm", "Tên file/ hệ thống", "Link", "Note"],
+            ["Admin", "CS Admin Tool", "https://tools.example.com/admin", "Mở admin để kiểm tra tài khoản"],
+        ],
+        "VIP": [
+            ["Chủ đề", "Chi tiết vấn đề", "Điểm khác với KH normal", "Link SOP"],
+            ["VIP refund", "KH VIP yêu cầu hoàn tiền", "Cần lead review", "Quy định VIP refund"],
+        ],
+        "Tính năng sản phẩm mới": [
+            ["Đối tượng", "Tính năng sản phẩm mới", "Nội dung chi tiết"],
+            ["Rider", "Tính năng đặt món mới", "CS tham khảo SOP launch feature"],
+        ],
+    }
+
+    for sheet_name, rows in sheets.items():
+        worksheet = workbook.create_sheet(sheet_name)
+        for row in rows:
+            worksheet.append(row)
+    worksheet = workbook["Driver + Rider"]
+    worksheet["E2"].hyperlink = "https://docs.example.com/tasklist"
+    worksheet["E2"].hyperlink.display = "Quy định sử dụng tasklist"
+    worksheet = workbook["Rider"]
+    worksheet["D2"].hyperlink = "https://docs.example.com/refund"
+    worksheet["D2"].hyperlink.display = "Quy định hoàn tiền"
+
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

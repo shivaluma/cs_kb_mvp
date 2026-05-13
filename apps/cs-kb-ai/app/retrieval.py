@@ -201,19 +201,32 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
         "decision_point",
         "workflow_step",
         "macro_script",
+        "issue_router_unit",
+        "quick_action_rule",
+        "sop_reference",
+        "tool_link",
+        "vip_overlay_rule",
+        "product_update_note",
         "security_note",
         "compliance_note",
         "warning",
     }
     if unit_type in action_unit_types and metadata_overlap:
         boost += 0.025
+        if unit_type in {"issue_router_unit", "quick_action_rule", "tool_link"}:
+            boost += 0.08
 
     if unit_type in action_unit_types and text_overlap:
         coverage = text_overlap / max(1, len(query_tokens))
         boost += min(0.18, coverage * 0.12)
+        if unit_type == "issue_router_unit":
+            boost += min(0.16, coverage * 0.14)
 
     if normalized_query and normalized_query in text:
         boost += 0.18
+
+    if unit_type == "sop_reference" and metadata_overlap:
+        boost += 0.04
 
     if has_prohibition_intent(normalized_query) and has_prohibition_answer(text):
         boost += 0.28
