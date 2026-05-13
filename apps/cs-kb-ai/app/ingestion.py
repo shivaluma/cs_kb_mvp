@@ -9,6 +9,7 @@ from app.embedding import embed_text
 from app.openrouter import (
     extract_rule_table_units,
     extract_workflow_units,
+    extract_workflow_units_v3,
     extract_workflow_units_v2,
     finish_ai_breakdown_capture,
     format_source_evidence_view,
@@ -42,6 +43,8 @@ from app.visual_layout import (
     iou_bbox,
     union_bboxes,
 )
+from app.workflow_v3 import extract_step_code as workflow_v3_extract_step_code
+from app.workflow_v3 import visible_step_codes_from_sources as workflow_v3_visible_step_codes_from_sources
 
 
 CONDITION_ACTION_SIGNALS = [
@@ -260,6 +263,21 @@ def prepare_document_version(
                     error=ai_error,
                 )
             )
+        workflow_v3_artifacts = raw_context.get("workflow_v3_artifacts") if isinstance(raw_context.get("workflow_v3_artifacts"), dict) else {}
+        if workflow_v3_artifacts:
+            artifact_status = "failed" if ai_error and str(ai_error).startswith("ai_workflow_structuring_failed:workflow_v3") else "completed"
+            for artifact_type in ("workflow_canvas_transcription", "workflow_graph_draft", "workflow_fidelity_report"):
+                payload = workflow_v3_artifacts.get(artifact_type)
+                if payload:
+                    pipeline_artifacts.append(
+                        stage_artifact(
+                            "workflow_semantic_refine",
+                            artifact_type,
+                            payload,
+                            status=artifact_status,
+                            error=ai_error if artifact_status == "failed" else "",
+                        )
+                    )
 
     if not source_chunks and classification.document_type not in AI_STRUCTURED_DOCUMENT_TYPES:
         source_chunks = mark_structured_chunks(chunk_text(raw_text))
@@ -447,17 +465,32 @@ def try_ai_structuring(
             if not page_images:
                 return [], warnings, "ai_workflow_structuring_failed:pdf_vision_render_required"
             semantic_refinement = raw_context.get("workflow_semantic_refinement") if isinstance(raw_context.get("workflow_semantic_refinement"), dict) else {}
-            v2_units, v2_warnings = extract_workflow_units_v2(filename, raw_text, page_images=page_images, visual_context=None)
+            visual_context = compact_visual_context(visual_layout) if visual_layout else None
+
+            v3_units, v3_warnings, v3_artifacts = extract_workflow_units_v3(filename, raw_text, page_images=page_images, visual_context=visual_context)
+            if v3_artifacts:
+                raw_context["workflow_v3_artifacts"] = v3_artifacts
+            warnings.extend(v3_warnings)
+            v3_chunks = workflow_units_to_chunks(v3_units, raw_text, filename) if v3_units else []
+            if v3_chunks:
+                v3_quality_error = workflow_structuring_quality_error(v3_chunks, v3_warnings)
+                v3_fidelity_error = workflow_graph_fidelity_quality_error(v3_chunks, raw_text, visual_context)
+                if not v3_quality_error and not v3_fidelity_error:
+                    warnings.append("workflow_extraction_flow:v3_graph_primary")
+                    return mark_structured_chunks(v3_chunks), warnings, ""
+                warnings.append(f"workflow_v3_quality_rejected:{v3_quality_error or v3_fidelity_error}")
+
+            v2_units, v2_warnings = extract_workflow_units_v2(filename, raw_text, page_images=page_images, visual_context=visual_context)
             warnings.extend(v2_warnings)
             v2_chunks = workflow_units_to_chunks(v2_units, raw_text, filename) if v2_units else []
             if v2_chunks:
                 v2_quality_error = workflow_structuring_quality_error(v2_chunks, v2_warnings)
-                if not v2_quality_error:
+                v2_fidelity_error = workflow_graph_fidelity_quality_error(v2_chunks, raw_text, visual_context)
+                if not v2_quality_error and not v2_fidelity_error:
                     warnings.append("workflow_extraction_flow:v2_vision_primary")
                     return mark_structured_chunks(v2_chunks), warnings, ""
-                warnings.append(f"workflow_v2_quality_rejected:{v2_quality_error}")
+                warnings.append(f"workflow_v2_quality_rejected:{v2_quality_error or v2_fidelity_error}")
 
-            visual_context = compact_visual_context(visual_layout) if visual_layout else None
             if visual_context:
                 warnings.append("visual_graph_context_supplied_to_llm")
             llm_units, llm_warnings = extract_workflow_units(filename, raw_text, page_images=page_images, visual_context=visual_context)
@@ -474,13 +507,14 @@ def try_ai_structuring(
                     return mark_structured_chunks(semantic_chunks), warnings, ""
                 return [], warnings, f"ai_workflow_structuring_failed:{','.join(llm_warnings)}"
             quality_error = workflow_structuring_quality_error(chunks, llm_warnings)
-            if quality_error:
+            fidelity_error = workflow_graph_fidelity_quality_error(chunks, raw_text, visual_context)
+            if quality_error or fidelity_error:
                 semantic_chunks = semantic_workflow_structured_chunks(filename, raw_text, classification, semantic_refinement)
                 if semantic_chunks:
                     warnings.append("semantic_workflow_structuring_used_after_ai_quality_reject")
-                    warnings.append(f"ai_workflow_structuring_rejected:{quality_error}")
+                    warnings.append(f"ai_workflow_structuring_rejected:{quality_error or fidelity_error}")
                     return mark_structured_chunks(semantic_chunks), warnings, ""
-                return [], warnings, f"ai_workflow_structuring_failed:{quality_error}"
+                return [], warnings, f"ai_workflow_structuring_failed:{quality_error or fidelity_error}"
             return mark_structured_chunks(chunks), warnings, ""
     except Exception as exc:
         return [], warnings, f"ai_structuring_exception:{sanitize_ai_error(exc)}"
@@ -1583,6 +1617,88 @@ def workflow_structuring_quality_error(chunks: list[Any], warnings: list[str]) -
         return "missing_atomic_workflow_units"
 
     return ""
+
+
+def workflow_graph_fidelity_quality_error(chunks: list[Any], raw_text: str, visual_context: dict[str, Any] | None) -> str:
+    graph = workflow_graph_from_chunks(chunks)
+    if not graph:
+        return "missing_workflow_graph"
+    blockers = graph.get("validation_errors") if isinstance(graph.get("validation_errors"), list) else []
+    v3_blockers = [str(blocker) for blocker in blockers if str(blocker).startswith("workflow_v3_")]
+    if v3_blockers:
+        return ",".join(v3_blockers[:6])
+
+    visible_codes = workflow_v3_visible_step_codes_from_sources(raw_text, {}, visual_context or {})
+    if len(visible_codes) < 4:
+        return ""
+    covered_codes = workflow_graph_covered_step_codes(graph)
+    missing_codes = [code for code in visible_codes if code not in covered_codes]
+    if missing_codes:
+        return f"workflow_graph_missing_visible_steps:{','.join(missing_codes[:12])}"
+    node_count = len(graph.get("nodes", [])) if isinstance(graph.get("nodes"), list) else 0
+    if node_count < max(3, int(len(visible_codes) * 0.55)):
+        return "workflow_graph_summary_like_too_few_nodes"
+    question_codes = visible_question_step_codes(raw_text, visual_context or {})
+    decision_codes = workflow_graph_decision_step_codes(graph)
+    missing_decision_codes = [code for code in question_codes if code not in decision_codes]
+    if missing_decision_codes:
+        return f"workflow_graph_question_steps_not_decisions:{','.join(missing_decision_codes[:12])}"
+    return ""
+
+
+def workflow_graph_from_chunks(chunks: list[Any]) -> dict[str, Any]:
+    for chunk in chunks:
+        metadata = getattr(chunk, "metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            continue
+        graph = metadata.get("workflow_graph")
+        if isinstance(graph, dict):
+            return graph
+    return {}
+
+
+def workflow_graph_covered_step_codes(graph: dict[str, Any]) -> set[str]:
+    codes: set[str] = set()
+    for node in graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else []:
+        if not isinstance(node, dict):
+            continue
+        code = str(node.get("step_code") or workflow_v3_extract_step_code(" ".join(str(node.get(key) or "") for key in ("title", "question", "content"))))
+        if code:
+            codes.add(code)
+    for annotation in graph.get("annotations", []) if isinstance(graph.get("annotations"), list) else []:
+        if isinstance(annotation, dict):
+            code = workflow_v3_extract_step_code(str(annotation.get("content") or annotation.get("title") or ""))
+            if code:
+                codes.add(code)
+    return codes
+
+
+def workflow_graph_decision_step_codes(graph: dict[str, Any]) -> set[str]:
+    codes: set[str] = set()
+    for node in graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else []:
+        if not isinstance(node, dict):
+            continue
+        node_text = " ".join(str(node.get(key) or "") for key in ("title", "question", "content"))
+        node_type = str(node.get("type") or "")
+        if node_type == "decision" or node.get("question"):
+            code = str(node.get("step_code") or workflow_v3_extract_step_code(node_text))
+            if code:
+                codes.add(code)
+    return codes
+
+
+def visible_question_step_codes(raw_text: str, visual_context: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    for page in visual_context.get("pages", []) if isinstance(visual_context.get("pages"), list) else []:
+        for node in page.get("nodes", []) if isinstance(page.get("nodes"), list) else []:
+            if isinstance(node, dict):
+                text = str(node.get("title") or node.get("text") or "")
+                node_type = str(node.get("type") or node.get("node_type") or node.get("semantic_node_type") or "").lower()
+                if node_type == "decision":
+                    code = workflow_v3_extract_step_code(text)
+                    if code:
+                        codes.append(code)
+    return list(dict.fromkeys(codes))
 
 
 def semantic_workflow_structured_chunks(filename: str, raw_text: str, classification: Any, semantic_refinement: dict[str, Any]) -> list[Any]:

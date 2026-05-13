@@ -14,6 +14,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
     def setUp(self) -> None:
         self.original_rule_extractor = ingestion.extract_rule_table_units
         self.original_workflow_extractor = ingestion.extract_workflow_units
+        self.original_workflow_v3_extractor = ingestion.extract_workflow_units_v3
         self.original_workflow_v2_extractor = ingestion.extract_workflow_units_v2
         self.original_renderer = ingestion.render_pdf_pages_as_data_urls
         self.original_refiner = ingestion.refine_extracted_units
@@ -22,6 +23,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
     def tearDown(self) -> None:
         ingestion.extract_rule_table_units = self.original_rule_extractor
         ingestion.extract_workflow_units = self.original_workflow_extractor
+        ingestion.extract_workflow_units_v3 = self.original_workflow_v3_extractor
         ingestion.extract_workflow_units_v2 = self.original_workflow_v2_extractor
         ingestion.render_pdf_pages_as_data_urls = self.original_renderer
         ingestion.refine_extracted_units = self.original_refiner
@@ -780,9 +782,11 @@ class IngestionDegradedDraftTest(unittest.TestCase):
 
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
         original_workflow_extractor = ingestion.extract_workflow_units
+        original_workflow_v3_extractor = ingestion.extract_workflow_units_v3
         original_workflow_v2_extractor = ingestion.extract_workflow_units_v2
         original_render_pdf = ingestion.render_pdf_pages_as_data_urls
         ingestion.extract_workflow_units = fake_workflow_extractor
+        ingestion.extract_workflow_units_v3 = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_disabled"], {})
         ingestion.extract_workflow_units_v2 = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_disabled"])
         ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], ["pdf_vision_pages_rendered:1"])
         try:
@@ -809,6 +813,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
             )
         finally:
             ingestion.extract_workflow_units = original_workflow_extractor
+            ingestion.extract_workflow_units_v3 = original_workflow_v3_extractor
             ingestion.extract_workflow_units_v2 = original_workflow_v2_extractor
             ingestion.render_pdf_pages_as_data_urls = original_render_pdf
 
@@ -817,7 +822,81 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertIsInstance(captured["visual_context"], dict)
         self.assertEqual(captured["visual_context"]["summary"]["shape_candidate_count"], 1)
 
-    def test_workflow_v2_vision_primary_is_used_before_legacy_flow(self) -> None:
+    def test_workflow_v3_graph_primary_is_used_before_v2_and_legacy_flow(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_v3_extractor(_filename: str, _raw_text: str, page_images=None, visual_context=None):
+            captured["page_images"] = page_images
+            captured["visual_context"] = visual_context
+            return (
+                [
+                    {
+                        "unit_type": "full_sop",
+                        "title": "Quy trình theo dõi case hình ảnh",
+                        "content": "CS theo dõi case hình ảnh liên quan món ăn và chuyển MSC theo SLA.",
+                        "confidence": 0.82,
+                        "metadata": {"retrieval_scope": "document"},
+                        "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1}],
+                    },
+                    {
+                        "unit_type": "workflow_graph",
+                        "title": "Quy trình theo dõi case hình ảnh",
+                        "content": "Workflow graph có node và edge.",
+                        "confidence": 0.72,
+                        "metadata": {
+                            "retrieval_scope": "graph",
+                            "workflow_graph": {
+                                "workflow_id": "wf",
+                                "title": "Quy trình theo dõi case hình ảnh",
+                                "start_node_id": "start",
+                                "nodes": [{"id": "start", "type": "start", "title": "Start"}],
+                                "edges": [],
+                                "graph_confidence": 0.72,
+                            },
+                        },
+                        "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1}],
+                    },
+                    {
+                        "unit_type": "workflow_step",
+                        "title": "Hướng dẫn cung cấp hình ảnh",
+                        "content": "CS hướng dẫn KH cung cấp hình ảnh theo thời gian quy định.",
+                        "confidence": 0.82,
+                        "metadata": {"retrieval_scope": "unit"},
+                        "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1}],
+                    },
+                ],
+                ["openrouter_workflow_v3_extraction_used"],
+                {
+                    "workflow_fidelity_report": {
+                        "strategy": "workflow_v3_graph_primary",
+                        "fidelity_score": 0.82,
+                        "blockers": [],
+                    }
+                },
+            )
+
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        ingestion.extract_workflow_units_v3 = fake_v3_extractor
+        ingestion.extract_workflow_units_v2 = lambda *_args, **_kwargs: self.fail("v2 workflow extractor should not run after v3 success")
+        ingestion.extract_workflow_units = lambda *_args, **_kwargs: self.fail("legacy workflow extractor should not run after v3 success")
+        ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], ["pdf_vision_pages_rendered:1"])
+
+        chunks, warnings, ai_error = ingestion.try_ai_structuring(
+            filename="workflow.pdf",
+            content_type="application/pdf",
+            data=b"%PDF-1.4",
+            raw_text="Quy trình có diagram",
+            classification=classification,
+            visual_layout={"summary": {"shape_candidate_count": 99}},
+        )
+
+        self.assertEqual(ai_error, "")
+        self.assertIn("workflow_extraction_flow:v3_graph_primary", warnings)
+        self.assertIsInstance(captured["visual_context"], dict)
+        self.assertGreaterEqual(len(chunks), 3)
+        self.assertFalse(any(chunk.metadata.get("extraction_status") == "degraded" for chunk in chunks))
+
+    def test_workflow_v2_vision_primary_is_used_after_v3_failure_before_legacy_flow(self) -> None:
         captured: dict[str, object] = {}
 
         def fake_v2_extractor(_filename: str, _raw_text: str, page_images=None, visual_context=None):
@@ -864,6 +943,11 @@ class IngestionDegradedDraftTest(unittest.TestCase):
             )
 
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        ingestion.extract_workflow_units_v3 = lambda _filename, _raw_text, page_images=None, visual_context=None: (
+            [],
+            ["workflow_v3_fidelity_failed:workflow_v3_missing_visible_steps:1"],
+            {"workflow_fidelity_report": {"blockers": ["workflow_v3_missing_visible_steps:1"]}},
+        )
         ingestion.extract_workflow_units_v2 = fake_v2_extractor
         ingestion.extract_workflow_units = lambda *_args, **_kwargs: self.fail("legacy workflow extractor should not run after v2 success")
         ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], ["pdf_vision_pages_rendered:1"])
@@ -879,7 +963,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
 
         self.assertEqual(ai_error, "")
         self.assertIn("workflow_extraction_flow:v2_vision_primary", warnings)
-        self.assertEqual(captured["visual_context"], None)
+        self.assertIsInstance(captured["visual_context"], dict)
         self.assertGreaterEqual(len(chunks), 3)
         self.assertFalse(any(chunk.metadata.get("extraction_status") == "degraded" for chunk in chunks))
 

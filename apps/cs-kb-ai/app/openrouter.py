@@ -21,6 +21,10 @@ from app.schemas import (
     SourceRef,
     WorkflowExtractionPayload,
 )
+from app.workflow_v3 import (
+    compile_workflow_v3_payload,
+    workflow_v3_quality_error_from_report,
+)
 
 
 MAX_AI_BREAKDOWN_PROMPT_CHARS = 24000
@@ -904,6 +908,160 @@ def workflow_atomic_units_from_graph(payload: WorkflowExtractionPayload, filenam
             )
         )
     return units[:80]
+
+
+def extract_workflow_units_v3(
+    filename: str,
+    raw_text: str,
+    page_images: list[str] | None = None,
+    visual_context: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    if not enabled():
+        record_ai_breakdown({"filename": filename, "flow": "workflow_v3_graph_primary", "status": "skipped", "skip_reason": "openrouter_disabled"})
+        return [], ["openrouter_disabled"], {}
+    if not page_images:
+        record_ai_breakdown({"filename": filename, "flow": "workflow_v3_graph_primary", "status": "skipped", "skip_reason": "workflow_v3_vision_images_required"})
+        return [], ["workflow_v3_vision_images_required"], {}
+
+    extraction_prompt = (
+        "You are extracting a CS operational workflow diagram as graph evidence.\n"
+        "Use the attached page image as source of truth. OCR text and detector JSON are hints only.\n\n"
+        "DO NOT summarize the workflow as prose. First transcribe the canvas into visible nodes, arrows, notes, lanes, and references.\n"
+        "Preserve every numbered visible step. Preserve every decision diamond/question. Preserve every Yes/No branch explicitly.\n"
+        "Do not demote decision branches into notes. Notes such as (*), (**), Lưu ý, references, SLA, audit, and script blocks must be annotations, not workflow actions.\n"
+        "Every edge must come from a visible arrow/connector/branch label. If direction or endpoint is uncertain, mark that edge uncertain and include reason.\n"
+        "This must work for arbitrary workflow diagram layouts, not only one sample: use visible step codes, shape/arrow evidence, labels, and bboxes rather than template assumptions.\n\n"
+        "Return ONLY JSON object with this shape:\n"
+        "{\n"
+        "  \"document_metadata\": {\"title\":\"\", \"effective_from\":\"\", \"actors\":[], \"audience\":[], \"risk_level\":\"high\"},\n"
+        "  \"canvas\": {\n"
+        "    \"pages\": [\n"
+        "      {\n"
+        "        \"page\": 1,\n"
+        "        \"image_size\": [],\n"
+        "        \"lanes\": [{\"id\":\"\", \"title\":\"\", \"bbox\":[]}],\n"
+        "        \"nodes\": [{\"id\":\"\", \"step_code\":\"\", \"text\":\"\", \"node_type\":\"start|action|decision|end|annotation\", \"shape_kind\":\"oval|rectangle|diamond|note|other\", \"lane\":\"\", \"bbox\":[], \"terminal_state\":\"\"}],\n"
+        "        \"edges\": [{\"from_step_code\":\"\", \"to_step_code\":\"\", \"from_node\":\"\", \"to_node\":\"\", \"condition\":\"yes|no|next|timeout|escalation|fallback|handoff|return|retry\", \"confidence\":0.0, \"uncertain\":false, \"reason\":\"\", \"bbox\":[]}],\n"
+        "        \"annotations\": [{\"id\":\"\", \"text\":\"\", \"annotation_type\":\"annotation|warning|sla_rule|audit_rule|macro_script\", \"attached_to_step_codes\":[], \"bbox\":[]}],\n"
+        "        \"relations\": [{\"target_title\":\"\", \"target_url\":\"\", \"relation_type\":\"requires|references|related_to\", \"evidence_text\":\"\", \"bbox\":[]}],\n"
+        "        \"warnings\": []\n"
+        "      }\n"
+        "    ]\n"
+        "  },\n"
+        "  \"warnings\": []\n"
+        "}.\n\n"
+        "Field rules:\n"
+        "- For numbered nodes, set step_code exactly as visible, for example 1, 1.1, 6, 9.2, 10.2.\n"
+        "- Decision node text must be the full question visible in the shape, not a shortened label.\n"
+        "- Action node text must keep full operational wording visible in the node.\n"
+        "- If a note references another SOP/file, include it both as annotation and as relation.\n"
+        "- If arrows are visually long/curved, still capture them if endpoints are clear; otherwise uncertain=true.\n\n"
+        f"Filename: {filename}\n\n"
+        f"Auxiliary OCR text, not topology source:\n{raw_text[:16000]}\n\n"
+        f"Auxiliary detector context, not source of truth:\n{json.dumps(visual_context or {}, ensure_ascii=False)[:12000]}"
+    )
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": extraction_prompt}]
+    user_content.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in page_images[:3])
+    payload = {
+        "model": settings.openrouter_vision_model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.02,
+    }
+    breakdown = base_ai_breakdown(
+        filename=filename,
+        flow="workflow_v3_graph_primary",
+        model=str(payload["model"]),
+        page_images=page_images,
+        prompt=extraction_prompt,
+        raw_text=raw_text,
+        temperature=0.02,
+        visual_context=visual_context,
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": settings.public_app_url,
+        "X-Title": "CS SOP Knowledge Base",
+    }
+    content = ""
+    parsed: Any = None
+    normalized: list[dict[str, Any]] = []
+    output_warnings: list[str] = []
+    status = "failed"
+    error = ""
+    repaired = False
+    artifacts: dict[str, Any] = {}
+    try:
+        content = completion_content(payload, headers)
+        parsed, repaired = parse_json_with_repair(content, payload, headers)
+        if not isinstance(parsed, dict):
+            error = "workflow_v3_transcription_not_object"
+            output_warnings = [error]
+            return [], output_warnings, {}
+        payload_model, fidelity_report, canvas = compile_workflow_v3_payload(
+            filename=filename,
+            raw_text=raw_text,
+            transcription=parsed,
+            visual_context=visual_context,
+        )
+        artifacts = {
+            "workflow_canvas_transcription": canvas,
+            "workflow_graph_draft": payload_model.workflow_graph.model_dump() if payload_model else {},
+            "workflow_fidelity_report": fidelity_report,
+        }
+        quality_error = workflow_v3_quality_error_from_report(fidelity_report)
+        if payload_model is None:
+            error = quality_error or "workflow_v3_payload_compile_failed"
+            output_warnings = [error, *fidelity_report.get("warnings", [])]
+            return [], output_warnings, artifacts
+        normalized = workflow_payload_to_units(payload_model, filename)
+        missing_refs = source_ref_validation_errors(normalized, filename)
+        if missing_refs:
+            error = ",".join(missing_refs)
+            output_warnings = missing_refs
+            return [], output_warnings, artifacts
+        warnings = [
+            "openrouter_workflow_v3_extraction_used",
+            "workflow_v3_graph_primary",
+            *[f"workflow_v3_fidelity_blocker:{blocker}" for blocker in fidelity_report.get("blockers", [])[:8]],
+            *fidelity_report.get("warnings", [])[:8],
+        ]
+        if repaired:
+            warnings.append("openrouter_json_repair_used")
+        if quality_error:
+            error = f"workflow_v3_fidelity_failed:{quality_error}"
+            output_warnings = warnings
+            return [], output_warnings, artifacts
+        output_warnings = warnings
+        status = "completed"
+        return [unit for unit in normalized if unit["content"]], warnings, artifacts
+    except json.JSONDecodeError as exc:
+        error = f"openrouter_workflow_v3_invalid_json:{exc.msg}:{exc.pos}"
+        output_warnings = [error]
+        return [], output_warnings, artifacts
+    except Exception as exc:
+        error = f"openrouter_workflow_v3_failed:{exc.__class__.__name__}"
+        output_warnings = [error]
+        return [], output_warnings, artifacts
+    finally:
+        record_ai_breakdown(
+            {
+                **breakdown,
+                "error": error,
+                "normalized_unit_count": len(normalized),
+                "normalized_unit_types": sorted({str(unit.get("unit_type") or "") for unit in normalized if isinstance(unit, dict)}),
+                "parsed_response": json_preview(parsed) if parsed is not None else None,
+                "raw_response": ai_response_preview(content),
+                "workflow_fidelity_report": artifacts.get("workflow_fidelity_report"),
+                "repairs": {"json_repair_used": repaired},
+                "status": status,
+                "warnings": output_warnings[:40],
+            }
+        )
 
 
 def dump_source_refs(refs: list[Any]) -> list[dict[str, Any]]:

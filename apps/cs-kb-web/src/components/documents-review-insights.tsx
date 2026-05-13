@@ -280,6 +280,8 @@ function PipelineArtifactCard({ output }: { output: ExtractionStageOutput }) {
       </div>
       {output.artifact_type === "reconcile_suggestions" ? <ReconcileSuggestions payload={payload} /> : null}
       {output.artifact_type === "ai_breakdown" ? <AiBreakdown payload={payload} /> : null}
+      {output.artifact_type === "workflow_fidelity_report" ? <WorkflowFidelityReport payload={payload} /> : null}
+      {output.artifact_type === "workflow_canvas_transcription" ? <WorkflowCanvasTranscription payload={payload} /> : null}
       {output.artifact_type.includes("verification") ? <VerificationReport payload={payload} /> : null}
     </article>
   );
@@ -414,6 +416,83 @@ function VerificationReport({ payload }: { payload: Record<string, unknown> }) {
   );
 }
 
+function WorkflowFidelityReport({ payload }: { payload: Record<string, unknown> }) {
+  const blockers = stringArrayPayload(payload.blockers);
+  const warnings = stringArrayPayload(payload.warnings);
+  const missingSteps = stringArrayPayload(payload.missing_step_codes);
+  const detectorConflicts = stringArrayPayload(payload.detector_conflicts);
+  return (
+    <div className="mt-3 grid gap-2 md:grid-cols-2">
+      <div className="rounded-lg border bg-background p-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold">Fidelity score</span>
+          <Badge variant={blockers.length ? "destructive" : "secondary"}>{stringValue(payload.fidelity_score, "0")}</Badge>
+        </div>
+        <p className="mt-2 text-xs leading-5 text-muted-foreground">
+          {stringValue(payload.node_count, "0")} nodes, {stringValue(payload.edge_count, "0")} edges, {stringValue(payload.uncertain_edge_count, "0")} uncertain.
+        </p>
+      </div>
+      <div className="rounded-lg border bg-background p-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold">Missing visible steps</span>
+          <Badge variant={missingSteps.length ? "destructive" : "secondary"}>{missingSteps.length}</Badge>
+        </div>
+        <p className="mt-2 text-xs leading-5 text-muted-foreground">{missingSteps.length ? missingSteps.slice(0, 12).join(", ") : "None"}</p>
+      </div>
+      <div className="rounded-lg border bg-background p-2 md:col-span-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold">Blockers</span>
+          <Badge variant={blockers.length ? "destructive" : "secondary"}>{blockers.length}</Badge>
+        </div>
+        <p className="mt-2 text-xs leading-5 text-muted-foreground">{blockers.length ? blockers.slice(0, 8).join(", ") : "None"}</p>
+      </div>
+      {warnings.length || detectorConflicts.length ? (
+        <div className="rounded-lg border bg-background p-2 md:col-span-2">
+          <span className="text-xs font-semibold">Warnings and detector conflicts</span>
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">{[...warnings, ...detectorConflicts].slice(0, 10).join(", ")}</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkflowCanvasTranscription({ payload }: { payload: Record<string, unknown> }) {
+  const pages = arrayPayload(payload.pages);
+  const firstPage = pages[0] ?? {};
+  const nodes = arrayPayload(firstPage.nodes);
+  const edges = arrayPayload(firstPage.edges);
+  const annotations = arrayPayload(firstPage.annotations);
+  const relations = arrayPayload(firstPage.relations);
+  return (
+    <div className="mt-3 grid gap-2 text-xs md:grid-cols-4">
+      <div className="rounded-lg border bg-background p-2">
+        <span className="text-muted-foreground">Pages</span>
+        <p className="mt-1 font-semibold">{pages.length}</p>
+      </div>
+      <div className="rounded-lg border bg-background p-2">
+        <span className="text-muted-foreground">Nodes</span>
+        <p className="mt-1 font-semibold">{nodes.length}</p>
+      </div>
+      <div className="rounded-lg border bg-background p-2">
+        <span className="text-muted-foreground">Edges</span>
+        <p className="mt-1 font-semibold">{edges.length}</p>
+      </div>
+      <div className="rounded-lg border bg-background p-2">
+        <span className="text-muted-foreground">Notes/relations</span>
+        <p className="mt-1 font-semibold">{annotations.length + relations.length}</p>
+      </div>
+      {nodes.length ? (
+        <div className="rounded-lg border bg-background p-2 md:col-span-4">
+          <span className="font-semibold">First nodes</span>
+          <p className="mt-2 text-muted-foreground">
+            {nodes.slice(0, 8).map((node) => stringValue(node.step_code || node.id || node.text, "node")).join(" · ")}
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function artifactRows(output: ExtractionStageOutput) {
   const payload = output.payload ?? {};
   const rows = [
@@ -426,6 +505,8 @@ function artifactRows(output: ExtractionStageOutput) {
   if (payload.attempt_count !== undefined) rows.push({ label: "attempts", value: stringValue(payload.attempt_count) });
   if (payload.block_count !== undefined) rows.push({ label: "blocks", value: stringValue(payload.block_count) });
   if (payload.coverage_score !== undefined) rows.push({ label: "coverage", value: `${stringValue(payload.coverage_score)}/100` });
+  if (payload.fidelity_score !== undefined) rows.push({ label: "fidelity", value: stringValue(payload.fidelity_score) });
+  if (payload.missing_step_codes !== undefined) rows.push({ label: "missing steps", value: stringArrayPayload(payload.missing_step_codes).join(", ") || "none" });
   return rows.slice(0, 6);
 }
 
@@ -446,6 +527,14 @@ function artifactSummary(output: ExtractionStageOutput) {
   }
   if (output.artifact_type === "ai_breakdown") {
     return `${stringValue(payload.attempt_count, "0")} AI attempts, selected ${stringValue(payload.selected_flow, "none")}`;
+  }
+  if (output.artifact_type === "workflow_fidelity_report") {
+    return `${stringValue(payload.node_count, "0")} nodes, ${stringValue(payload.edge_count, "0")} edges, ${stringArrayPayload(payload.blockers).length} fidelity blockers`;
+  }
+  if (output.artifact_type === "workflow_canvas_transcription") {
+    const pages = arrayPayload(payload.pages);
+    const firstPage = pages[0] ?? {};
+    return `${pages.length} page(s), ${arrayLength(firstPage.nodes)} canvas nodes, ${arrayLength(firstPage.edges)} canvas edges`;
   }
   if (output.artifact_type.includes("verification")) {
     return `${stringArrayPayload(payload.hard_blockers).length} blockers, ${stringArrayPayload(payload.warnings).length} warnings`;

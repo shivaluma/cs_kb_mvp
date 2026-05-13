@@ -301,6 +301,9 @@ class WorkflowNode(BaseModel):
     id: str = Field(min_length=1, max_length=120)
     type: str = Field(min_length=1, max_length=60)
     semantic_node_type: str = ""
+    step_code: str = ""
+    shape_kind: str = ""
+    terminal_state: str = ""
     actor: str = ""
     phase: str = ""
     title: str = Field(min_length=1, max_length=240)
@@ -318,7 +321,7 @@ class WorkflowNode(BaseModel):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
-        for key in ("id", "type", "semantic_node_type", "actor", "phase", "title", "content", "question", "dedupe_status"):
+        for key in ("id", "type", "semantic_node_type", "step_code", "shape_kind", "terminal_state", "actor", "phase", "title", "content", "question", "dedupe_status"):
             raw = normalized.get(key)
             normalized[key] = "" if raw in (None, "null") else str(raw)
         title = normalized.get("title") or normalized.get("question") or normalized.get("content") or normalized.get("id") or "Workflow node"
@@ -357,6 +360,7 @@ class WorkflowAnnotation(BaseModel):
     id: str = Field(min_length=1, max_length=120)
     type: str = Field(min_length=1, max_length=80)
     attached_to: str = Field(default="", max_length=120)
+    attached_to_node_ids: list[str] = Field(default_factory=list)
     title: str = Field(default="", max_length=180)
     content: str = Field(min_length=1)
     risk_level: str = ""
@@ -374,6 +378,10 @@ class WorkflowAnnotation(BaseModel):
         normalized["type"] = str(normalized.get("type") or normalized.get("unit_type") or "annotation")
         normalized["id"] = str(normalized.get("id") or stable_node_id(normalized["title"], 1))
         normalized["attached_to"] = str(normalized.get("attached_to") or normalized.get("attached_to_node_id") or "")
+        attached_ids = normalized.get("attached_to_node_ids")
+        if not isinstance(attached_ids, list):
+            attached_ids = [normalized["attached_to"]] if normalized["attached_to"] else []
+        normalized["attached_to_node_ids"] = [str(item) for item in attached_ids if str(item)]
         return normalized
 
 
@@ -410,6 +418,14 @@ class WorkflowGraph(BaseModel):
     uncertain_edges: list[WorkflowUncertainEdge] = Field(default_factory=list)
     source_refs: list[SourceRef] = Field(default_factory=list)
     graph_confidence: float = Field(ge=0, le=1)
+    fidelity_score: float | None = None
+    visible_step_codes: list[str] = Field(default_factory=list)
+    covered_step_codes: list[str] = Field(default_factory=list)
+    missing_step_codes: list[str] = Field(default_factory=list)
+    detector_conflicts: list[str] = Field(default_factory=list)
+    topology_source: str = ""
+    topology_review_required: bool = True
+    validation_errors: list[str] = Field(default_factory=list)
     requires_human_review: bool = True
     review_reason: str = ""
 

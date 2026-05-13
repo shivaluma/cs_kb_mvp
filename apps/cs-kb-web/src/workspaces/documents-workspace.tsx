@@ -45,11 +45,17 @@ type WorkflowGraphMetadata = {
   title?: string;
   start_node_id?: string;
   graph_confidence?: number;
+  fidelity_score?: number;
+  visible_step_codes?: string[];
+  covered_step_codes?: string[];
+  missing_step_codes?: string[];
+  detector_conflicts?: string[];
+  topology_source?: string;
   requires_human_review?: boolean;
   review_reason?: string;
-  nodes?: Array<{ id?: string; type?: string; semantic_node_type?: string; actor?: string; phase?: string; title?: string; content?: string; question?: string }>;
+  nodes?: Array<{ id?: string; type?: string; semantic_node_type?: string; step_code?: string; shape_kind?: string; terminal_state?: string; actor?: string; phase?: string; title?: string; content?: string; question?: string }>;
   edges?: Array<{ from_node?: string; to_node?: string; condition?: string; confidence?: number; reason?: string; review_reason?: string; review_status?: string; topology_status?: string }>;
-  annotations?: Array<{ id?: string; type?: string; attached_to?: string; title?: string; content?: string; risk_level?: string }>;
+  annotations?: Array<{ id?: string; type?: string; attached_to?: string; attached_to_node_ids?: string[]; title?: string; content?: string; risk_level?: string }>;
   uncertain_edges?: Array<{ from_node?: string; to_node?: string; condition?: string; reason?: string; confidence?: number; review_status?: string; topology_status?: string }>;
   validation_errors?: string[];
 };
@@ -2360,6 +2366,9 @@ function WorkflowGraphPanel({
   const validationErrors = graph?.validation_errors ?? graphUnit?.metadata.graph_validation_errors ?? [];
   const uncertainEdges = graph?.uncertain_edges ?? graphUnit?.metadata.uncertain_edges ?? [];
   const annotations = graph?.annotations ?? graphUnit?.metadata.annotations ?? [];
+  const missingStepCodes = Array.isArray(graph?.missing_step_codes) ? graph.missing_step_codes : [];
+  const detectorConflicts = Array.isArray(graph?.detector_conflicts) ? graph.detector_conflicts : [];
+  const fidelityScore = Number(graph?.fidelity_score ?? graph?.graph_confidence ?? confidence ?? 0);
   const lowConfidenceTopologyIssue = confidence > 0 && confidence < 0.7;
   const uncertainEdgeCount =
     Math.max(Array.isArray(uncertainEdges) ? uncertainEdges.length : 0, Number(graphUnit?.metadata.uncertain_edges_count ?? 0));
@@ -2416,6 +2425,22 @@ function WorkflowGraphPanel({
               <p className="mt-2 text-xs leading-5 text-muted-foreground">
                 {String(graph.review_reason ?? graphUnit.metadata.review_reason ?? "Review graph branches and arrow direction before publish.")}
               </p>
+              {graph.topology_source === "workflow_v3_canvas_transcription" || missingStepCodes.length || detectorConflicts.length ? (
+                <div className="mt-3 grid gap-2 text-xs md:grid-cols-3">
+                  <div className="rounded-lg border bg-background p-2">
+                    <span className="text-muted-foreground">V3 fidelity</span>
+                    <p className="mt-1 font-semibold">{Math.round(fidelityScore * 100)}%</p>
+                  </div>
+                  <div className="rounded-lg border bg-background p-2">
+                    <span className="text-muted-foreground">Missing visible steps</span>
+                    <p className={cn("mt-1 font-semibold", missingStepCodes.length && "text-destructive")}>{missingStepCodes.length ? missingStepCodes.join(", ") : "none"}</p>
+                  </div>
+                  <div className="rounded-lg border bg-background p-2">
+                    <span className="text-muted-foreground">Detector conflicts</span>
+                    <p className={cn("mt-1 font-semibold", detectorConflicts.length && "text-destructive")}>{detectorConflicts.length || "none"}</p>
+                  </div>
+                </div>
+              ) : null}
             </div>
             {!acknowledged || edgeReviewSummary.blockingCount ? (
               <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
@@ -3370,6 +3395,18 @@ function readablePublishFailure(failure: string) {
   }
   if (failure.startsWith("workflow_graph_has_") && failure.includes("decision_edges_need_review")) {
     return "Decision branches need review";
+  }
+  if (failure.startsWith("workflow_v3_missing_visible_steps") || failure.startsWith("workflow_graph_missing_visible_steps")) {
+    return "Workflow graph is missing visible steps";
+  }
+  if (failure.startsWith("workflow_v3_question_node_not_decision") || failure.startsWith("workflow_graph_question_steps_not_decisions")) {
+    return "Visible decision was not extracted as a decision";
+  }
+  if (failure.startsWith("workflow_v3_missing_visible_edges")) {
+    return "Workflow graph is missing visible arrows";
+  }
+  if (failure.includes("summary_like")) {
+    return "Workflow graph looks like a summary";
   }
   const known: Record<string, string> = {
     archived_version: "Archived version cannot publish",
