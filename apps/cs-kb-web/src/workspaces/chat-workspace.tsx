@@ -1,6 +1,7 @@
 import {
   ArrowUp,
   BookOpen,
+  ChevronDown,
   Clipboard,
   Clock3,
   Loader2,
@@ -438,6 +439,8 @@ function ChatBubble({
   const isUser = message.role === "user";
   const response = message.response;
   const groupedSources = response ? sourceGroupsForResponse(response) : [];
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const sourceCount = groupedSources.reduce((total, group) => total + group.sources.length, 0);
   return (
     <article className={cn("min-w-0", isUser ? "ml-auto max-w-[78%]" : "mr-auto w-full max-w-3xl")}>
       <div
@@ -470,28 +473,46 @@ function ChatBubble({
             ) : null}
             {hasRetrievalTrace(response) ? <RetrievalTrace trace={response.retrieval_trace ?? {}} /> : null}
             {groupedSources.length ? (
-              <section className="min-w-0">
-                <p className="text-xs font-semibold text-muted-foreground">Sources used</p>
-                <div className="mt-2 grid min-w-0 gap-3">
-                  {groupedSources.map((group) => (
-                    <div className="min-w-0" key={group.role}>
-                      <div className="mb-1.5 flex items-center gap-2">
-                        <CompactBadge variant="secondary">{group.label}</CompactBadge>
-                        <span className="text-[11px] text-muted-foreground">{group.sources.length}</span>
+              <section className="min-w-0 rounded-xl border bg-muted/10 px-3 py-2.5">
+                <button
+                  aria-expanded={sourcesOpen}
+                  className="flex w-full min-w-0 items-center gap-2 text-left"
+                  onClick={() => setSourcesOpen((current) => !current)}
+                  type="button"
+                >
+                  <span className="shrink-0 text-xs font-semibold text-muted-foreground">Sources used</span>
+                  <CompactBadge variant="secondary">{sourceCount}</CompactBadge>
+                  <span className="flex min-w-0 flex-1 flex-wrap gap-1.5">
+                    {groupedSources.map((group) => (
+                      <CompactBadge className="max-w-[11rem]" key={group.role}>
+                        {group.label}: {group.sources.length}
+                      </CompactBadge>
+                    ))}
+                  </span>
+                  <ChevronDown className={cn("size-4 shrink-0 text-muted-foreground transition-transform", sourcesOpen && "rotate-180")} />
+                </button>
+                {sourcesOpen ? (
+                  <div className="mt-3 grid min-w-0 gap-3">
+                    {groupedSources.map((group) => (
+                      <div className="min-w-0" key={group.role}>
+                        <div className="mb-1.5 flex items-center gap-2">
+                          <CompactBadge variant="secondary">{group.label}</CompactBadge>
+                          <span className="text-[11px] text-muted-foreground">{group.sources.length}</span>
+                        </div>
+                        <div className="grid min-w-0 gap-2">
+                          {group.sources.map((source) => (
+                            <SourceCard
+                              key={`${group.role}-${source.chunk_id}`}
+                              onOpenDocument={onOpenDocument}
+                              onOpenQuickSource={onOpenQuickSource}
+                              source={source}
+                            />
+                          ))}
+                        </div>
                       </div>
-                      <div className="grid min-w-0 gap-2">
-                        {group.sources.map((source) => (
-                          <SourceCard
-                            key={`${group.role}-${source.chunk_id}`}
-                            onOpenDocument={onOpenDocument}
-                            onOpenQuickSource={onOpenQuickSource}
-                            source={source}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                ) : null}
               </section>
             ) : null}
           </div>
