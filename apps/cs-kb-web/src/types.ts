@@ -116,7 +116,14 @@ export type ChatMessage = {
   content: string;
 };
 
-export type ChatModelRoute = "simple" | "policy" | "high_risk" | "complex";
+export type ChatModelRoute =
+  | "simple"
+  | "policy"
+  | "high_risk"
+  | "complex"
+  | "google/gemini-2.5-flash"
+  | "google/gemini-3-flash-preview"
+  | "anthropic/claude-3.5-haiku";
 
 export type ChatModelRouteConfig = {
   route: ChatModelRoute;

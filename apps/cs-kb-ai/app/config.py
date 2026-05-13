@@ -50,6 +50,18 @@ class Settings:
             "OPENROUTER_CHAT_FALLBACK_MODEL",
             os.getenv("OPENROUTER_CHAT_MODEL_FALLBACK", "moonshotai/kimi-k2.6"),
         ).strip()
+        self.openrouter_chat_gemini_25_flash_model = os.getenv(
+            "OPENROUTER_CHAT_GEMINI_25_FLASH_MODEL",
+            "google/gemini-2.5-flash",
+        ).strip()
+        self.openrouter_chat_gemini_3_flash_model = os.getenv(
+            "OPENROUTER_CHAT_GEMINI_3_FLASH_MODEL",
+            "google/gemini-3-flash-preview",
+        ).strip()
+        self.openrouter_chat_claude_35_haiku_model = os.getenv(
+            "OPENROUTER_CHAT_CLAUDE_35_HAIKU_MODEL",
+            "anthropic/claude-3.5-haiku",
+        ).strip()
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()

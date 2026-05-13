@@ -134,6 +134,24 @@ def chat_model_routes() -> dict[str, Any]:
                 "model": settings.openrouter_chat_complex_model,
                 "description": "Multi-SOP synthesis and polished macro drafting from published sources.",
             },
+            {
+                "route": "google/gemini-2.5-flash",
+                "label": "Gemini 2.5 Flash",
+                "model": settings.openrouter_chat_gemini_25_flash_model,
+                "description": "Manual model override for balanced speed and quality on grounded SOP chat.",
+            },
+            {
+                "route": "google/gemini-3-flash-preview",
+                "label": "Gemini 3 Flash Preview",
+                "model": settings.openrouter_chat_gemini_3_flash_model,
+                "description": "Manual model override for newer Gemini reasoning on multi-source SOP questions.",
+            },
+            {
+                "route": "anthropic/claude-3.5-haiku",
+                "label": "Claude 3.5 Haiku",
+                "model": settings.openrouter_chat_claude_35_haiku_model,
+                "description": "Manual model override for concise grounded answers and quick policy checks.",
+            },
         ],
         "fallback_model": settings.openrouter_chat_fallback_model,
     }

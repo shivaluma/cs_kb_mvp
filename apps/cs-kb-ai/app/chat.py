@@ -407,12 +407,18 @@ def select_chat_model(request: GroundedChatRequest, retrieval: object) -> ChatMo
         route=route,
         model=model,
         reason=reason,
-        strict_grounding=route in {"policy", "high_risk", "complex"},
+        strict_grounding=route in {"policy", "high_risk", "complex", "google/gemini-3-flash-preview", "anthropic/claude-3.5-haiku"},
         fallback_model=fallback,
     )
 
 
 def model_for_route(route: str) -> str:
+    if route == "google/gemini-2.5-flash":
+        return settings.openrouter_chat_gemini_25_flash_model or route
+    if route == "google/gemini-3-flash-preview":
+        return settings.openrouter_chat_gemini_3_flash_model or route
+    if route == "anthropic/claude-3.5-haiku":
+        return settings.openrouter_chat_claude_35_haiku_model or route
     if route == "high_risk":
         return settings.openrouter_chat_high_risk_model or settings.openrouter_chat_policy_model or settings.openrouter_chat_model
     if route == "policy":

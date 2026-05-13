@@ -63,6 +63,24 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
     model: "moonshotai/kimi-k2.6",
     description: "Multi-SOP synthesis hoặc macro polished từ nhiều nguồn published.",
   },
+  {
+    route: "google/gemini-2.5-flash",
+    label: "Gemini 2.5 Flash",
+    model: "google/gemini-2.5-flash",
+    description: "Manual model override cân bằng tốc độ và chất lượng cho SOP chat.",
+  },
+  {
+    route: "google/gemini-3-flash-preview",
+    label: "Gemini 3 Flash Preview",
+    model: "google/gemini-3-flash-preview",
+    description: "Manual model override cho câu hỏi nhiều nguồn hoặc cần reasoning mới hơn.",
+  },
+  {
+    route: "anthropic/claude-3.5-haiku",
+    label: "Claude 3.5 Haiku",
+    model: "anthropic/claude-3.5-haiku",
+    description: "Manual model override cho câu trả lời ngắn, nhanh và grounded.",
+  },
 ];
 
 export function ChatWorkspace({

@@ -1096,7 +1096,16 @@ class GroundedChatRequest(BaseModel):
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
     limit: int = Field(default=10, ge=1, le=14)
     conversation: list[ChatMessage] = Field(default_factory=list, max_length=8)
-    model_route: Literal["auto", "simple", "policy", "high_risk", "complex"] = "simple"
+    model_route: Literal[
+        "auto",
+        "simple",
+        "policy",
+        "high_risk",
+        "complex",
+        "google/gemini-2.5-flash",
+        "google/gemini-3-flash-preview",
+        "anthropic/claude-3.5-haiku",
+    ] = "simple"
 
 
 class GroundedAnswerPayload(BaseModel):
