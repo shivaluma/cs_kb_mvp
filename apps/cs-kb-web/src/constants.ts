@@ -1,15 +1,15 @@
 import {
-  Bot,
-  Boxes,
-  FileText,
-  GitBranch,
-  LayoutDashboard,
-  MessageSquareText,
-  Route,
-  Search,
-  WandSparkles,
-  Wrench,
-} from "lucide-react";
+  IconRobot as Bot,
+  IconBoxMultiple as Boxes,
+  IconFileText as FileText,
+  IconGitBranch as GitBranch,
+  IconLayoutDashboard as LayoutDashboard,
+  IconMessage as MessageSquareText,
+  IconRoute as Route,
+  IconSearch as Search,
+  IconWand as WandSparkles,
+  IconTool as Wrench
+} from "@tabler/icons-react";
 
 import type { FilterOption, FilterState, SynonymDraft, UploadState } from "@/types";
 

@@ -1,5 +1,8 @@
 import type { ElementType, ReactNode } from "react";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import {
+  IconAlertTriangle as AlertTriangle,
+  IconCircleCheck as CheckCircle2
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

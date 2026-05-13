@@ -1,21 +1,21 @@
 import {
-  AlertTriangle,
-  ArrowRight,
-  BookOpen,
-  CheckCircle2,
-  Database,
-  FileClock,
-  FileText,
-  GitPullRequest,
-  HardDrive,
-  Layers3,
-  RefreshCw,
-  Search,
-  Server,
-  ShieldCheck,
-  Sparkles,
-  WandSparkles,
-} from "lucide-react";
+  IconAlertTriangle as AlertTriangle,
+  IconArrowRight as ArrowRight,
+  IconBook as BookOpen,
+  IconCircleCheck as CheckCircle2,
+  IconDatabase as Database,
+  IconFileTime as FileClock,
+  IconFileText as FileText,
+  IconGitPullRequest as GitPullRequest,
+  IconDeviceDesktop as HardDrive,
+  IconLayersIntersect as Layers3,
+  IconRefresh as RefreshCw,
+  IconSearch as Search,
+  IconServer as Server,
+  IconShieldCheck as ShieldCheck,
+  IconSparkles as Sparkles,
+  IconWand as WandSparkles
+} from "@tabler/icons-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { ActionItem, HealthPill, KpiCard } from "@/components/operations";

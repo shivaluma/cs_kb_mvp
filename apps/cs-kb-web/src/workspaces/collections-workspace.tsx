@@ -1,4 +1,8 @@
-import { Boxes, GitBranch, ShieldAlert } from "lucide-react";
+import {
+  IconBoxMultiple as Boxes,
+  IconGitBranch as GitBranch,
+  IconShieldExclamation as ShieldAlert
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

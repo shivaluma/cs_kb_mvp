@@ -1,4 +1,8 @@
-import { FileText, Search, Wrench } from "lucide-react";
+import {
+  IconFileText as FileText,
+  IconSearch as Search,
+  IconTool as Wrench
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";

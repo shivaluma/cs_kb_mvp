@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Copy, FileJson, GitBranch, Loader2, Search, Terminal, TriangleAlert } from "lucide-react";
+import {
+  IconCircleCheck as CheckCircle2,
+  IconCopy as Copy,
+  IconFileCode as FileJson,
+  IconGitBranch as GitBranch,
+  IconLoader2 as Loader2,
+  IconSearch as Search,
+  IconTerminal as Terminal,
+  IconAlertTriangle as TriangleAlert
+} from "@tabler/icons-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";

@@ -1,18 +1,18 @@
 import {
-  Archive,
-  ArrowUp,
-  BookOpen,
-  ChevronDown,
-  Clipboard,
-  Clock3,
-  Loader2,
-  MessageSquarePlus,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Search,
-  ShieldCheck,
-  SlidersHorizontal,
-} from "lucide-react";
+  IconArchive as Archive,
+  IconArrowUp as ArrowUp,
+  IconBook as BookOpen,
+  IconChevronDown as ChevronDown,
+  IconClipboard as Clipboard,
+  IconClock as Clock3,
+  IconLoader2 as Loader2,
+  IconMessagePlus as MessageSquarePlus,
+  IconLayoutSidebarLeftCollapse as PanelLeftClose,
+  IconLayoutSidebarLeftExpand as PanelLeftOpen,
+  IconSearch as Search,
+  IconShieldCheck as ShieldCheck,
+  IconAdjustmentsHorizontal as SlidersHorizontal
+} from "@tabler/icons-react";
 import {
   useLayoutEffect,
   useRef,

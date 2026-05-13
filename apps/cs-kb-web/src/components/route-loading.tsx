@@ -1,4 +1,6 @@
-import { Loader2 } from "lucide-react";
+import {
+  IconLoader2 as Loader2
+} from "@tabler/icons-react";
 
 export function RouteLoading({ label = "Loading workspace" }: { label?: string }) {
   return (

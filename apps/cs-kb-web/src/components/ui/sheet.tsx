@@ -1,7 +1,9 @@
 "use client"
 
 import * as React from "react"
-import { X } from "lucide-react"
+import {
+  IconX as X
+} from "@tabler/icons-react";
 import { Dialog as SheetPrimitive } from "radix-ui"
 
 import { Button } from "@/components/ui/button"

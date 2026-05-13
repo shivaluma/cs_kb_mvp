@@ -1,4 +1,13 @@
-import { Check, Copy, FileClock, FileText, Loader2, Search, ShieldCheck, Sparkles } from "lucide-react";
+import {
+  IconCheck as Check,
+  IconCopy as Copy,
+  IconFileTime as FileClock,
+  IconFileText as FileText,
+  IconLoader2 as Loader2,
+  IconSearch as Search,
+  IconShieldCheck as ShieldCheck,
+  IconSparkles as Sparkles
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

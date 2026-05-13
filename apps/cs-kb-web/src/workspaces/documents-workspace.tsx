@@ -1,5 +1,26 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Archive, BookOpen, CheckCircle2, CircleHelp, ClipboardList, Database, FileText, GitBranch, History, Layers3, Loader2, MessageSquareText, Network, Plus, RefreshCw, Search, ShieldCheck, TriangleAlert, Upload, WandSparkles } from "lucide-react";
+import {
+  IconArchive as Archive,
+  IconBook as BookOpen,
+  IconCircleCheck as CheckCircle2,
+  IconHelpCircle as CircleHelp,
+  IconClipboardList as ClipboardList,
+  IconDatabase as Database,
+  IconFileText as FileText,
+  IconGitBranch as GitBranch,
+  IconHistory as History,
+  IconLayersIntersect as Layers3,
+  IconLoader2 as Loader2,
+  IconMessage as MessageSquareText,
+  IconNetwork as Network,
+  IconPlus as Plus,
+  IconRefresh as RefreshCw,
+  IconSearch as Search,
+  IconShieldCheck as ShieldCheck,
+  IconAlertTriangle as TriangleAlert,
+  IconUpload as Upload,
+  IconWand as WandSparkles
+} from "@tabler/icons-react";
 
 import { DraftRetrievalPreview, ExtractionPipelineTrace, PublishTaskList, SopQualityAuditPanel, buildPublishTasks, buildSopQualityAudit } from "@/components/documents-review-insights";
 import { DocumentFact, ReadinessCheck } from "@/components/operations";

@@ -2,7 +2,9 @@
 
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
-import { PanelLeft } from "lucide-react"
+import {
+  IconLayoutSidebarLeftCollapse as PanelLeft
+} from "@tabler/icons-react";
 import { Slot } from "radix-ui"
 
 import { Button } from "@/components/ui/button"

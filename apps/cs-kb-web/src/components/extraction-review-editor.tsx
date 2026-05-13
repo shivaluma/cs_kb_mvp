@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, RotateCcw, Save } from "lucide-react";
+import {
+  IconCircleCheck as CheckCircle2,
+  IconRotate as RotateCcw,
+  IconDeviceFloppy as Save
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

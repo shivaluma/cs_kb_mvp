@@ -1,4 +1,9 @@
-import { ExternalLink, Link2, Search, Wrench } from "lucide-react";
+import {
+  IconExternalLink as ExternalLink,
+  IconLink as Link2,
+  IconSearch as Search,
+  IconTool as Wrench
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

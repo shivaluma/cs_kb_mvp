@@ -2,7 +2,7 @@
 
 ## Design System
 
-Base implementation should use Vite, React, Tailwind CSS v4, shadcn/ui latest, lucide-react icons, and local design tokens. Components should favor shadcn primitives for buttons, cards, badges, inputs, tabs, separators, and scroll areas.
+Base implementation should use Vite, React, Tailwind CSS v4, shadcn/ui latest, @tabler/icons-react icons, and local design tokens. Components should favor shadcn primitives for buttons, cards, badges, inputs, tabs, separators, and scroll areas.
 
 ## Visual Theme
 

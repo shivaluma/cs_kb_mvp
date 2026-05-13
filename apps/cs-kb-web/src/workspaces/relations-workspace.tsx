@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, ArrowRight, CheckCircle2, CircleHelp, FilePlus2, GitBranch, Loader2, PlusCircle, RefreshCw, Search, XCircle } from "lucide-react";
+import {
+  IconArchive as Archive,
+  IconArrowRight as ArrowRight,
+  IconCircleCheck as CheckCircle2,
+  IconHelpCircle as CircleHelp,
+  IconFilePlus as FilePlus2,
+  IconGitBranch as GitBranch,
+  IconLoader2 as Loader2,
+  IconCirclePlus as PlusCircle,
+  IconRefresh as RefreshCw,
+  IconSearch as Search,
+  IconCircleX as XCircle
+} from "@tabler/icons-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";

@@ -1,5 +1,12 @@
 import { Link } from "@tanstack/react-router";
-import { Command, Moon, Search, ShieldCheck, Sun, X } from "lucide-react";
+import {
+  IconCommand as Command,
+  IconMoon as Moon,
+  IconSearch as Search,
+  IconShieldCheck as ShieldCheck,
+  IconSun as Sun,
+  IconX as X
+} from "@tabler/icons-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { StatusMessage } from "@/components/common";
 import { Badge } from "@/components/ui/badge";

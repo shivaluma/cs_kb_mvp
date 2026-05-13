@@ -1,4 +1,9 @@
-import { Bot, Loader2, Sparkles, WandSparkles } from "lucide-react";
+import {
+  IconRobot as Bot,
+  IconLoader2 as Loader2,
+  IconSparkles as Sparkles,
+  IconWand as WandSparkles
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

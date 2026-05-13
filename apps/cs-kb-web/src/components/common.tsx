@@ -1,13 +1,13 @@
 import { useMemo, useState, type ElementType } from "react";
 import {
-  Bot,
-  CheckCircle2,
-  Copy,
-  FileClock,
-  Search,
-  SlidersHorizontal,
-  Sparkles,
-} from "lucide-react";
+  IconRobot as Bot,
+  IconCircleCheck as CheckCircle2,
+  IconCopy as Copy,
+  IconFileTime as FileClock,
+  IconSearch as Search,
+  IconAdjustmentsHorizontal as SlidersHorizontal,
+  IconSparkles as Sparkles
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

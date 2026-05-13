@@ -1,5 +1,11 @@
 import type { Dispatch, SetStateAction } from "react";
-import { DatabaseZap, Loader2, RefreshCw, Sparkles, WandSparkles } from "lucide-react";
+import {
+  IconDatabaseCog as DatabaseZap,
+  IconLoader2 as Loader2,
+  IconRefresh as RefreshCw,
+  IconSparkles as Sparkles,
+  IconWand as WandSparkles
+} from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
