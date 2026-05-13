@@ -44,6 +44,7 @@ from app.schemas import (
     RetrievalFilters,
     RetrievalRequest,
     RetrievalResponse,
+    SearchFilterOptions,
     SemanticSearchRequest,
     SuggestRequest,
     SuggestResponse,
@@ -708,6 +709,11 @@ def reject_relation(relation_id: str, payload: RejectRelationRequest | None = No
 @app.get("/ai/v1/collections", response_model=list[KBCollectionSummary])
 def list_collections() -> list[KBCollectionSummary]:
     return [KBCollectionSummary(**row) for row in repository.list_kb_collections()]
+
+
+@app.get("/ai/v1/search/filter-options", response_model=SearchFilterOptions)
+def list_search_filter_options() -> SearchFilterOptions:
+    return SearchFilterOptions(**repository.list_search_filter_options())
 
 
 @app.get("/ai/v1/collections/{collection_id}", response_model=KBCollectionDetail)

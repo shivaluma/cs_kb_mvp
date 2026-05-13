@@ -41,6 +41,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/homepage", h.homepage)
 	mux.HandleFunc("POST /api/v1/search", h.search)
 	mux.HandleFunc("GET /api/v1/search/taxonomy/intents", h.proxyAI("/ai/v1/search/taxonomy/intents"))
+	mux.HandleFunc("GET /api/v1/search/filter-options", h.proxyAI("/ai/v1/search/filter-options"))
 	mux.HandleFunc("GET /api/v1/search/synonyms", h.proxyAI("/ai/v1/search/synonyms"))
 	mux.HandleFunc("POST /api/v1/search/synonyms", h.proxyAI("/ai/v1/search/synonyms"))
 	mux.HandleFunc("GET /api/v1/search/synonyms/active", h.proxyAI("/ai/v1/search/synonyms/active"))
@@ -565,6 +566,9 @@ func (h *Handler) retrieveAI(ctx context.Context, req model.SearchRequest) ([]mo
 			"category":     emptySlice(req.Filters.Category),
 			"tags":         emptySlice(req.Filters.Tags),
 			"case_reasons": emptySlice(req.Filters.CaseReasons),
+			"collections":  emptySlice(req.Filters.Collections),
+			"task_types":   emptySlice(req.Filters.TaskTypes),
+			"unit_types":   emptySlice(req.Filters.UnitTypes),
 			"status":       []string{"published"},
 		},
 	}

@@ -3,11 +3,12 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { RouteLoading } from "@/components/route-loading";
 import { defaultFilters } from "@/constants";
 import { useHomepage } from "@/hooks/api/homepage";
-import { useAISuggest, useSearch, useSOP } from "@/hooks/api/search";
+import { useCollections } from "@/hooks/api/kb-index";
+import { useAISuggest, useSearch, useSearchFilterOptions, useSOP } from "@/hooks/api/search";
 import { useUrlSearch } from "@/hooks/use-url-search";
-import { compactFilters, toSearchResult } from "@/lib/format";
+import { compactFilters, optionizeFilterValues, toSearchResult } from "@/lib/format";
 import { useFeedback } from "@/providers/feedback-context";
-import type { AISuggestion, FilterState, Macro, RetrievalResult, SOP } from "@/types";
+import type { AISuggestion, FilterOption, FilterState, Macro, RetrievalResult, SOP } from "@/types";
 
 const LookupWorkspace = lazy(() =>
   import("@/workspaces/lookup-workspace").then((module) => ({ default: module.LookupWorkspace })),
@@ -20,7 +21,10 @@ export function LookupPage() {
   const hasSearchQuery = query.trim().length > 0;
   const chunkId = getParam("chunk", "");
   const [filters, setFilters] = useState<FilterState>({
+    collection: getParam("collection", defaultFilters.collection),
     audience: getParam("audience", defaultFilters.audience),
+    contentType: getParam("contentType", defaultFilters.contentType),
+    taskType: getParam("taskType", defaultFilters.taskType),
     category: getParam("category", defaultFilters.category),
     vertical: getParam("vertical", defaultFilters.vertical),
   });
@@ -31,6 +35,8 @@ export function LookupPage() {
   const autoSelectedInitialSop = useRef(false);
   const autoSearchedInitialQuery = useRef("");
   const homepageQuery = useHomepage();
+  const collectionsQuery = useCollections();
+  const filterOptionsQuery = useSearchFilterOptions();
   const searchMutation = useSearch();
   const sopMutation = useSOP();
   const aiSuggestMutation = useAISuggest();
@@ -39,15 +45,39 @@ export function LookupPage() {
   const semanticResults = hasSearchQuery ? (searchMutation.data?.semantic_results ?? []) : [];
   const aiSuggestion = (aiSuggestMutation.data as AISuggestion | undefined) ?? null;
   const booting = homepageQuery.isLoading && !homepageQuery.data && !homepageQuery.error && !searchMutation.data;
+  const collectionOptions: FilterOption[] = useMemo(
+    () =>
+      (collectionsQuery.data ?? []).map((collection) => ({
+        label: collection.name,
+        value: collection.slug,
+      })),
+    [collectionsQuery.data],
+  );
+  const dynamicFilterOptions = useMemo(
+    () => ({
+      audience: optionizeFilterValues(filterOptionsQuery.data?.audience, "All audiences"),
+      vertical: optionizeFilterValues(filterOptionsQuery.data?.vertical, "All verticals"),
+      category: optionizeFilterValues(filterOptionsQuery.data?.category, "All categories"),
+      taskType: optionizeFilterValues(filterOptionsQuery.data?.task_types, "All tasks"),
+    }),
+    [filterOptionsQuery.data],
+  );
+  const hasStructuredFilters =
+    filters.collection !== "all" ||
+    filters.contentType !== "all" ||
+    filters.taskType !== "all";
   const listSource = useMemo(() => {
     if (!hasSearchQuery) {
+      return [];
+    }
+    if (hasStructuredFilters) {
       return [];
     }
     if (searchResults.length > 0) {
       return searchResults;
     }
     return searchMutation.data ? [] : (homepage?.most_viewed ?? []).map(toSearchResult);
-  }, [hasSearchQuery, homepage, searchMutation.data, searchResults]);
+  }, [hasSearchQuery, hasStructuredFilters, homepage, searchMutation.data, searchResults]);
   const feedbackTotal = selected ? selected.analytics.helpful + selected.analytics.not_helpful : 0;
   const helpfulRate = feedbackTotal && selected ? Math.round((selected.analytics.helpful / feedbackTotal) * 100) : 0;
 
@@ -171,6 +201,8 @@ export function LookupPage() {
         booting={booting && searchMutation.isIdle}
         copied={copied}
         copyError={copyError}
+        collectionOptions={collectionOptions}
+        dynamicFilterOptions={dynamicFilterOptions}
         feedbackRate={helpfulRate}
         filters={filters}
         listSource={listSource}

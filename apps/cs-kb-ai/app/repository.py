@@ -2361,11 +2361,92 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str, force
         )
     if published["document_type"] == "kb_index_workbook":
         materialize_kb_index_version_tx(conn, str(published["document_id"]), version_id, actor)
+    else:
+        materialize_collection_items_for_version_tx(conn, str(published["document_id"]), version_id, actor, source="manual")
     return dict(published)
+
+
+def archive_document_collection_items_tx(conn: Connection[Any], document_id: str) -> None:
+    conn.execute(
+        """
+        UPDATE kb_collection_items i
+        SET status = 'archived',
+            updated_at = now()
+        FROM ai_chunks ch
+        WHERE i.item_type = 'sop_unit'
+          AND i.item_id = ch.id
+          AND ch.document_id = %s
+          AND i.status <> 'archived'
+        """,
+        (document_id,),
+    )
+
+
+def materialize_collection_items_for_version_tx(conn: Connection[Any], document_id: str, version_id: str, actor: str, source: str) -> dict[str, int]:
+    conn.row_factory = dict_row
+    archive_document_collection_items_tx(conn, document_id)
+    rows = conn.execute(
+        """
+        SELECT id::text AS chunk_id,
+               metadata
+        FROM ai_chunks
+        WHERE document_id = %s
+          AND version_id = %s
+          AND COALESCE(metadata->>'review_status', '') = 'approved'
+          AND COALESCE(metadata->>'collection_slug', '') <> ''
+        ORDER BY chunk_index
+        """,
+        (document_id, version_id),
+    ).fetchall()
+    collections = 0
+    collection_items = 0
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        assignment_status = str(metadata.get("collection_assignment_status") or "approved").strip()
+        if assignment_status not in {"approved", "reviewed"}:
+            continue
+        collection_slug = str(metadata.get("collection_slug") or "").strip()
+        collection_name = str(metadata.get("collection_name") or collection_slug or "").strip()
+        if not collection_slug or not collection_name:
+            continue
+        collection_id = upsert_kb_collection_tx(
+            conn,
+            slug=collection_slug,
+            name=collection_name,
+            collection_type=str(metadata.get("collection_type") or "domain"),
+            description=str(metadata.get("collection_description") or ""),
+            owner_team=str(metadata.get("owner_team") or ""),
+            rules={"source_document_id": document_id, "source_version_id": version_id},
+        )
+        collections += 1
+        link_kb_collection_item_tx(
+            conn,
+            collection_id=collection_id,
+            item_type="sop_unit",
+            item_id=str(row["chunk_id"]),
+            source=source,
+            confidence=float(metadata.get("collection_confidence") or metadata.get("confidence") or 0) if (metadata.get("collection_confidence") is not None or metadata.get("confidence") is not None) else None,
+            status="approved",
+        )
+        collection_items += 1
+
+    if collection_items:
+        audit_tx(
+            conn,
+            actor=actor,
+            action="document_collection_items_materialized",
+            entity_type="ai_document_version",
+            entity_id=version_id,
+            metadata={"document_id": document_id, "collections": collections, "collection_items": collection_items, "source": source},
+        )
+    return {"collections": collections, "collection_items": collection_items}
 
 
 def materialize_kb_index_version_tx(conn: Connection[Any], document_id: str, version_id: str, actor: str) -> dict[str, int]:
     conn.row_factory = dict_row
+    archive_document_collection_items_tx(conn, document_id)
     rows = conn.execute(
         """
         SELECT id::text AS chunk_id,
@@ -2688,6 +2769,60 @@ def list_kb_collections() -> list[dict[str, Any]]:
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def list_search_filter_options() -> dict[str, list[str]]:
+    options: dict[str, set[str]] = {
+        "audience": set(),
+        "vertical": set(),
+        "category": set(),
+        "tags": set(),
+        "case_reasons": set(),
+        "collections": set(),
+        "task_types": set(),
+        "unit_types": set(),
+    }
+
+    def add_values(bucket: str, value: Any) -> None:
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            text = str(item or "").strip()
+            if text:
+                options[bucket].add(text)
+
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT d.metadata AS document_metadata,
+                   c.metadata AS chunk_metadata,
+                   c.section
+            FROM ai_chunks c
+            JOIN ai_documents d ON d.id = c.document_id
+            JOIN ai_document_versions v ON v.id = c.version_id
+            WHERE d.status = 'active'
+              AND v.status = 'published'
+              AND d.current_version_id = v.id
+              AND COALESCE(c.metadata->>'review_status', '') = 'approved'
+              AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
+              AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+            """,
+            (["structured", "manually_curated"],),
+        ).fetchall()
+
+    for row in rows:
+        for metadata in (row["document_metadata"] or {}, row["chunk_metadata"] or {}):
+            add_values("audience", metadata.get("audience"))
+            add_values("vertical", metadata.get("vertical"))
+            add_values("category", metadata.get("category"))
+            add_values("tags", metadata.get("tags"))
+            add_values("case_reasons", metadata.get("case_reasons"))
+            add_values("collections", metadata.get("collection_slug"))
+            add_values("task_types", metadata.get("task_type"))
+            add_values("unit_types", metadata.get("unit_type"))
+        add_values("unit_types", row["section"])
+
+    return {key: sorted(values, key=str.casefold) for key, values in options.items()}
 
 
 def get_kb_collection(collection_id_or_slug: str) -> dict[str, Any]:
@@ -4367,6 +4502,118 @@ def approved_relation_target_rows(source_document_ids: list[str], exclude_chunk_
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND NOT (c.id::text = ANY(%s))
+            ORDER BY c.id, CASE WHEN COALESCE(c.metadata->>'retrieval_scope', '') = 'document' THEN 0 ELSE 1 END, c.chunk_index
+            LIMIT %s
+            """,
+            (source_ids, ["structured", "manually_curated"], exclude_chunk_ids or [""], limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def approved_relation_target_rows_for_chunks(source_chunk_ids: list[str], exclude_chunk_ids: list[str], limit: int) -> list[dict[str, Any]]:
+    source_ids = list(dict.fromkeys([item for item in source_chunk_ids if item]))
+    if not source_ids or limit <= 0:
+        return []
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ON (c.id)
+                   c.id AS chunk_id,
+                   c.document_id,
+                   c.version_id,
+                   target.title,
+                   COALESCE(c.metadata->>'source_filename', target.source_filename) AS source_filename,
+                   v.version_number,
+                   c.chunk_index,
+                   c.section,
+                   c.heading,
+                   c.content,
+                   jsonb_set(
+                     jsonb_set(
+                       jsonb_set(
+                         c.metadata,
+                         '{relation_source_chunk_id}',
+                         to_jsonb(r.source_chunk_id::text),
+                         true
+                       ),
+                       '{relation_source_document_id}',
+                       to_jsonb(r.source_document_id::text),
+                       true
+                     ),
+                     '{relation_type}',
+                     to_jsonb(r.relation_type::text),
+                     true
+                   ) AS metadata,
+                   0.005::float AS score,
+                   0.0::float AS lexical_score,
+                   0.0::float AS vector_score,
+                   ARRAY['approved_relation']::text[] AS rank_source,
+                   999 AS best_rank
+            FROM ai_document_relations r
+            JOIN ai_documents target ON target.id = r.target_document_id
+            JOIN ai_document_versions v ON v.id = r.target_version_id
+            JOIN ai_chunks c ON c.document_id = target.id AND c.version_id = v.id
+            WHERE r.status = 'approved'
+              AND r.source_chunk_id::text = ANY(%s)
+              AND r.relation_type <> 'possible_conflict'
+              AND target.status = 'active'
+              AND target.current_version_id = v.id
+              AND v.status = 'published'
+              AND COALESCE(c.metadata->>'review_status', '') = 'approved'
+              AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
+              AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND NOT (c.id::text = ANY(%s))
+            ORDER BY c.id, CASE WHEN COALESCE(c.metadata->>'retrieval_scope', '') = 'document' THEN 0 ELSE 1 END, c.chunk_index
+            LIMIT %s
+            """,
+            (source_ids, ["structured", "manually_curated"], exclude_chunk_ids or [""], limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def parent_sop_context_rows(chunk_ids: list[str], exclude_chunk_ids: list[str], limit: int) -> list[dict[str, Any]]:
+    source_ids = list(dict.fromkeys([item for item in chunk_ids if item]))
+    if not source_ids or limit <= 0:
+        return []
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            WITH source_scope AS (
+              SELECT DISTINCT document_id, version_id
+              FROM ai_chunks
+              WHERE id::text = ANY(%s)
+            )
+            SELECT DISTINCT ON (c.id)
+                   c.id AS chunk_id,
+                   c.document_id,
+                   c.version_id,
+                   d.title,
+                   COALESCE(c.metadata->>'source_filename', d.source_filename) AS source_filename,
+                   v.version_number,
+                   c.chunk_index,
+                   c.section,
+                   c.heading,
+                   c.content,
+                   c.metadata,
+                   0.003::float AS score,
+                   0.0::float AS lexical_score,
+                   0.0::float AS vector_score,
+                   ARRAY['parent_sop_context']::text[] AS rank_source,
+                   1000 AS best_rank
+            FROM source_scope s
+            JOIN ai_documents d ON d.id = s.document_id
+            JOIN ai_document_versions v ON v.id = s.version_id
+            JOIN ai_chunks c ON c.document_id = s.document_id AND c.version_id = s.version_id
+            WHERE d.status = 'active'
+              AND d.current_version_id = v.id
+              AND v.status = 'published'
+              AND COALESCE(c.metadata->>'review_status', '') = 'approved'
+              AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
+              AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'unit_type', c.section) = 'full_sop'
               AND NOT (c.id::text = ANY(%s))
             ORDER BY c.id, CASE WHEN COALESCE(c.metadata->>'retrieval_scope', '') = 'document' THEN 0 ELSE 1 END, c.chunk_index
             LIMIT %s

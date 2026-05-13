@@ -17,7 +17,7 @@ import { API_BASE_URL } from "@/config";
 import { workspacePaths } from "@/constants";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, PublishReadiness, UploadState, VersionRawText, VersionSummary } from "@/types";
+import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, KBCollectionSummary, PublishReadiness, UploadState, VersionRawText, VersionSummary } from "@/types";
 
 type WorkflowGraphMetadata = {
   workflow_id?: string;
@@ -73,6 +73,7 @@ export function DocumentsWorkspace({
   busyKey,
   chunks,
   chunksLoading,
+  collections,
   documents,
   extractionUnits,
   extractionUnitsLoading,
@@ -80,6 +81,7 @@ export function DocumentsWorkspace({
   extractionPipelineInspection,
   extractionPipelineLoading,
   onArchiveDocument,
+  onApplyCollection,
   onBulkReviewVersion,
   onCreateExtractionUnit,
   onInspectVersion,
@@ -105,6 +107,7 @@ export function DocumentsWorkspace({
   busyKey: string;
   chunks: DocumentChunk[];
   chunksLoading: boolean;
+  collections: KBCollectionSummary[];
   documents: DocumentSummary[];
   extractionUnits: ExtractionUnit[];
   extractionUnitsLoading: boolean;
@@ -112,6 +115,7 @@ export function DocumentsWorkspace({
   extractionPipelineInspection: ExtractionPipelineInspection | null;
   extractionPipelineLoading: boolean;
   onArchiveDocument: (document: DocumentSummary) => void;
+  onApplyCollection: (units: ExtractionUnit[], collection: KBCollectionSummary | null) => void;
   onBulkReviewVersion: (versionId: string, scope?: "all" | "atomic", reviewStatus?: "reviewed" | "approved", force?: boolean) => void;
   onCreateExtractionUnit: (versionId: string, unit: ExtractionUnitCreate) => void;
   onInspectVersion: (versionId: string) => void;
@@ -178,6 +182,7 @@ export function DocumentsWorkspace({
   const workflowGraphUncertainEdges = workflowGraph?.uncertain_edges ?? workflowGraphUnit?.metadata.uncertain_edges ?? [];
   const workflowEdgeReviewSummary = buildWorkflowEdgeReviewSummary(workflowGraph, workflowGraphUnit);
   const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && !isWorkflowGraphUnit(unit));
+  const suggestedUploadCollection = collections.find((collection) => collection.slug === upload.suggestedCollectionSlug);
   const selectedIsArchived = selectedDocument?.status === "archived";
   const pendingReviewCount = extractionUnits.filter((unit) => unit.review_status === "needs_review").length;
   const pendingAtomicReviewCount = atomicUnits.filter((unit) => unit.review_status === "needs_review").length;
@@ -563,6 +568,88 @@ export function DocumentsWorkspace({
               <Field label="Owner team" value={upload.ownerTeam} onChange={(ownerTeam) => setUpload((current) => ({ ...current, ownerTeam }))} />
             </div>
             <div className="rounded-lg border bg-muted/20 p-3">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-semibold text-foreground">Primary collection</div>
+                  <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                    AI can suggest, but only approved/manual selection is used by Lookup and Chat.
+                  </p>
+                </div>
+                <Badge variant={upload.collectionAssignmentStatus === "approved" ? "secondary" : "outline"}>
+                  {upload.collectionAssignmentStatus === "approved" ? "approved" : upload.collectionAssignmentStatus === "suggested" ? "AI suggested" : "optional"}
+                </Badge>
+              </div>
+              <Select
+                onValueChange={(value) => {
+                  if (value === "none") {
+                    setUpload((current) => ({
+                      ...current,
+                      collectionSlug: "",
+                      collectionName: "",
+                      collectionType: "",
+                      collectionAssignmentStatus: "unassigned",
+                      collectionSource: "manual",
+                      collectionConfidence: 0,
+                    }));
+                    return;
+                  }
+                  const collection = collections.find((item) => item.slug === value);
+                  setUpload((current) => ({
+                    ...current,
+                    collectionSlug: collection?.slug ?? value,
+                    collectionName: collection?.name ?? value,
+                    collectionType: collection?.collection_type ?? "domain",
+                    collectionAssignmentStatus: "approved",
+                    collectionSource: "manual",
+                    collectionConfidence: 1,
+                  }));
+                }}
+                value={upload.collectionSlug || "none"}
+              >
+                <SelectTrigger className="h-9 rounded-full bg-background">
+                  <SelectValue placeholder="No collection" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">No collection yet</SelectItem>
+                  {collections.map((collection) => (
+                    <SelectItem key={collection.id} value={collection.slug}>
+                      {collection.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {upload.suggestedCollectionSlug ? (
+                <div className="mt-2 rounded-lg border bg-background px-3 py-2 text-xs leading-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      AI suggested: <span className="font-semibold text-foreground">{suggestedUploadCollection?.name ?? upload.suggestedCollectionName ?? upload.suggestedCollectionSlug}</span>
+                      {upload.suggestedCollectionConfidence ? ` · ${Math.round(upload.suggestedCollectionConfidence * 100)}%` : ""}
+                    </span>
+                    <Button
+                      className="h-7 rounded-full px-2"
+                      onClick={() => {
+                        const collection = suggestedUploadCollection;
+                        setUpload((current) => ({
+                          ...current,
+                          collectionSlug: collection?.slug ?? current.suggestedCollectionSlug,
+                          collectionName: collection?.name ?? current.suggestedCollectionName,
+                          collectionType: collection?.collection_type ?? current.suggestedCollectionType,
+                          collectionAssignmentStatus: "approved",
+                          collectionSource: "ai_suggestion_approved",
+                          collectionConfidence: current.suggestedCollectionConfidence || 0.7,
+                        }));
+                      }}
+                      size="sm"
+                      type="button"
+                      variant="secondary"
+                    >
+                      Approve suggestion
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <div className="rounded-lg border bg-muted/20 p-3">
               <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-foreground">
                 <ShieldCheck className="size-4" />
                 Owner review SLA
@@ -854,6 +941,15 @@ export function DocumentsWorkspace({
               </div>
             </CardHeader>
             <CardContent className="pt-4">
+              {selectedDocument && extractionUnits.length ? (
+                <CollectionAssignmentPanel
+                  canEdit={canEditSelectedVersion}
+                  collections={collections}
+                  document={selectedDocument}
+                  onApply={(collection) => onApplyCollection(extractionUnits, collection)}
+                  units={extractionUnits}
+                />
+              ) : null}
               {!selectedDocument ? (
                 <EmptyPanel icon={GitBranch} title="Select a document" text="Choose a source file to inspect extracted knowledge units." compact />
               ) : extractionUnitsLoading ? (
@@ -1521,6 +1617,106 @@ function reviewFilterEmptyState(filter: ReviewFilter) {
     text: "Change the review filter to inspect another group.",
     title: "No units in this filter",
   };
+}
+
+function CollectionAssignmentPanel({
+  canEdit,
+  collections,
+  document,
+  onApply,
+  units,
+}: {
+  canEdit: boolean;
+  collections: KBCollectionSummary[];
+  document: DocumentSummary;
+  onApply: (collection: KBCollectionSummary | null) => void;
+  units: ExtractionUnit[];
+}) {
+  const currentSlug = mostCommonString([
+    ...units.map((unit) => metadataString(unit.metadata.collection_slug)),
+    metadataString(document.metadata?.collection_slug),
+  ]);
+  const suggestedSlug = metadataString(document.metadata?.suggested_collection_slug) || mostCommonString(units.map((unit) => metadataString(unit.metadata.suggested_collection_slug)));
+  const [draftSlug, setDraftSlug] = useState(currentSlug || "none");
+  const currentCollection = collections.find((collection) => collection.slug === currentSlug);
+  const suggestedCollection = collections.find((collection) => collection.slug === suggestedSlug);
+  const draftCollection = collections.find((collection) => collection.slug === draftSlug);
+
+  useEffect(() => {
+    setDraftSlug(currentSlug || "none");
+  }, [currentSlug]);
+
+  return (
+    <div className="mb-4 rounded-xl border bg-muted/15 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold">Collection assignment</div>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Collections guide Lookup, Chat retrieval boosts, onboarding, and browse pages. AI suggestions need manual approval before publish.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <Badge variant={currentSlug ? "secondary" : "outline"}>{currentSlug ? "approved collection" : "unassigned"}</Badge>
+          {suggestedSlug && suggestedSlug !== currentSlug ? <Badge variant="outline">AI suggested</Badge> : null}
+        </div>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+        <Select disabled={!canEdit} onValueChange={setDraftSlug} value={draftSlug}>
+          <SelectTrigger className="h-9 rounded-full bg-background">
+            <SelectValue placeholder="No collection" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">No collection</SelectItem>
+            {collections.map((collection) => (
+              <SelectItem key={collection.id} value={collection.slug}>
+                {collection.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          disabled={!canEdit || draftSlug === (currentSlug || "none")}
+          onClick={() => onApply(draftCollection ?? null)}
+          size="sm"
+          type="button"
+          variant="secondary"
+        >
+          Apply to all units
+        </Button>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+        <span>Current: {currentCollection?.name ?? (currentSlug || "None")}</span>
+        {suggestedCollection && suggestedCollection.slug !== currentSlug ? (
+          <>
+            <span>·</span>
+            <button
+              className="font-medium text-foreground underline-offset-4 hover:underline disabled:text-muted-foreground"
+              disabled={!canEdit}
+              onClick={() => setDraftSlug(suggestedCollection.slug)}
+              type="button"
+            >
+              Use AI suggestion: {suggestedCollection.name}
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function metadataString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function mostCommonString(values: string[]) {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? "";
 }
 
 function sortUnitsForRequirementFocus(units: ExtractionUnit[], requirement: RequiredWorkflowUnit | null) {

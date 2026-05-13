@@ -1,23 +1,19 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { RouteLoading } from "@/components/route-loading";
-import { workspacePaths } from "@/constants";
+import { defaultFilters, workspacePaths } from "@/constants";
+import { useCollections } from "@/hooks/api/kb-index";
 import { useChatModelRoutes, useGroundedChat } from "@/hooks/api/chat";
+import { useSearchFilterOptions } from "@/hooks/api/search";
 import { useUrlSearch } from "@/hooks/use-url-search";
-import { compactFilters } from "@/lib/format";
+import { compactFilters, optionizeFilterValues } from "@/lib/format";
 import { useFeedback } from "@/providers/feedback-context";
-import type { ChatMessage, ChatModelRoute, ChatThreadMessage, FilterState, RetrievalResult } from "@/types";
+import type { ChatMessage, ChatModelRoute, ChatThreadMessage, FilterOption, FilterState, RetrievalResult } from "@/types";
 
 const ChatWorkspace = lazy(() =>
   import("@/workspaces/chat-workspace").then((module) => ({ default: module.ChatWorkspace })),
 );
-
-const chatFilters: FilterState = {
-  audience: "all",
-  category: "all",
-  vertical: "all",
-};
 
 export function ChatPage() {
   const navigate = useNavigate();
@@ -26,9 +22,28 @@ export function ChatPage() {
   const initialQuestion = getParam("q", "");
   const initialQuestionSent = useRef("");
   const chatModelRoutesQuery = useChatModelRoutes();
+  const collectionsQuery = useCollections();
+  const filterOptionsQuery = useSearchFilterOptions();
   const groundedChatMutation = useGroundedChat();
   const [messages, setMessages] = useState<ChatThreadMessage[]>([]);
   const [modelRoute, setModelRoute] = useState<ChatModelRoute>("simple");
+  const [scopeFilters, setScopeFilters] = useState<FilterState>(defaultFilters);
+  const collectionOptions: FilterOption[] = useMemo(
+    () =>
+      (collectionsQuery.data ?? []).map((collection) => ({
+        label: collection.name,
+        value: collection.slug,
+      })),
+    [collectionsQuery.data],
+  );
+  const dynamicFilterOptions = useMemo(
+    () => ({
+      audience: optionizeFilterValues(filterOptionsQuery.data?.audience, "All audiences"),
+      vertical: optionizeFilterValues(filterOptionsQuery.data?.vertical, "All verticals"),
+      taskType: optionizeFilterValues(filterOptionsQuery.data?.task_types, "All tasks"),
+    }),
+    [filterOptionsQuery.data],
+  );
 
   useEffect(() => {
     const trimmedInitialQuestion = initialQuestion.trim();
@@ -66,11 +81,11 @@ export function ChatPage() {
     groundedChatMutation.mutate(
       {
         question: trimmed,
-        limit: 6,
+        limit: 12,
         conversation,
         model_route: modelRoute,
         filters: {
-          ...compactFilters(chatFilters),
+          ...compactFilters(scopeFilters),
           status: ["published"],
         },
       },
@@ -108,6 +123,10 @@ export function ChatPage() {
     );
   }
 
+  function updateScopeFilter(key: keyof FilterState, value: string) {
+    setScopeFilters((current) => ({ ...current, [key]: value }));
+  }
+
   async function copyText(text: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -140,6 +159,9 @@ export function ChatPage() {
     <Suspense fallback={<RouteLoading label="Loading SOP chat" />}>
       <ChatWorkspace
         busy={groundedChatMutation.isPending}
+        collectionOptions={collectionOptions}
+        dynamicFilterOptions={dynamicFilterOptions}
+        filters={scopeFilters}
         fallbackModel={chatModelRoutesQuery.data?.fallback_model}
         messages={messages}
         modelRoutes={chatModelRoutesQuery.data?.routes}
@@ -149,6 +171,7 @@ export function ChatPage() {
         onModelRouteChange={setModelRoute}
         onOpenDocument={openDocumentSource}
         onOpenQuickSource={openQuickSource}
+        onUpdateFilter={updateScopeFilter}
       />
     </Suspense>
   );

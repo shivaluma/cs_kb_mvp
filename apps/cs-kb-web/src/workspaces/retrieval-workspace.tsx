@@ -5,10 +5,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyPanel, EmptyResults, FilterGrid } from "@/components/common";
-import type { FilterState, RetrievalResponse, RetrievalResult } from "@/types";
+import type { FilterOption, FilterState, RetrievalResponse, RetrievalResult } from "@/types";
 
 export function RetrievalWorkspace({
   busy,
+  collectionOptions,
+  dynamicFilterOptions,
   filters,
   mode,
   onModeChange,
@@ -19,6 +21,8 @@ export function RetrievalWorkspace({
   setQuery,
 }: {
   busy: boolean;
+  collectionOptions: FilterOption[];
+  dynamicFilterOptions: Partial<Record<Exclude<keyof FilterState, "collection" | "contentType">, FilterOption[]>>;
   filters: FilterState;
   mode: RetrievalResponse["mode"];
   onModeChange: (mode: RetrievalResponse["mode"]) => void;
@@ -54,7 +58,7 @@ export function RetrievalWorkspace({
               />
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-4">
+            <div className="grid gap-2">
               <div className="grid gap-1.5">
                 <label className="text-xs font-medium capitalize text-muted-foreground">mode</label>
                 <Select onValueChange={(value) => onModeChange(value as RetrievalResponse["mode"])} value={mode}>
@@ -68,7 +72,13 @@ export function RetrievalWorkspace({
                   </SelectContent>
                 </Select>
               </div>
-              <FilterGrid filters={filters} onUpdateFilter={onUpdateFilter} />
+              <FilterGrid
+                collectionOptions={collectionOptions}
+                filterOptions={dynamicFilterOptions}
+                filters={filters}
+                onUpdateFilter={onUpdateFilter}
+                showAdvancedByDefault
+              />
             </div>
 
             <Button className="w-full justify-center" disabled={busy || !canRetrieve} onClick={onRetrieve} type="button">

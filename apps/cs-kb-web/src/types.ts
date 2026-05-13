@@ -140,10 +140,18 @@ export type GroundedChatResponse = {
   sources: RetrievalResult[];
   confidence: number;
   retrieval: RetrievalResponse;
+  source_groups?: SourceGroup[];
+  retrieval_trace?: Record<string, unknown>;
   latency_ms: number;
   model_route: string;
   model_used: string;
   model_reason: string;
+};
+
+export type SourceGroup = {
+  role: string;
+  label: string;
+  sources: RetrievalResult[];
 };
 
 export type ChatThreadMessage = {
@@ -259,6 +267,16 @@ export type DocumentMetadataPreview = {
     review_frequency: string;
     last_reviewed_at: string;
     next_review_due: string;
+    collection_slug: string;
+    collection_name: string;
+    collection_type: string;
+    collection_assignment_status: string;
+    collection_source: string;
+    collection_confidence: number;
+    suggested_collection_slug: string;
+    suggested_collection_name: string;
+    suggested_collection_type: string;
+    suggested_collection_confidence: number;
   };
   document_type: string;
   source_type: string;
@@ -436,9 +454,29 @@ export type SynonymSuggestion = {
 };
 
 export type FilterState = {
+  collection: string;
   audience: string;
+  contentType: string;
+  taskType: string;
   vertical: string;
   category: string;
+};
+
+export type FilterOption = {
+  label: string;
+  value: string;
+  description?: string;
+};
+
+export type SearchFilterOptions = {
+  audience: string[];
+  vertical: string[];
+  category: string[];
+  tags: string[];
+  case_reasons: string[];
+  collections: string[];
+  task_types: string[];
+  unit_types: string[];
 };
 
 export type UploadState = {
@@ -456,6 +494,16 @@ export type UploadState = {
   reviewFrequency: string;
   lastReviewedAt: string;
   nextReviewDue: string;
+  collectionSlug: string;
+  collectionName: string;
+  collectionType: string;
+  collectionAssignmentStatus: "unassigned" | "suggested" | "approved";
+  collectionSource: string;
+  collectionConfidence: number;
+  suggestedCollectionSlug: string;
+  suggestedCollectionName: string;
+  suggestedCollectionType: string;
+  suggestedCollectionConfidence: number;
   asyncExtraction: boolean;
 };
 

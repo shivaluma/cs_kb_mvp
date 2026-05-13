@@ -21,13 +21,15 @@ import {
 } from "@/components/common";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { AISuggestion, FilterState, Macro, RetrievalResult, SearchResult, SOP } from "@/types";
+import type { AISuggestion, FilterOption, FilterState, Macro, RetrievalResult, SearchResult, SOP } from "@/types";
 
 export function LookupWorkspace({
   aiSuggestion,
   booting,
   copied,
   copyError,
+  collectionOptions,
+  dynamicFilterOptions,
   feedbackRate,
   filters,
   listSource,
@@ -49,6 +51,8 @@ export function LookupWorkspace({
   booting: boolean;
   copied: string;
   copyError: string;
+  collectionOptions: FilterOption[];
+  dynamicFilterOptions: Partial<Record<Exclude<keyof FilterState, "collection" | "contentType">, FilterOption[]>>;
   feedbackRate: number;
   filters: FilterState;
   listSource: SearchResult[];
@@ -109,8 +113,13 @@ export function LookupWorkspace({
               Search
             </Button>
           </div>
-          <div className="mt-3 grid gap-2 md:grid-cols-3">
-            <FilterGrid filters={filters} onUpdateFilter={onUpdateFilter} />
+          <div className="mt-3">
+            <FilterGrid
+              collectionOptions={collectionOptions}
+              filterOptions={dynamicFilterOptions}
+              filters={filters}
+              onUpdateFilter={onUpdateFilter}
+            />
           </div>
         </CardContent>
       </Card>

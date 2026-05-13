@@ -75,6 +75,9 @@ type SearchFilters struct {
 	Category    []string `json:"category"`
 	Tags        []string `json:"tags"`
 	CaseReasons []string `json:"case_reasons"`
+	Collections []string `json:"collections"`
+	TaskTypes   []string `json:"task_types"`
+	UnitTypes   []string `json:"unit_types"`
 }
 
 type SearchResponse struct {

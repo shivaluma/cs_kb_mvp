@@ -11,7 +11,7 @@ import {
   Wrench,
 } from "lucide-react";
 
-import type { FilterState, SynonymDraft, UploadState } from "@/types";
+import type { FilterOption, FilterState, SynonymDraft, UploadState } from "@/types";
 
 export const workspacePaths = {
   dashboard: "/",
@@ -29,7 +29,10 @@ export const workspacePaths = {
 export type Workspace = keyof typeof workspacePaths;
 
 export const defaultFilters: FilterState = {
+  collection: "all",
   audience: "all",
+  contentType: "all",
+  taskType: "all",
   vertical: "all",
   category: "all",
 };
@@ -49,6 +52,16 @@ export const defaultUpload: UploadState = {
   reviewFrequency: "",
   lastReviewedAt: "",
   nextReviewDue: "",
+  collectionSlug: "",
+  collectionName: "",
+  collectionType: "",
+  collectionAssignmentStatus: "unassigned",
+  collectionSource: "",
+  collectionConfidence: 0,
+  suggestedCollectionSlug: "",
+  suggestedCollectionName: "",
+  suggestedCollectionType: "",
+  suggestedCollectionConfidence: 0,
   asyncExtraction: true,
 };
 
@@ -61,10 +74,19 @@ export const defaultSynonymDraft: SynonymDraft = {
   terms: "",
 };
 
-export const filterOptions = {
-  audience: ["customer", "driver", "merchant", "internal"],
-  vertical: ["food", "payment", "safety", "delivery", "promotion"],
-  category: ["case_handling", "verification", "escalation", "policy"],
+export const filterOptions: Record<Exclude<keyof FilterState, "collection">, FilterOption[]> = {
+  audience: [{ label: "All audiences", value: "all" }],
+  contentType: [
+    { label: "All approved content", value: "all" },
+    { label: "SOP rules", value: "sop_rules" },
+    { label: "Issue router", value: "issue_router" },
+    { label: "Tool links", value: "tool_link" },
+    { label: "Action templates", value: "action_template" },
+    { label: "Full SOP pages", value: "full_sop" },
+  ],
+  taskType: [{ label: "All tasks", value: "all" }],
+  vertical: [{ label: "All verticals", value: "all" }],
+  category: [{ label: "All categories", value: "all" }],
 };
 
 export const navItems = [

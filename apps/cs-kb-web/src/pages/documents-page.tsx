@@ -20,10 +20,11 @@ import {
   useUploadDocumentAsync,
   useVersionRawText,
 } from "@/hooks/api/documents";
+import { useCollections } from "@/hooks/api/kb-index";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { fileExternalId, splitList } from "@/lib/format";
 import { useFeedback } from "@/providers/feedback-context";
-import type { DocumentSummary, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, UploadState } from "@/types";
+import type { DocumentSummary, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, KBCollectionSummary, UploadState } from "@/types";
 
 const DocumentsWorkspace = lazy(() =>
   import("@/workspaces/documents-workspace").then((module) => ({ default: module.DocumentsWorkspace })),
@@ -38,6 +39,7 @@ export function DocumentsPage() {
   const uploadTitlePrefill = getParam("upload_title", "");
   const relationPrefill = getParam("relation", "");
   const documentsQuery = useDocuments();
+  const collectionsQuery = useCollections();
   const documents = useMemo(
     () =>
       [...(documentsQuery.data ?? [])].sort((left, right) => {
@@ -127,6 +129,16 @@ export function DocumentsPage() {
       reviewFrequency: current.reviewFrequency,
       lastReviewedAt: current.lastReviewedAt,
       nextReviewDue: current.nextReviewDue,
+      collectionSlug: "",
+      collectionName: "",
+      collectionType: "",
+      collectionAssignmentStatus: "unassigned",
+      collectionSource: "",
+      collectionConfidence: 0,
+      suggestedCollectionSlug: "",
+      suggestedCollectionName: "",
+      suggestedCollectionType: "",
+      suggestedCollectionConfidence: 0,
     }));
     if (!file) {
       return;
@@ -155,6 +167,16 @@ export function DocumentsPage() {
             reviewFrequency: metadata.review_frequency || current.reviewFrequency,
             lastReviewedAt: metadata.last_reviewed_at || current.lastReviewedAt,
             nextReviewDue: metadata.next_review_due || current.nextReviewDue,
+            collectionSlug: "",
+            collectionName: "",
+            collectionType: "",
+            collectionAssignmentStatus: metadata.suggested_collection_slug ? "suggested" : "unassigned",
+            collectionSource: metadata.suggested_collection_slug ? "ai_suggested" : "",
+            collectionConfidence: 0,
+            suggestedCollectionSlug: metadata.suggested_collection_slug || "",
+            suggestedCollectionName: metadata.suggested_collection_name || "",
+            suggestedCollectionType: metadata.suggested_collection_type || "",
+            suggestedCollectionConfidence: metadata.suggested_collection_confidence || 0,
             status: "draft",
           };
         });
@@ -191,6 +213,17 @@ export function DocumentsPage() {
     form.append("status", upload.status);
     form.append("created_by", "cs-ops-ui");
     form.append("change_summary", "Uploaded from CS KB web console");
+    const approvedCollection =
+      upload.collectionAssignmentStatus === "approved" && upload.collectionSlug
+        ? {
+            collection_slug: upload.collectionSlug,
+            collection_name: upload.collectionName,
+            collection_type: upload.collectionType,
+            collection_assignment_status: "approved",
+            collection_source: upload.collectionSource || "manual",
+            collection_confidence: upload.collectionConfidence || 1,
+          }
+        : {};
     form.append(
       "metadata",
       JSON.stringify({
@@ -204,8 +237,13 @@ export function DocumentsPage() {
         review_frequency: upload.reviewFrequency,
         last_reviewed_at: upload.lastReviewedAt,
         next_review_due: upload.nextReviewDue,
+        suggested_collection_slug: upload.suggestedCollectionSlug,
+        suggested_collection_name: upload.suggestedCollectionName,
+        suggested_collection_type: upload.suggestedCollectionType,
+        suggested_collection_confidence: upload.suggestedCollectionConfidence,
         unresolved_relation_id: relationPrefill,
         source: "web_upload",
+        ...approvedCollection,
       }),
     );
 
@@ -217,7 +255,22 @@ export function DocumentsPage() {
             ? `Queued ${data.title} v${data.version_number} for background extraction. Refresh the source queue to see extracted units.`
             : `Uploaded ${data.title} v${data.version_number}, ${data.chunk_count} chunks extracted for review.`,
         );
-        setUpload((current) => ({ ...current, file: null, title: "", externalId: "" }));
+        setUpload((current) => ({
+          ...current,
+          file: null,
+          title: "",
+          externalId: "",
+          collectionSlug: "",
+          collectionName: "",
+          collectionType: "",
+          collectionAssignmentStatus: "unassigned",
+          collectionSource: "",
+          collectionConfidence: 0,
+          suggestedCollectionSlug: "",
+          suggestedCollectionName: "",
+          suggestedCollectionType: "",
+          suggestedCollectionConfidence: 0,
+        }));
       },
       onError: () => reportError("Upload failed. Confirm file type, size, and AI service health."),
     });
@@ -286,6 +339,54 @@ export function DocumentsPage() {
     );
   }
 
+  async function applyCollectionToUnits(units: ExtractionUnit[], collection: KBCollectionSummary | null) {
+    if (!units.length) {
+      reportError("No extraction units available to assign.");
+      return;
+    }
+    const metadataPatch = collection
+      ? {
+          collection_slug: collection.slug,
+          collection_name: collection.name,
+          collection_type: collection.collection_type,
+          collection_assignment_status: "approved",
+          collection_source: "manual_review",
+          collection_confidence: 1,
+        }
+      : {
+          collection_slug: "",
+          collection_name: "",
+          collection_type: "",
+          collection_assignment_status: "unassigned",
+          collection_source: "manual_review",
+          collection_confidence: 0,
+        };
+    try {
+      await Promise.all(
+        units.map((unit) =>
+          updateExtractionUnitMutation.mutateAsync({
+            unitId: unit.unit_id,
+            update: {
+              title: unit.title,
+              content: unit.content,
+              unit_type: unit.unit_type,
+              confidence: unit.confidence,
+              review_status: unit.review_status,
+              metadata: {
+                ...unit.metadata,
+                ...metadataPatch,
+              },
+              actor: "cs-ops-ui",
+            },
+          }),
+        ),
+      );
+      reportNotice(collection ? `Assigned ${units.length} units to ${collection.name}.` : `Cleared collection from ${units.length} units.`);
+    } catch {
+      reportError("Could not assign collection. Only editable draft versions can be changed.");
+    }
+  }
+
   function createExtractionUnit(versionId: string, unit: ExtractionUnitCreate) {
     createExtractionUnitMutation.mutate(
       { versionId, unit },
@@ -329,6 +430,7 @@ export function DocumentsPage() {
         busyKey={busyKey}
         chunks={chunksQuery.data ?? []}
         chunksLoading={chunksQuery.isFetching}
+        collections={collectionsQuery.data ?? []}
         documents={documents}
         extractionUnits={extractionUnitsQuery.data ?? []}
         extractionUnitsLoading={extractionUnitsQuery.isFetching}
@@ -337,6 +439,7 @@ export function DocumentsPage() {
         extractionPipelineLoading={extractionPipelineQuery.isFetching || extractionPipelineInspectionQuery.isFetching}
         metadataPreview={metadataPreviewMutation.data ?? null}
         onArchiveDocument={archiveDocument}
+        onApplyCollection={applyCollectionToUnits}
         onBulkReviewVersion={bulkReviewVersion}
         onCreateExtractionUnit={createExtractionUnit}
         onFileSelected={previewFileMetadata}

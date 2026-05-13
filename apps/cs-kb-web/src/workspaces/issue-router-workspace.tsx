@@ -4,10 +4,11 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { IssueRouterItem, KBCollectionSummary, ToolLinkSummary } from "@/types";
+import type { FilterOption, IssueRouterItem, KBCollectionSummary, ToolLinkSummary } from "@/types";
 
 export function IssueRouterWorkspace({
   audience,
+  audienceOptions,
   collection,
   collections,
   loading,
@@ -21,10 +22,13 @@ export function IssueRouterWorkspace({
   setTaskType,
   setVertical,
   taskType,
+  taskTypeOptions,
   tools,
   vertical,
+  verticalOptions,
 }: {
   audience: string;
+  audienceOptions: FilterOption[];
   collection: string;
   collections: KBCollectionSummary[];
   loading: boolean;
@@ -38,8 +42,10 @@ export function IssueRouterWorkspace({
   setTaskType: (value: string) => void;
   setVertical: (value: string) => void;
   taskType: string;
+  taskTypeOptions: FilterOption[];
   tools: ToolLinkSummary[];
   vertical: string;
+  verticalOptions: FilterOption[];
 }) {
   return (
     <div className="space-y-5">
@@ -71,12 +77,11 @@ export function IssueRouterWorkspace({
             <SelectValue placeholder="Audience" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All audiences</SelectItem>
-            <SelectItem value="rider">Rider</SelectItem>
-            <SelectItem value="driver">Driver</SelectItem>
-            <SelectItem value="merchant">Merchant</SelectItem>
-            <SelectItem value="cleaner">Cleaner</SelectItem>
-            <SelectItem value="vip_customer">VIP</SelectItem>
+            {audienceOptions.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <Select onValueChange={(value) => setVertical(value === "all" ? "" : value)} value={vertical || "all"}>
@@ -84,12 +89,11 @@ export function IssueRouterWorkspace({
             <SelectValue placeholder="Vertical" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All verticals</SelectItem>
-            <SelectItem value="food">Food</SelectItem>
-            <SelectItem value="payment">Payment</SelectItem>
-            <SelectItem value="promotion">Promotion</SelectItem>
-            <SelectItem value="account">Account</SelectItem>
-            <SelectItem value="trip_order">Trip / order</SelectItem>
+            {verticalOptions.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <Select onValueChange={(value) => setTaskType(value === "all" ? "" : value)} value={taskType || "all"}>
@@ -97,13 +101,11 @@ export function IssueRouterWorkspace({
             <SelectValue placeholder="Task" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All tasks</SelectItem>
-            <SelectItem value="create_case">Create case</SelectItem>
-            <SelectItem value="create_tasklist">Create tasklist</SelectItem>
-            <SelectItem value="transfer_queue">Transfer queue</SelectItem>
-            <SelectItem value="send_email">Send email</SelectItem>
-            <SelectItem value="call_customer">Call customer</SelectItem>
-            <SelectItem value="copy_macro">Copy macro</SelectItem>
+            {taskTypeOptions.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <Select onValueChange={(value) => setRiskLevel(value === "all" ? "" : value)} value={riskLevel || "all"}>

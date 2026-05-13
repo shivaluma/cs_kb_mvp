@@ -2,12 +2,63 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from app import repository
 from app.config import settings
 from app.openrouter import generate_grounded_answer
-from app.retrieval import retrieve
-from app.schemas import GroundedChatRequest, GroundedChatResponse, RetrievalRequest
+from app.retrieval import retrieve, to_result
+from app.schemas import GroundedChatRequest, GroundedChatResponse, RetrievalFilters, RetrievalRequest, RetrievalResponse, RetrievalResult
+
+
+DIRECT_SOP_UNIT_TYPES = {
+    "full_sop",
+    "policy_rule",
+    "exception_rule",
+    "handling_rule",
+    "routing_rule",
+    "operational_instruction",
+    "validation_rule",
+    "decision_rule",
+    "sla_rule",
+    "escalation_rule",
+    "case_creation_rule",
+    "handoff_rule",
+    "workflow_overview",
+    "workflow_graph",
+    "workflow_step",
+    "decision_point",
+    "warning",
+    "operational_note",
+    "macro_script",
+    "security_note",
+    "compliance_note",
+}
+INDEX_UNIT_TYPES = {
+    "issue_router_unit",
+    "sop_reference",
+    "vip_overlay_rule",
+    "product_update_note",
+    "tool_link",
+    "quick_action_rule",
+}
+POLICY_SOURCE_ROLES = {"direct_sop", "related_sop"}
+SOURCE_ROLE_ORDER = {
+    "direct_sop": 0,
+    "issue_router": 1,
+    "related_sop": 2,
+    "action_template": 3,
+    "tool_link": 4,
+    "parent_sop": 5,
+}
+SOURCE_GROUP_LABELS = {
+    "direct_sop": "Direct SOP",
+    "issue_router": "Issue router",
+    "related_sop": "Related SOP",
+    "action_template": "Action templates",
+    "tool_link": "Tools",
+    "parent_sop": "Parent SOP",
+}
 
 
 @dataclass(frozen=True)
@@ -19,21 +70,22 @@ class ChatModelSelection:
     fallback_model: str
 
 
+@dataclass(frozen=True)
+class ChatRetrievalBundle:
+    retrieval: RetrievalResponse
+    source_groups: list[dict[str, Any]]
+    trace: dict[str, Any]
+
+
 def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
     started_at = time.perf_counter()
-    filters = request.filters.model_copy(update={"status": ["published"]})
-    retrieval = retrieve(
-        RetrievalRequest(
-            query=request.question,
-            filters=filters,
-            limit=request.limit,
-            mode="hybrid",
-        )
-    )
+    bundle = retrieve_for_chat(request)
+    retrieval = bundle.retrieval
 
     warnings = [
         "grounded_published_sop_units_only",
         "raw_draft_archived_content_excluded",
+        "chat_kb_index_multi_stage_retrieval",
         *retrieval.warnings,
     ]
     if not retrieval.results:
@@ -47,6 +99,8 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             sources=[],
             confidence=0,
             retrieval=retrieval,
+            source_groups=bundle.source_groups,
+            retrieval_trace=bundle.trace,
             latency_ms=elapsed_ms(started_at),
             model_route=selection.route,
             model_used=selection.model,
@@ -56,6 +110,30 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         return response
 
     selection = select_chat_model(request, retrieval)
+    if not has_policy_source(retrieval.results):
+        response = GroundedChatResponse(
+            question=request.question,
+            answer=(
+                "Tìm thấy chỉ mục, tool hoặc action template liên quan, nhưng chưa có SOP published/approved "
+                "được link đủ để kết luận chính sách. Hãy mở nguồn bên dưới, assign/approve relation tới SOP target, "
+                "hoặc escalate Lead trước khi xử lý."
+            ),
+            steps=[],
+            warnings=[*warnings, "index_context_without_policy_source"],
+            citations=[],
+            sources=retrieval.results,
+            confidence=0.15,
+            retrieval=retrieval,
+            source_groups=bundle.source_groups,
+            retrieval_trace=bundle.trace,
+            latency_ms=elapsed_ms(started_at),
+            model_route=selection.route,
+            model_used=selection.model,
+            model_reason=selection.reason,
+        )
+        repository.log_chat(response)
+        return response
+
     answer, answer_warnings = generate_grounded_answer(
         request.question,
         retrieval,
@@ -87,6 +165,8 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             sources=retrieval.results,
             confidence=0,
             retrieval=retrieval,
+            source_groups=bundle.source_groups,
+            retrieval_trace=bundle.trace,
             latency_ms=elapsed_ms(started_at),
             model_route=selection.route,
             model_used=used_model,
@@ -127,6 +207,8 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         sources=cited_results or retrieval.results,
         confidence=confidence,
         retrieval=retrieval,
+        source_groups=bundle.source_groups,
+        retrieval_trace=bundle.trace,
         latency_ms=elapsed_ms(started_at),
         model_route=selection.route,
         model_used=used_model,
@@ -134,6 +216,186 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
     )
     repository.log_chat(response)
     return response
+
+
+def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
+    base_filters = request.filters.model_copy(update={"status": ["published"]})
+    direct_limit = max(request.limit, 10)
+    index_limit = max(6, min(request.limit, 10))
+
+    direct_retrieval = retrieve(
+        RetrievalRequest(
+            query=request.question,
+            filters=filters_with_unit_types(base_filters, DIRECT_SOP_UNIT_TYPES),
+            limit=direct_limit,
+            mode="hybrid",
+        ),
+        include_relation_expansion=False,
+    )
+    index_retrieval = retrieve(
+        RetrievalRequest(
+            query=request.question,
+            filters=filters_with_unit_types(base_filters, INDEX_UNIT_TYPES),
+            limit=index_limit,
+            mode="hybrid",
+        ),
+        include_relation_expansion=False,
+    )
+
+    direct_results = [
+        annotate_result(result, "direct_sop", "direct_policy_unit")
+        for result in direct_retrieval.results
+    ]
+    index_results = [
+        annotate_result(result, index_source_role(result), "kb_index_match")
+        for result in index_retrieval.results
+    ]
+    initial_results = dedupe_results([*direct_results, *index_results])
+    exclude_ids = [result.chunk_id for result in initial_results]
+    relation_rows = repository.approved_relation_target_rows_for_chunks(
+        [result.chunk_id for result in initial_results],
+        [*exclude_ids],
+        max(4, request.limit // 2),
+    )
+    related_results = [
+        annotate_result(to_result(row), "related_sop", "approved_relation_expansion")
+        for row in relation_rows
+    ]
+    exclude_ids.extend(result.chunk_id for result in related_results)
+    parent_rows = repository.parent_sop_context_rows(
+        [result.chunk_id for result in [*direct_results, *related_results]],
+        [*exclude_ids],
+        max(2, request.limit // 4),
+    )
+    parent_results = [
+        annotate_result(to_result(row), "parent_sop", "parent_full_sop_context")
+        for row in parent_rows
+    ]
+    final_results = rank_chat_results(
+        [*direct_results, *index_results, *related_results, *parent_results],
+        request.limit,
+    )
+    warnings = list(
+        dict.fromkeys(
+            [
+                *direct_retrieval.warnings,
+                *[f"index_{warning}" for warning in index_retrieval.warnings],
+            ]
+        )
+    )
+    if initial_results and not relation_rows:
+        warnings.append("no_approved_relation_expansion")
+    if not final_results:
+        warnings.append("no_reliable_source")
+
+    retrieval = RetrievalResponse(
+        query=request.question,
+        normalized_query=direct_retrieval.normalized_query or index_retrieval.normalized_query,
+        query_expansion=direct_retrieval.query_expansion or index_retrieval.query_expansion,
+        mode="hybrid",
+        results=final_results,
+        citations=[result.citation for result in final_results],
+        warnings=warnings,
+        latency_ms=direct_retrieval.latency_ms + index_retrieval.latency_ms,
+    )
+    trace = {
+        "strategy": "chat_kb_index_multi_stage",
+        "direct_count": len(direct_results),
+        "index_count": len(index_results),
+        "relation_count": len(related_results),
+        "parent_count": len(parent_results),
+        "final_count": len(final_results),
+        "scope_filters": base_filters.model_dump(),
+    }
+    return ChatRetrievalBundle(
+        retrieval=retrieval,
+        source_groups=source_groups(final_results),
+        trace=trace,
+    )
+
+
+def filters_with_unit_types(filters: RetrievalFilters, unit_types: set[str]) -> RetrievalFilters:
+    return filters.model_copy(update={"unit_types": sorted(unit_types)})
+
+
+def annotate_result(result: RetrievalResult, role: str, reason: str) -> RetrievalResult:
+    metadata = dict(result.metadata or {})
+    metadata["chat_source_role"] = role
+    metadata["chat_retrieval_reason"] = reason
+    return result.model_copy(
+        update={
+            "metadata": metadata,
+            "rank_source": list(dict.fromkeys([*result.rank_source, reason])),
+        }
+    )
+
+
+def index_source_role(result: RetrievalResult) -> str:
+    unit_type = str(result.metadata.get("unit_type") or result.section)
+    if unit_type == "tool_link":
+        return "tool_link"
+    if unit_type == "quick_action_rule":
+        return "action_template"
+    return "issue_router"
+
+
+def source_role(result: RetrievalResult) -> str:
+    metadata = result.metadata or {}
+    role = str(metadata.get("chat_source_role") or "")
+    if role:
+        return role
+    unit_type = str(metadata.get("unit_type") or result.section)
+    if unit_type == "full_sop":
+        return "parent_sop"
+    if unit_type == "tool_link":
+        return "tool_link"
+    if unit_type == "quick_action_rule":
+        return "action_template"
+    if unit_type in INDEX_UNIT_TYPES:
+        return "issue_router"
+    return "direct_sop"
+
+
+def rank_chat_results(results: list[RetrievalResult], limit: int) -> list[RetrievalResult]:
+    return sorted(
+        dedupe_results(results),
+        key=lambda result: (
+            SOURCE_ROLE_ORDER.get(source_role(result), 99),
+            -float(result.score or 0),
+            -float(result.lexical_score or 0),
+            -float(result.vector_score or 0),
+        ),
+    )[:limit]
+
+
+def dedupe_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
+    output: list[RetrievalResult] = []
+    seen: set[str] = set()
+    for result in results:
+        if result.chunk_id in seen:
+            continue
+        seen.add(result.chunk_id)
+        output.append(result)
+    return output
+
+
+def source_groups(results: list[RetrievalResult]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for role in SOURCE_ROLE_ORDER:
+        sources = [result for result in results if source_role(result) == role]
+        if sources:
+            groups.append(
+                {
+                    "role": role,
+                    "label": SOURCE_GROUP_LABELS.get(role, role),
+                    "sources": [source.model_dump() for source in sources],
+                }
+            )
+    return groups
+
+
+def has_policy_source(results: list[RetrievalResult]) -> bool:
+    return any(source_role(result) in POLICY_SOURCE_ROLES for result in results)
 
 
 def select_chat_model(request: GroundedChatRequest, retrieval: object) -> ChatModelSelection:

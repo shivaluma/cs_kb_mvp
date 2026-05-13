@@ -16,6 +16,7 @@ export const queryKeys = {
   versionRaw: (versionId: string) => ["ai-version-raw", versionId] as const,
   synonyms: (status: string) => ["search-synonyms", status] as const,
   suggestions: ["search-synonym-suggestions"] as const,
+  searchFilterOptions: ["search-filter-options"] as const,
   search: (query: string, filters: FilterState) => ["search", query, filters] as const,
   retrieval: (query: string, mode: string, filters: FilterState) =>
     ["retrieval", query, mode, filters] as const,

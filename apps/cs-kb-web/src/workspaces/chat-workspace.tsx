@@ -6,6 +6,7 @@ import {
   Loader2,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   useRef,
@@ -27,7 +28,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import type { ChatModelRoute, ChatModelRouteConfig, ChatThreadMessage, RetrievalResult } from "@/types";
+import type {
+  ChatModelRoute,
+  ChatModelRouteConfig,
+  ChatThreadMessage,
+  FilterOption,
+  FilterState,
+  RetrievalResult,
+  SourceGroup,
+} from "@/types";
 
 const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
   {
@@ -58,6 +67,9 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
 
 export function ChatWorkspace({
   busy,
+  collectionOptions,
+  dynamicFilterOptions,
+  filters,
   messages,
   modelRoutes,
   modelRoute,
@@ -66,9 +78,17 @@ export function ChatWorkspace({
   onModelRouteChange,
   onOpenDocument,
   onOpenQuickSource,
+  onUpdateFilter,
 }: {
   busy: boolean;
+  collectionOptions: FilterOption[];
+  dynamicFilterOptions: {
+    audience: FilterOption[];
+    vertical: FilterOption[];
+    taskType: FilterOption[];
+  };
   fallbackModel?: string;
+  filters: FilterState;
   messages: ChatThreadMessage[];
   modelRoutes?: ChatModelRouteConfig[];
   modelRoute: ChatModelRoute;
@@ -77,6 +97,7 @@ export function ChatWorkspace({
   onModelRouteChange: (route: ChatModelRoute) => void;
   onOpenDocument: (source: RetrievalResult) => void;
   onOpenQuickSource: (source: RetrievalResult) => void;
+  onUpdateFilter: (key: keyof FilterState, value: string) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [isExpanded, setIsExpanded] = useState(false);
@@ -148,13 +169,17 @@ export function ChatWorkspace({
       <div className="shrink-0 bg-background px-2 pb-2 pt-3 md:px-4 md:pb-3">
         <Composer
           busy={busy}
+          collectionOptions={collectionOptions}
           draft={draft}
+          dynamicFilterOptions={dynamicFilterOptions}
+          filters={filters}
           inputRef={inputRef}
           isExpanded={isExpanded}
           onDraftChange={handleDraftChange}
           onKeyDown={handleKeyDown}
           onModelRouteChange={onModelRouteChange}
           onSubmit={handleSubmit}
+          onUpdateFilter={onUpdateFilter}
           routeOptions={routeOptions}
           modelRoute={modelRoute}
         />
@@ -170,7 +195,7 @@ function EmptyChatState() {
         Where should we begin?
       </h2>
       <p className="mx-auto mt-2 max-w-xl text-center text-sm leading-6 text-muted-foreground">
-        Ask a case question. SOP Chat only answers from published SOP units with citations.
+        Ask a case question. SOP Chat searches published SOPs, issue routers, tools, and approved relations, then answers only from grounded policy evidence.
       </p>
     </section>
   );
@@ -178,7 +203,10 @@ function EmptyChatState() {
 
 function Composer({
   busy,
+  collectionOptions,
   draft,
+  dynamicFilterOptions,
+  filters,
   inputRef,
   isExpanded,
   modelRoute,
@@ -186,10 +214,18 @@ function Composer({
   onKeyDown,
   onModelRouteChange,
   onSubmit,
+  onUpdateFilter,
   routeOptions,
 }: {
   busy: boolean;
+  collectionOptions: FilterOption[];
   draft: string;
+  dynamicFilterOptions: {
+    audience: FilterOption[];
+    vertical: FilterOption[];
+    taskType: FilterOption[];
+  };
+  filters: FilterState;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   isExpanded: boolean;
   modelRoute: ChatModelRoute;
@@ -197,10 +233,71 @@ function Composer({
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onModelRouteChange: (route: ChatModelRoute) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onUpdateFilter: (key: keyof FilterState, value: string) => void;
   routeOptions: ChatModelRouteConfig[];
 }) {
+  const [scopeOpen, setScopeOpen] = useState(false);
+  const scopedValues = [filters.collection, filters.audience, filters.vertical, filters.taskType];
+  const activeScopeCount = scopedValues.filter((value) => value && value !== "all").length;
+  const scopeOptions = {
+    collection: [{ label: "All collections", value: "all" }, ...collectionOptions],
+    audience: dynamicFilterOptions.audience.length
+      ? dynamicFilterOptions.audience
+      : [{ label: "All audiences", value: "all" }],
+    vertical: dynamicFilterOptions.vertical.length
+      ? dynamicFilterOptions.vertical
+      : [{ label: "All verticals", value: "all" }],
+    taskType: dynamicFilterOptions.taskType.length
+      ? dynamicFilterOptions.taskType
+      : [{ label: "All tasks", value: "all" }],
+  };
+
   return (
-    <div className="mx-auto w-full max-w-3xl">
+    <div className="mx-auto w-full max-w-3xl space-y-2">
+      <div className="flex justify-end">
+        <Button
+          aria-expanded={scopeOpen}
+          className="h-8 rounded-full px-2 text-xs text-muted-foreground"
+          onClick={() => setScopeOpen((open) => !open)}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          <SlidersHorizontal data-icon="inline-start" className="size-3.5" />
+          Scope
+          {activeScopeCount ? <CompactBadge variant="secondary">{activeScopeCount}</CompactBadge> : null}
+        </Button>
+      </div>
+
+      {scopeOpen ? (
+        <div className="grid gap-2 rounded-2xl border bg-muted/20 p-2 sm:grid-cols-2 lg:grid-cols-4">
+          <ScopeSelect
+            label="Collection"
+            onChange={(value) => onUpdateFilter("collection", value)}
+            options={scopeOptions.collection}
+            value={filters.collection}
+          />
+          <ScopeSelect
+            label="Audience"
+            onChange={(value) => onUpdateFilter("audience", value)}
+            options={scopeOptions.audience}
+            value={filters.audience}
+          />
+          <ScopeSelect
+            label="Vertical"
+            onChange={(value) => onUpdateFilter("vertical", value)}
+            options={scopeOptions.vertical}
+            value={filters.vertical}
+          />
+          <ScopeSelect
+            label="Task"
+            onChange={(value) => onUpdateFilter("taskType", value)}
+            options={scopeOptions.taskType}
+            value={filters.taskType}
+          />
+        </div>
+      ) : null}
+
       <form className="group/composer w-full" onSubmit={onSubmit}>
         <div
           className={cn(
@@ -279,6 +376,36 @@ function Composer({
   );
 }
 
+function ScopeSelect({
+  label,
+  onChange,
+  options,
+  value,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  options: FilterOption[];
+  value: string;
+}) {
+  return (
+    <label className="grid min-w-0 gap-1">
+      <span className="px-1 text-[11px] font-semibold text-muted-foreground">{label}</span>
+      <Select onValueChange={onChange} value={value}>
+        <SelectTrigger className="h-9 min-w-0 rounded-full border-0 bg-background/80 px-3 text-xs shadow-none">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option) => (
+            <SelectItem key={`${label}-${option.value}`} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </label>
+  );
+}
+
 function ChatBubble({
   message,
   onCopy,
@@ -292,6 +419,7 @@ function ChatBubble({
 }) {
   const isUser = message.role === "user";
   const response = message.response;
+  const groupedSources = response ? sourceGroupsForResponse(response) : [];
   return (
     <article className={cn("min-w-0", isUser ? "ml-auto max-w-[78%]" : "mr-auto w-full max-w-3xl")}>
       <div
@@ -322,17 +450,28 @@ function ChatBubble({
                 Model routing: {response.model_reason}
               </p>
             ) : null}
-            {response.sources.length ? (
+            {hasRetrievalTrace(response) ? <RetrievalTrace trace={response.retrieval_trace ?? {}} /> : null}
+            {groupedSources.length ? (
               <section className="min-w-0">
-                <p className="text-xs font-semibold text-muted-foreground">Published sources used</p>
-                <div className="mt-2 grid min-w-0 gap-2">
-                  {response.sources.slice(0, 4).map((source) => (
-                    <SourceCard
-                      key={source.chunk_id}
-                      onOpenDocument={onOpenDocument}
-                      onOpenQuickSource={onOpenQuickSource}
-                      source={source}
-                    />
+                <p className="text-xs font-semibold text-muted-foreground">Sources used</p>
+                <div className="mt-2 grid min-w-0 gap-3">
+                  {groupedSources.map((group) => (
+                    <div className="min-w-0" key={group.role}>
+                      <div className="mb-1.5 flex items-center gap-2">
+                        <CompactBadge variant="secondary">{group.label}</CompactBadge>
+                        <span className="text-[11px] text-muted-foreground">{group.sources.length}</span>
+                      </div>
+                      <div className="grid min-w-0 gap-2">
+                        {group.sources.map((source) => (
+                          <SourceCard
+                            key={`${group.role}-${source.chunk_id}`}
+                            onOpenDocument={onOpenDocument}
+                            onOpenQuickSource={onOpenQuickSource}
+                            source={source}
+                          />
+                        ))}
+                      </div>
+                    </div>
                   ))}
                 </div>
               </section>
@@ -351,12 +490,14 @@ function ResponseMeta({
   onCopy: (text: string) => void;
   response: NonNullable<ChatThreadMessage["response"]>;
 }) {
+  const finalSourceCount = numericTraceValue(response.retrieval_trace, "final_count");
   return (
     <div className="flex max-w-full flex-wrap items-center gap-1.5">
       <CompactBadge variant={response.citations.length ? "secondary" : "destructive"}>
         {response.citations.length ? `${response.citations.length} citations` : "no citation"}
       </CompactBadge>
       <CompactBadge>{Math.round(response.confidence * 100)}% confidence</CompactBadge>
+      {finalSourceCount ? <CompactBadge>{finalSourceCount} sources</CompactBadge> : null}
       {response.model_route ? <CompactBadge>{response.model_route}</CompactBadge> : null}
       {response.model_used ? <CompactBadge className="max-w-[13rem]">{response.model_used}</CompactBadge> : null}
       <CompactBadge>
@@ -368,6 +509,32 @@ function ResponseMeta({
         Copy
       </Button>
     </div>
+  );
+}
+
+function RetrievalTrace({ trace }: { trace: Record<string, unknown> }) {
+  const stages = [
+    { label: "Direct SOP", value: numericTraceValue(trace, "direct_count") },
+    { label: "Index", value: numericTraceValue(trace, "index_count") },
+    { label: "Related", value: numericTraceValue(trace, "relation_count") },
+    { label: "Parent", value: numericTraceValue(trace, "parent_count") },
+  ].filter((stage) => stage.value > 0);
+
+  if (!stages.length) {
+    return null;
+  }
+
+  return (
+    <section className="min-w-0 rounded-xl border bg-muted/15 px-3 py-2">
+      <p className="text-xs font-semibold text-muted-foreground">Retrieval trace</p>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {stages.map((stage) => (
+          <CompactBadge key={stage.label}>
+            {stage.label}: {stage.value}
+          </CompactBadge>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -409,15 +576,26 @@ function SourceCard({
   source: RetrievalResult;
 }) {
   const unitType = String(source.metadata.unit_type ?? source.section);
+  const role = metadataText(source.metadata.chat_source_role);
+  const reason = metadataText(source.metadata.chat_retrieval_reason);
+  const relationType = metadataText(source.metadata.relation_type);
+  const collectionSlug = metadataText(source.metadata.collection_slug ?? source.metadata.collection);
+  const taskTypes = metadataValues(source.metadata.task_type ?? source.metadata.task_types);
   return (
     <div className="min-w-0 rounded-xl border bg-card px-3 py-2.5">
       <div className="flex max-w-full flex-wrap gap-1.5">
+        {role ? <CompactBadge variant="secondary">{sourceRoleLabel(role)}</CompactBadge> : null}
         <CompactBadge>{unitType}</CompactBadge>
         <CompactBadge>v{source.version_number}</CompactBadge>
-        <CompactBadge>{source.rank_source.join("+") || "retrieval"}</CompactBadge>
+        {relationType ? <CompactBadge>{relationType}</CompactBadge> : null}
+        {collectionSlug ? <CompactBadge className="max-w-[12rem]">{collectionSlug}</CompactBadge> : null}
+        {taskTypes.slice(0, 2).map((taskType) => (
+          <CompactBadge className="max-w-[10rem]" key={taskType}>{taskType}</CompactBadge>
+        ))}
       </div>
       <p className="mt-2 line-clamp-2 break-words text-sm font-semibold leading-5">{source.heading || source.title}</p>
       <p className="mt-1 line-clamp-2 break-words text-xs leading-5 text-muted-foreground">{source.content}</p>
+      {reason ? <p className="mt-1 truncate text-[11px] text-muted-foreground">{reason}</p> : null}
       <p className="mt-2 truncate text-[11px] text-muted-foreground">{source.source_filename}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         <Button className="h-7 rounded-full px-2" onClick={() => onOpenQuickSource(source)} size="sm" type="button" variant="outline">
@@ -431,6 +609,55 @@ function SourceCard({
       </div>
     </div>
   );
+}
+
+function sourceGroupsForResponse(response: NonNullable<ChatThreadMessage["response"]>): SourceGroup[] {
+  const groups = (response.source_groups ?? []).filter((group) => group.sources.length);
+  if (groups.length) {
+    return groups;
+  }
+  return response.sources.length
+    ? [{ role: "sources", label: "Published sources", sources: response.sources }]
+    : [];
+}
+
+function hasRetrievalTrace(response: NonNullable<ChatThreadMessage["response"]>) {
+  return Boolean(response.retrieval_trace && Object.keys(response.retrieval_trace).length);
+}
+
+function numericTraceValue(trace: Record<string, unknown> | undefined, key: string) {
+  const value = trace?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function metadataText(value: unknown) {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  return "";
+}
+
+function metadataValues(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map(metadataText).filter(Boolean);
+  }
+  const text = metadataText(value);
+  return text ? [text] : [];
+}
+
+function sourceRoleLabel(role: string) {
+  const labels: Record<string, string> = {
+    direct_sop: "Direct SOP",
+    issue_router: "Issue router",
+    related_sop: "Related SOP",
+    action_template: "Action template",
+    tool_link: "Tool",
+    parent_sop: "Parent SOP",
+  };
+  return labels[role] ?? role;
 }
 
 function CompactBadge({

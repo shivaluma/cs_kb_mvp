@@ -1,10 +1,11 @@
-import type { ElementType } from "react";
+import { useMemo, useState, type ElementType } from "react";
 import {
   Bot,
   CheckCircle2,
   Copy,
   FileClock,
   Search,
+  SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
 
@@ -19,11 +20,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { filterOptions } from "@/constants";
+import { filterOptions as defaultFilterOptions } from "@/constants";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type {
   AISuggestion,
+  FilterOption,
   FilterState,
   Macro,
   SearchResult,
@@ -37,12 +39,12 @@ export function FilterSelect({
 }: {
   label: string;
   onValueChange: (value: string) => void;
-  options: string[];
+  options: FilterOption[];
   value: string;
 }) {
   return (
     <div className="grid gap-1.5">
-      <label className="text-xs font-medium capitalize text-muted-foreground">
+      <label className="text-xs font-medium text-muted-foreground">
         {label}
       </label>
       <Select onValueChange={onValueChange} value={value}>
@@ -50,10 +52,9 @@ export function FilterSelect({
           <SelectValue placeholder={label} />
         </SelectTrigger>
         <SelectContent align="start">
-          <SelectItem value="all">All {label}</SelectItem>
           {options.map((option) => (
-            <SelectItem key={option} value={option}>
-              {option}
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
             </SelectItem>
           ))}
         </SelectContent>
@@ -63,26 +64,86 @@ export function FilterSelect({
 }
 
 export function FilterGrid({
+  collectionOptions = [],
+  filterOptions = {},
   filters,
   onUpdateFilter,
+  showAdvancedByDefault = false,
 }: {
+  collectionOptions?: FilterOption[];
+  filterOptions?: Partial<Record<Exclude<keyof FilterState, "collection">, FilterOption[]>>;
   filters: FilterState;
   onUpdateFilter: (key: keyof FilterState, value: string) => void;
+  showAdvancedByDefault?: boolean;
 }) {
+  const [advancedOpen, setAdvancedOpen] = useState(showAdvancedByDefault);
+  const collections = useMemo(
+    () => [
+      { label: "All collections", value: "all" },
+      ...collectionOptions.filter((option) => option.value !== "all"),
+    ],
+    [collectionOptions],
+  );
+  const advancedFilters: Array<{
+    key: keyof FilterState;
+    label: string;
+    options: FilterOption[];
+  }> = [
+    { key: "taskType", label: "Task type", options: filterOptions.taskType ?? defaultFilterOptions.taskType },
+    { key: "vertical", label: "Vertical", options: filterOptions.vertical ?? defaultFilterOptions.vertical },
+    { key: "category", label: "Category", options: filterOptions.category ?? defaultFilterOptions.category },
+  ];
+  const advancedActiveCount = advancedFilters.filter(({ key }) => filters[key] !== "all").length;
   return (
-    <>
-      {Object.entries(filterOptions).map(([key, options]) => (
+    <div className="space-y-2">
+      <div className="grid gap-2 md:grid-cols-3">
         <FilterSelect
-          key={key}
-          label={key}
-          onValueChange={(value) =>
-            onUpdateFilter(key as keyof FilterState, value)
-          }
-          options={options}
-          value={filters[key as keyof FilterState]}
+          label="Collection"
+          onValueChange={(value) => onUpdateFilter("collection", value)}
+          options={collections}
+          value={filters.collection}
         />
-      ))}
-    </>
+        <FilterSelect
+          label="Audience"
+          onValueChange={(value) => onUpdateFilter("audience", value)}
+          options={filterOptions.audience ?? defaultFilterOptions.audience}
+          value={filters.audience}
+        />
+        <FilterSelect
+          label="Content type"
+          onValueChange={(value) => onUpdateFilter("contentType", value)}
+          options={filterOptions.contentType ?? defaultFilterOptions.contentType}
+          value={filters.contentType}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <Button
+          className="h-8 px-2 text-xs text-muted-foreground"
+          onClick={() => setAdvancedOpen((current) => !current)}
+          type="button"
+          variant="ghost"
+        >
+          <SlidersHorizontal data-icon="inline-start" className="size-3.5" />
+          Advanced filters
+          {advancedActiveCount > 0 ? <Badge variant="secondary">{advancedActiveCount}</Badge> : null}
+        </Button>
+
+        {advancedOpen ? (
+          <div className="grid gap-2 md:grid-cols-3">
+            {advancedFilters.map(({ key, label, options }) => (
+              <FilterSelect
+                key={key}
+                label={label}
+                onValueChange={(value) => onUpdateFilter(key, value)}
+                options={options}
+                value={filters[key]}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -386,4 +447,4 @@ export function LoadingIcon() {
   return <Sparkles data-icon="inline-start" className="size-4" />;
 }
 
-export { filterOptions, FileClock };
+export { defaultFilterOptions as filterOptions, FileClock };

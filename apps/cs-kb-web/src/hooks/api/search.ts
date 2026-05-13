@@ -1,7 +1,17 @@
 import { useMutation } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { apiGet, apiPost } from "@/lib/api";
-import type { AISuggestion, RetrievalResponse, RetrievalResult, SearchResult, SOP } from "@/types";
+import type { AISuggestion, RetrievalResponse, RetrievalResult, SearchFilterOptions, SearchResult, SOP } from "@/types";
+
+import { queryKeys } from "./query-keys";
+
+export function useSearchFilterOptions() {
+  return useQuery({
+    queryKey: queryKeys.searchFilterOptions,
+    queryFn: () => apiGet<SearchFilterOptions>("/api/v1/search/filter-options"),
+  });
+}
 
 export function useSearch() {
   return useMutation({

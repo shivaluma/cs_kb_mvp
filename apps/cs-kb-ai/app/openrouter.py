@@ -26,6 +26,23 @@ from app.schemas import (
 MAX_AI_BREAKDOWN_PROMPT_CHARS = 24000
 MAX_AI_BREAKDOWN_RESPONSE_CHARS = 60000
 MAX_AI_BREAKDOWN_JSON_CHARS = 60000
+COLLECTION_HINTS = {
+    "cs-core-operating-rules": ("CS Core Operating Rules", "domain"),
+    "customer-rider-operations": ("Customer / Rider Operations", "audience"),
+    "driver-operations": ("Driver Operations", "audience"),
+    "merchant-mcu-operations": ("Merchant / MCU Operations", "audience"),
+    "cleaner-operations": ("Cleaner Operations", "audience"),
+    "payment-refund": ("Payment & Refund", "task"),
+    "account-verification": ("Account & Verification", "task"),
+    "trip-order-issues": ("Trip / Order Issues", "task"),
+    "promotion-voucher": ("Promotion / Voucher", "task"),
+    "social-call-email-handling": ("Social / Call / Email Handling", "channel"),
+    "tech-bpla-msc-handoff": ("Tech / BPLA / MSC Handoff", "owner"),
+    "qa-zt-compliance": ("QA / ZT / Compliance", "risk"),
+    "vip-customer-handling": ("VIP Customer Handling", "risk"),
+    "tool-directory": ("Tool Directory", "tool"),
+    "product-updates": ("Product Updates", "domain"),
+}
 
 _AI_BREAKDOWN_BUFFER: ContextVar[list[dict[str, Any]] | None] = ContextVar("ai_breakdown_buffer", default=None)
 
@@ -1385,6 +1402,11 @@ def generate_grounded_answer(
         metadata = {
             "unit_type": result.metadata.get("unit_type"),
             "retrieval_scope": result.metadata.get("retrieval_scope"),
+            "chat_source_role": result.metadata.get("chat_source_role"),
+            "chat_retrieval_reason": result.metadata.get("chat_retrieval_reason"),
+            "collection_slug": result.metadata.get("collection_slug"),
+            "task_type": result.metadata.get("task_type"),
+            "relation_type": result.metadata.get("relation_type"),
             "risk_level": result.metadata.get("risk_level"),
             "tags": result.metadata.get("tags"),
             "aliases": result.metadata.get("aliases"),
@@ -1417,6 +1439,8 @@ def generate_grounded_answer(
                     "Không dùng model knowledge ngoài sources. Không dùng raw upload, draft, archived content. "
                     "Nếu sources không đủ căn cứ, trả lời rằng không tìm thấy SOP published đủ tin cậy. "
                     "Không tự tạo policy, điều kiện xử lý, hoặc cảnh báo rủi ro ngoài source. "
+                    "Nguồn có metadata chat_source_role=issue_router/tool_link/action_template chỉ là context điều hướng/tool/action, không đủ để kết luận policy nếu không có direct_sop hoặc related_sop. "
+                    "Nếu chỉ có context index/tool/action mà không có source role direct_sop hoặc related_sop, phải nói chưa đủ SOP được link để trả lời chắc chắn. "
                     "Câu trả lời phải ngắn, actionable, tiếng Việt, và có warning nếu source có risk/compliance/security/financial/account/escalation signal. "
                     + (
                         "Đây là câu hỏi có rủi ro cao hoặc policy/exception: nếu source không nêu rõ điều kiện/action, bắt buộc từ chối kết luận và hướng dẫn mở source/escalate Lead. "
@@ -1491,9 +1515,13 @@ def suggest_document_metadata(
                     "Không đoán policy hoặc case reason nếu không có căn cứ trong source. "
                     "Trả JSON shape {\"metadata\":{...},\"signals\":{...}}.\n\n"
                     "metadata bắt buộc gồm: title, audience, vertical, category, tags, case_reasons, owner_team, source, document_type, source_type, review_status, extraction_confidence.\n"
+                    "Nếu source khớp rõ với một collection vận hành, thêm suggested_collection_slug, suggested_collection_name, suggested_collection_type, suggested_collection_confidence. "
+                    "Không tự set collection_slug vì collection cần CS Ops approve thủ công trước khi dùng production.\n"
                     "- title viết tiếng Việt theo tài liệu nguồn.\n"
                     "- audience là array lowercase theo đối tượng nghiệp vụ xuất hiện rõ trong source hoặc taxonomy đang dùng; để [] nếu không rõ.\n"
                     "- vertical/category/tags/case_reasons chỉ lấy hoặc suy luận rất sát từ source.\n"
+                    "- suggested_collection_slug chỉ được dùng một trong các slug sau, để rỗng nếu không chắc: "
+                    f"{json.dumps(list(COLLECTION_HINTS.keys()), ensure_ascii=False)}.\n"
                     "- owner_team để chuỗi rỗng nếu source không có owner rõ ràng.\n"
                     "- review_status luôn là needs_review.\n"
                     "- extraction_confidence là số 0..1 dựa trên độ rõ của source.\n"
@@ -1548,6 +1576,25 @@ def normalize_metadata(metadata: dict[str, Any], filename: str, document_type: s
         confidence_value = float(confidence)
     except (TypeError, ValueError):
         confidence_value = 0.0
+    suggested_collection_slug = normalize_collection_slug(
+        text(metadata.get("suggested_collection_slug") or metadata.get("collection_slug") or metadata.get("collection"))
+    )
+    suggested_collection_name = text(metadata.get("suggested_collection_name") or metadata.get("collection_name"))
+    suggested_collection_type = text(metadata.get("suggested_collection_type") or metadata.get("collection_type"))
+    suggested_collection_confidence = metadata.get("suggested_collection_confidence", metadata.get("collection_confidence", 0.0))
+    try:
+        suggested_collection_confidence_value = float(suggested_collection_confidence)
+    except (TypeError, ValueError):
+        suggested_collection_confidence_value = 0.0
+    if suggested_collection_slug in COLLECTION_HINTS:
+        default_name, default_type = COLLECTION_HINTS[suggested_collection_slug]
+        suggested_collection_name = suggested_collection_name or default_name
+        suggested_collection_type = suggested_collection_type or default_type
+    else:
+        suggested_collection_slug = ""
+        suggested_collection_name = ""
+        suggested_collection_type = ""
+        suggested_collection_confidence_value = 0.0
 
     return {
         "title": text(metadata.get("title")) or Path(filename).stem,
@@ -1562,7 +1609,34 @@ def normalize_metadata(metadata: dict[str, Any], filename: str, document_type: s
         "source_type": text(metadata.get("source_type")) or source_type,
         "review_status": "needs_review",
         "extraction_confidence": max(0.0, min(confidence_value, 1.0)),
+        "collection_assignment_status": "suggested" if suggested_collection_slug else "unassigned",
+        "collection_source": "ai_suggested" if suggested_collection_slug else "",
+        "suggested_collection_slug": suggested_collection_slug,
+        "suggested_collection_name": suggested_collection_name,
+        "suggested_collection_type": suggested_collection_type,
+        "suggested_collection_confidence": max(0.0, min(suggested_collection_confidence_value, 1.0)),
     }
+
+
+def normalize_collection_slug(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", strip_accents(text.lower())).strip("-")
+    if slug in COLLECTION_HINTS:
+        return slug
+    for candidate_slug, (name, _collection_type) in COLLECTION_HINTS.items():
+        if slug == re.sub(r"[^a-z0-9]+", "-", strip_accents(name.lower())).strip("-"):
+            return candidate_slug
+    return ""
+
+
+def strip_accents(value: str) -> str:
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFKD", value)
+        if not unicodedata.combining(char)
+    ).replace("đ", "d")
 
 
 def normalize_unit(unit: dict[str, Any]) -> dict[str, Any]:

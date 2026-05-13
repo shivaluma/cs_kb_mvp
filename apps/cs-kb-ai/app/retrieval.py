@@ -12,7 +12,7 @@ from app.text_processing import expand_query, normalize_phrase
 RRF_K = 60
 
 
-def retrieve(request: RetrievalRequest) -> RetrievalResponse:
+def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True) -> RetrievalResponse:
     started_at = time.perf_counter()
     synonym_groups = repository.active_synonym_groups()
     normalized_query, expansions, matched_synonyms = expand_query(request.query, synonym_groups)
@@ -61,13 +61,14 @@ def retrieve(request: RetrievalRequest) -> RetrievalResponse:
 
     fused_rows = rerank_by_query_intent(normalized_query, fused_rows)[: request.limit]
     fused_rows = [row for row in fused_rows if is_reliable(row)]
-    relation_rows = repository.approved_relation_target_rows(
-        [str(row.get("document_id") or "") for row in fused_rows],
-        [str(row.get("chunk_id") or "") for row in fused_rows],
-        min(2, request.limit),
-    )
-    if relation_rows:
-        fused_rows = [*fused_rows, *relation_rows]
+    if include_relation_expansion:
+        relation_rows = repository.approved_relation_target_rows(
+            [str(row.get("document_id") or "") for row in fused_rows],
+            [str(row.get("chunk_id") or "") for row in fused_rows],
+            min(2, request.limit),
+        )
+        if relation_rows:
+            fused_rows = [*fused_rows, *relation_rows]
     if not fused_rows:
         warnings.append("no_reliable_source")
 

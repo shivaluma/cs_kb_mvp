@@ -136,6 +136,16 @@ class DocumentMetadata(BaseModel):
     review_frequency: str = ""
     last_reviewed_at: str = ""
     next_review_due: str = ""
+    collection_slug: str = ""
+    collection_name: str = ""
+    collection_type: str = ""
+    collection_assignment_status: str = "unassigned"
+    collection_source: str = ""
+    collection_confidence: float = 0.0
+    suggested_collection_slug: str = ""
+    suggested_collection_name: str = ""
+    suggested_collection_type: str = ""
+    suggested_collection_confidence: float = 0.0
     pipeline_job_status: str = ""
     pipeline_current_stage: str = ""
     pipeline_artifacts: list[dict[str, Any]] = Field(default_factory=list)
@@ -922,6 +932,17 @@ class RetrievalFilters(BaseModel):
     status: list[VersionStatus] = Field(default_factory=lambda: ["published"])
 
 
+class SearchFilterOptions(BaseModel):
+    audience: list[str] = Field(default_factory=list)
+    vertical: list[str] = Field(default_factory=list)
+    category: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    case_reasons: list[str] = Field(default_factory=list)
+    collections: list[str] = Field(default_factory=list)
+    task_types: list[str] = Field(default_factory=list)
+    unit_types: list[str] = Field(default_factory=list)
+
+
 class KBCollectionSummary(BaseModel):
     id: str
     name: str
@@ -1068,7 +1089,7 @@ class GroundedChatRequest(BaseModel):
 
     question: str = Field(min_length=1, max_length=4000)
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
-    limit: int = Field(default=6, ge=1, le=10)
+    limit: int = Field(default=10, ge=1, le=14)
     conversation: list[ChatMessage] = Field(default_factory=list, max_length=8)
     model_route: Literal["auto", "simple", "policy", "high_risk", "complex"] = "simple"
 
@@ -1092,6 +1113,8 @@ class GroundedChatResponse(BaseModel):
     sources: list[RetrievalResult] = Field(default_factory=list)
     confidence: float = 0.0
     retrieval: RetrievalResponse
+    source_groups: list[dict[str, Any]] = Field(default_factory=list)
+    retrieval_trace: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int
     model_route: str = "auto"
     model_used: str = ""
