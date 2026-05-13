@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from app.chat import (
     ChatRetrievalBundle,
+    assistant_context_briefs,
+    assistant_context_chunk_ids,
     contextual_retrieval_query,
     evidence_confidence,
     grounded_chat,
@@ -13,7 +15,16 @@ from app.chat import (
     should_use_recent_context,
     updated_session_summary,
 )
-from app.schemas import Citation, GroundedAnswerPayload, GroundedChatRequest, RetrievalResponse, RetrievalResult
+from app.schemas import (
+    ChatSessionCreateRequest,
+    ChatSessionMessageRequest,
+    ChatSessionUpdateRequest,
+    Citation,
+    GroundedAnswerPayload,
+    GroundedChatRequest,
+    RetrievalResponse,
+    RetrievalResult,
+)
 
 
 class ChatRetrievalTest(unittest.TestCase):
@@ -196,8 +207,70 @@ class ChatRetrievalTest(unittest.TestCase):
         expanded = contextual_retrieval_query("vậy chat social thì sao", recent, "Scope: account verification")
         plain = contextual_retrieval_query("Quy định hoàn tiền đơn food", recent, "Scope: account verification")
 
-        self.assertIn("Context for resolving references only", expanded)
+        self.assertIn("Follow-up context for retrieval only", expanded)
         self.assertEqual(plain, "Quy định hoàn tiền đơn food")
+
+    def test_follow_up_query_uses_previous_assistant_brief(self) -> None:
+        expanded = contextual_retrieval_query(
+            "rồi làm gì tiếp",
+            ["KH/TX liên hệ qua email hotro thì hỗ trợ làm sao"],
+            "Scope: account verification",
+            ["Nếu KH/TX cung cấp được thông tin, CS sẽ gọi ra xác minh thông tin. Sau đó hỗ trợ theo quy trình tương ứng."],
+        )
+
+        self.assertIn("gọi ra xác minh thông tin", expanded)
+        self.assertIn("Follow-up context for retrieval only", expanded)
+
+    def test_assistant_context_brief_extracts_steps_and_source_ids(self) -> None:
+        rows = [
+            {
+                "content": "fallback",
+                "source_chunk_ids": ["chunk-a"],
+                "response_payload": {
+                    "answer": "Workflow email.",
+                    "steps": ["B1 kiểm tra email", "B2 gọi ra xác minh"],
+                    "citations": [{"chunk_id": "chunk-b", "title": "Email SOP"}],
+                },
+            }
+        ]
+
+        self.assertIn("B2 gọi ra xác minh", assistant_context_briefs(rows)[0])
+        self.assertEqual(assistant_context_chunk_ids(rows), ["chunk-a", "chunk-b"])
+
+    def test_follow_up_reuses_previous_cited_chunks_as_context_sources(self) -> None:
+        generic = retrieval_result(
+            "generic",
+            "handling_rule",
+            score=0.45,
+            heading="Đối với kênh Call In App, Mail In App, Chat",
+            content="Không cần xác minh thông tin người liên hệ.",
+        )
+        previous_source_row = retrieval_row(
+            "prev-workflow",
+            "workflow_step",
+            score=0.32,
+            heading="Gọi ra xác minh thông tin",
+            content="Nếu KH/TX cung cấp được thông tin, CS sẽ gọi ra xác minh thông tin và tiếp tục xử lý theo quy trình tương ứng.",
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([generic]), retrieval_response([])]),
+            patch("app.chat.repository.published_chunk_rows_by_ids", return_value=[previous_source_row]) as context_rows,
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]),
+        ):
+            bundle = retrieve_for_chat(
+                GroundedChatRequest(
+                    question="CS sẽ gọi ra xác minh thông tin rồi làm gì tiếp",
+                    retrieval_query="CS sẽ gọi ra xác minh thông tin rồi làm gì tiếp\nFollow-up context: gọi ra xác minh thông tin",
+                    context_chunk_ids=["prev-workflow"],
+                    limit=10,
+                )
+            )
+
+        context_rows.assert_called_once()
+        self.assertEqual(bundle.retrieval.results[0].chunk_id, "prev-workflow")
+        self.assertEqual(bundle.retrieval.results[0].metadata["chat_retrieval_reason"], "session_context_source")
 
     def test_session_summary_stays_short_and_intent_only(self) -> None:
         summary = updated_session_summary(
@@ -209,6 +282,12 @@ class ChatRetrievalTest(unittest.TestCase):
         self.assertLessEqual(len(summary), 600)
         self.assertIn("Latest user intent", summary)
         self.assertIn("account-verification", summary)
+
+    def test_blank_model_route_defaults_for_legacy_clients(self) -> None:
+        self.assertEqual(ChatSessionCreateRequest(model_route="").model_route, "simple")
+        self.assertEqual(ChatSessionMessageRequest(question="hello", model_route="").model_route, "simple")
+        self.assertEqual(GroundedChatRequest(question="hello", model_route="").model_route, "simple")
+        self.assertIsNone(ChatSessionUpdateRequest(model_route="").model_route)
 
 
 def retrieval_response(results: list[RetrievalResult]) -> RetrievalResponse:

@@ -4668,6 +4668,49 @@ def approved_relation_target_rows_for_chunks(source_chunk_ids: list[str], exclud
         return [dict(row) for row in rows]
 
 
+def published_chunk_rows_by_ids(chunk_ids: list[str], exclude_chunk_ids: list[str] | None = None, limit: int = 6) -> list[dict[str, Any]]:
+    ids = list(dict.fromkeys([item for item in chunk_ids if item]))
+    if not ids or limit <= 0:
+        return []
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT c.id AS chunk_id,
+                   c.document_id,
+                   c.version_id,
+                   d.title,
+                   COALESCE(c.metadata->>'source_filename', d.source_filename) AS source_filename,
+                   v.version_number,
+                   c.chunk_index,
+                   c.section,
+                   c.heading,
+                   c.content,
+                   c.metadata,
+                   0.32::float AS score,
+                   0.0::float AS lexical_score,
+                   0.0::float AS vector_score,
+                   ARRAY['session_context_source']::text[] AS rank_source,
+                   0 AS best_rank
+            FROM ai_chunks c
+            JOIN ai_documents d ON d.id = c.document_id
+            JOIN ai_document_versions v ON v.id = c.version_id
+            WHERE c.id::text = ANY(%s)
+              AND d.status = 'active'
+              AND d.current_version_id = v.id
+              AND v.status = 'published'
+              AND COALESCE(c.metadata->>'review_status', '') = 'approved'
+              AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
+              AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND NOT (c.id::text = ANY(%s))
+            ORDER BY array_position(%s::text[], c.id::text)
+            LIMIT %s
+            """,
+            (ids, ["structured", "manually_curated"], exclude_chunk_ids or [""], ids, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def parent_sop_context_rows(chunk_ids: list[str], exclude_chunk_ids: list[str], limit: int) -> list[dict[str, Any]]:
     source_ids = list(dict.fromkeys([item for item in chunk_ids if item]))
     if not source_ids or limit <= 0:
@@ -4933,6 +4976,24 @@ def recent_chat_user_messages(session_id: str, limit: int = 2) -> list[str]:
             (session_id, max(1, min(int(limit or 2), 4))),
         ).fetchall()
         return [str(row["content"]) for row in reversed(rows)]
+
+
+def recent_chat_assistant_messages(session_id: str, limit: int = 1) -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT content,
+                   response_payload,
+                   source_chunk_ids
+            FROM ai_chat_messages
+            WHERE session_id = %s AND role = 'assistant'
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (session_id, max(1, min(int(limit or 1), 2))),
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
 
 
 def insert_chat_message(

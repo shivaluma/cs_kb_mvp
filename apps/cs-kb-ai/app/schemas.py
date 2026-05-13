@@ -1107,10 +1107,17 @@ class GroundedChatRequest(BaseModel):
     retrieval_query: str = Field(default="", max_length=4000)
     session_summary: str = Field(default="", max_length=700)
     recent_user_context: list[str] = Field(default_factory=list, max_length=2)
+    recent_assistant_context: list[str] = Field(default_factory=list, max_length=1)
+    context_chunk_ids: list[str] = Field(default_factory=list, max_length=8)
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
     limit: int = Field(default=10, ge=1, le=14)
     conversation: list[ChatMessage] = Field(default_factory=list, max_length=8)
     model_route: ChatModelRoute = "simple"
+
+    @field_validator("model_route", mode="before")
+    @classmethod
+    def default_blank_model_route(cls, value: Any) -> Any:
+        return "simple" if value is None or (isinstance(value, str) and not value.strip()) else value
 
 
 class GroundedAnswerPayload(BaseModel):
@@ -1162,6 +1169,11 @@ class ChatSessionCreateRequest(BaseModel):
     model_route: ChatModelRoute = "simple"
     filters: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("model_route", mode="before")
+    @classmethod
+    def default_blank_model_route(cls, value: Any) -> Any:
+        return "simple" if value is None or (isinstance(value, str) and not value.strip()) else value
+
 
 class ChatSessionUpdateRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
@@ -1170,6 +1182,11 @@ class ChatSessionUpdateRequest(BaseModel):
     status: Optional[ChatSessionStatus] = None
     model_route: Optional[ChatModelRoute] = None
     filters: Optional[dict[str, Any]] = None
+
+    @field_validator("model_route", mode="before")
+    @classmethod
+    def ignore_blank_model_route(cls, value: Any) -> Any:
+        return None if value is None or (isinstance(value, str) and not value.strip()) else value
 
 
 class ChatStoredMessage(BaseModel):
@@ -1190,6 +1207,11 @@ class ChatSessionMessageRequest(BaseModel):
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
     limit: int = Field(default=12, ge=1, le=14)
     model_route: ChatModelRoute = "simple"
+
+    @field_validator("model_route", mode="before")
+    @classmethod
+    def default_blank_model_route(cls, value: Any) -> Any:
+        return "simple" if value is None or (isinstance(value, str) and not value.strip()) else value
 
 
 class ChatSessionMessageResponse(BaseModel):

@@ -191,6 +191,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         [message.model_dump() for message in request.conversation],
         session_summary=request.session_summary,
         recent_user_context=request.recent_user_context,
+        recent_assistant_context=request.recent_assistant_context,
         model=selection.model,
         strict_grounding=selection.strict_grounding,
     )
@@ -202,6 +203,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             [message.model_dump() for message in request.conversation],
             session_summary=request.session_summary,
             recent_user_context=request.recent_user_context,
+            recent_assistant_context=request.recent_assistant_context,
             model=selection.fallback_model,
             strict_grounding=True,
         )
@@ -317,7 +319,17 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
     ]
     direct_results = rerank_stage_results(query_text, direct_candidates)
     index_results = rerank_stage_results(query_text, index_candidates)
-    initial_results = dedupe_results([*direct_results, *index_results])
+    session_context_rows = repository.published_chunk_rows_by_ids(
+        request.context_chunk_ids,
+        [],
+        max(1, min(4, context_limit // 2)),
+    )
+    session_context_results = [
+        annotate_result(to_result(row), "direct_sop", "session_context_source")
+        for row in session_context_rows
+    ]
+    session_context_results = rerank_stage_results(query_text, session_context_results)
+    initial_results = dedupe_results([*session_context_results, *direct_results, *index_results])
     relation_seed_results = relation_seed_candidates(initial_results, context_limit)
     exclude_ids = [result.chunk_id for result in initial_results]
     relation_rows = repository.approved_relation_target_rows_for_chunks(
@@ -340,7 +352,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         annotate_result(to_result(row), "parent_sop", "parent_full_sop_context")
         for row in parent_rows
     ]
-    context_candidates = [*direct_results, *index_results, *related_results, *parent_results]
+    context_candidates = [*session_context_results, *direct_results, *index_results, *related_results, *parent_results]
     deduped_context_candidates = semantic_dedupe_results(context_candidates)
     final_results = rank_chat_results(context_candidates, context_limit)
     warnings = list(
@@ -380,6 +392,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         "candidate_count": len(direct_candidates) + len(index_candidates) + len(related_results) + len(parent_results),
         "semantic_deduped_count": max(0, len(dedupe_results(context_candidates)) - len(deduped_context_candidates)),
         "relation_seed_count": len(relation_seed_results),
+        "session_context_count": len(session_context_results),
         "scope_filters": base_filters.model_dump(),
         "retrieval_query_used": query_text != request.question,
     }
@@ -396,9 +409,19 @@ def grounded_chat_session_message(session_id: str, payload: ChatSessionMessageRe
         raise ValueError("chat_session_archived")
 
     recent_user_context = repository.recent_chat_user_messages(session_id, 2)
-    retrieval_query = contextual_retrieval_query(payload.question, recent_user_context, str(session.get("summary") or ""))
+    recent_assistant_rows = repository.recent_chat_assistant_messages(session_id, 1)
+    recent_assistant_context = assistant_context_briefs(recent_assistant_rows)
+    context_chunk_ids = assistant_context_chunk_ids(recent_assistant_rows)
+    retrieval_query = contextual_retrieval_query(
+        payload.question,
+        recent_user_context,
+        str(session.get("summary") or ""),
+        recent_assistant_context,
+    )
     token_context_metadata = {
         "recent_user_context": recent_user_context,
+        "recent_assistant_context": recent_assistant_context,
+        "context_chunk_ids": context_chunk_ids,
         "session_summary_chars": len(str(session.get("summary") or "")),
         "retrieval_query_used": retrieval_query != payload.question,
     }
@@ -413,6 +436,8 @@ def grounded_chat_session_message(session_id: str, payload: ChatSessionMessageRe
         retrieval_query=retrieval_query if retrieval_query != payload.question else "",
         session_summary=str(session.get("summary") or "")[:600],
         recent_user_context=recent_user_context,
+        recent_assistant_context=recent_assistant_context,
+        context_chunk_ids=context_chunk_ids,
         filters=payload.filters,
         limit=payload.limit,
         conversation=[],
@@ -453,13 +478,18 @@ def grounded_chat_session_message(session_id: str, payload: ChatSessionMessageRe
     }
 
 
-def contextual_retrieval_query(question: str, recent_user_context: list[str], session_summary: str) -> str:
+def contextual_retrieval_query(
+    question: str,
+    recent_user_context: list[str],
+    session_summary: str,
+    recent_assistant_context: list[str] | None = None,
+) -> str:
     if not should_use_recent_context(question, recent_user_context):
         return question
-    context = " ".join([*recent_user_context[-2:], session_summary[:300]]).strip()
+    context = " ".join([*recent_user_context[-2:], *(recent_assistant_context or [])[-1:], session_summary[:220]]).strip()
     if not context:
         return question
-    return f"{question}\n\nContext for resolving references only: {context[:900]}"
+    return f"{question}\n\nFollow-up context for retrieval only: {context[:1200]}"
 
 
 def should_use_recent_context(question: str, recent_user_context: list[str]) -> bool:
@@ -482,6 +512,43 @@ def updated_session_summary(current_summary: str, question: str, filters: dict[s
     if not prefix:
         return addition[:600]
     return f"{prefix} {addition}"[-600:]
+
+
+def assistant_context_briefs(rows: list[dict[str, Any]]) -> list[str]:
+    briefs: list[str] = []
+    for row in rows[-1:]:
+        payload = row.get("response_payload") if isinstance(row, dict) else {}
+        payload = payload if isinstance(payload, dict) else {}
+        answer = str(payload.get("answer") or row.get("content") or "").strip()
+        steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+        step_text = " ".join(str(step).strip() for step in steps[:7] if str(step).strip())
+        source_titles = []
+        for citation in payload.get("citations") or []:
+            if isinstance(citation, dict):
+                title = str(citation.get("title") or "").strip()
+                if title:
+                    source_titles.append(title)
+        source_text = f" Sources: {'; '.join(list(dict.fromkeys(source_titles))[:3])}." if source_titles else ""
+        brief = " ".join(part for part in [answer[:450], step_text[:900], source_text] if part).strip()
+        if brief:
+            briefs.append(brief[:1400])
+    return briefs
+
+
+def assistant_context_chunk_ids(rows: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    for row in rows[-1:]:
+        source_ids = row.get("source_chunk_ids") if isinstance(row, dict) else []
+        if isinstance(source_ids, str):
+            continue
+        if isinstance(source_ids, list):
+            ids.extend(str(item) for item in source_ids if str(item).strip())
+        payload = row.get("response_payload") if isinstance(row, dict) else {}
+        if isinstance(payload, dict):
+            for citation in payload.get("citations") or []:
+                if isinstance(citation, dict) and citation.get("chunk_id"):
+                    ids.append(str(citation["chunk_id"]))
+    return list(dict.fromkeys(ids))[:6]
 
 
 def chat_context_limit(query: str, requested_limit: int) -> int:
@@ -654,6 +721,10 @@ def annotate_match_metadata(result: RetrievalResult, query_terms: set[str]) -> R
     penalties: list[str] = []
     boost = 0.0
     penalty = 0.0
+
+    if metadata.get("chat_retrieval_reason") == "session_context_source":
+        boost += 0.28
+        boosts.append("previous_cited_source")
 
     for term in sorted(query_terms & candidate_terms):
         weight = 0.025

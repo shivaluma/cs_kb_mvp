@@ -1390,6 +1390,7 @@ def generate_grounded_answer(
     conversation: list[dict[str, str]] | None = None,
     session_summary: str = "",
     recent_user_context: list[str] | None = None,
+    recent_assistant_context: list[str] | None = None,
     model: str | None = None,
     strict_grounding: bool = True,
 ) -> tuple[GroundedAnswerPayload | None, list[str]]:
@@ -1432,6 +1433,8 @@ def generate_grounded_answer(
     ][-2:]
     recent_user_items = [str(item or "")[:500] for item in (recent_user_context or fallback_recent_user_context) if str(item or "").strip()][-2:]
     recent_user_text = "\n".join(f"- {item}" for item in recent_user_items)
+    recent_assistant_items = [str(item or "")[:1200] for item in (recent_assistant_context or []) if str(item or "").strip()][-1:]
+    recent_assistant_text = "\n".join(f"- {item}" for item in recent_assistant_items)
     session_summary_text = str(session_summary or "")[:700]
     payload = {
         "model": model or settings.openrouter_chat_model,
@@ -1465,6 +1468,7 @@ def generate_grounded_answer(
                 "content": (
                     f"Current question: {question}\n\n"
                     f"Recent user context, for intent resolution only, not policy evidence:\n{recent_user_text or '(none)'}\n\n"
+                    f"Previous assistant answer summary, for resolving follow-up references only, not policy evidence. Verify every claim against SOURCES before answering:\n{recent_assistant_text or '(none)'}\n\n"
                     f"Session summary, for intent resolution only, not policy evidence:\n{session_summary_text or '(none)'}\n\n"
                     "SOURCES, the only allowed evidence:\n"
                     + "\n\n---\n\n".join(sources)

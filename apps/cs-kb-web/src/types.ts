@@ -117,6 +117,7 @@ export type ChatMessage = {
 };
 
 export type ChatModelRoute =
+  | "auto"
   | "simple"
   | "policy"
   | "high_risk"

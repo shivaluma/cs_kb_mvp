@@ -48,7 +48,7 @@ export function useCreateChatSession() {
     mutationFn: (payload: { title?: string; model_route?: ChatModelRoute; filters?: Record<string, unknown> }) =>
       apiPost<ChatSessionSummary>("/api/v1/ai/chat/sessions", {
         title: payload.title ?? "",
-        model_route: payload.model_route ?? "simple",
+        model_route: normalizeChatModelRoute(payload.model_route),
         filters: payload.filters ?? {},
       }),
     onSuccess: () => {
@@ -72,7 +72,7 @@ export function useUpdateChatSession() {
         {
           title: payload.title,
           status: payload.status,
-          model_route: payload.model_route,
+          model_route: payload.model_route ? normalizeChatModelRoute(payload.model_route) : undefined,
           filters: payload.filters,
         },
         30_000,
@@ -114,7 +114,7 @@ export function useCreateChatSessionMessage() {
             status: ["published"],
           },
           limit: payload.limit,
-          model_route: payload.model_route ?? "simple",
+          model_route: normalizeChatModelRoute(payload.model_route),
         },
         120_000,
       ),
@@ -123,4 +123,21 @@ export function useCreateChatSessionMessage() {
       queryClient.invalidateQueries({ queryKey: queryKeys.chatSessionMessages(payload.sessionId) });
     },
   });
+}
+
+const VALID_CHAT_MODEL_ROUTES = new Set<ChatModelRoute>([
+  "auto",
+  "simple",
+  "policy",
+  "high_risk",
+  "complex",
+  "google/gemini-2.5-flash",
+  "google/gemini-3-flash-preview",
+  "anthropic/claude-3.5-haiku",
+]);
+
+function normalizeChatModelRoute(value: unknown): ChatModelRoute {
+  return typeof value === "string" && VALID_CHAT_MODEL_ROUTES.has(value as ChatModelRoute)
+    ? (value as ChatModelRoute)
+    : "simple";
 }
