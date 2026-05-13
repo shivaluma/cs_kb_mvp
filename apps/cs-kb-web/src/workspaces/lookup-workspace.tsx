@@ -1,4 +1,4 @@
-import { Check, Copy, FileClock, FileText, Loader2, Search, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Check, Copy, FileClock, FileText, Loader2, Search, ShieldCheck, Sparkles } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -677,12 +677,8 @@ function SOPDetail({
         </Tabs>
         {aiSuggestion ? <AISuggestionPanel suggestion={aiSuggestion} /> : null}
         <Separator />
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="rounded-xl border bg-muted/20 px-3 py-2">
           <p className="text-sm text-muted-foreground">Agent script: <span className="text-foreground">{selectedVersion.sections.agent_script}</span></p>
-          <div className="flex gap-2">
-            <Button type="button" variant="outline"><ThumbsUp data-icon="inline-start" className="size-4" />Helpful</Button>
-            <Button type="button" variant="outline"><ThumbsDown data-icon="inline-start" className="size-4" />Not useful</Button>
-          </div>
         </div>
       </CardContent>
     </Card>

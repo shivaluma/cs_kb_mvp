@@ -47,7 +47,6 @@ function AppFrame() {
     <AppShell
       documentCount={documents.length}
       error={error || (documentsQuery.error ? "Cannot reach the API. Check API service and port 8080." : "")}
-      latency="route-owned"
       notice={notice}
       onCommandSearch={commandSearch}
       onDismissError={clearError}

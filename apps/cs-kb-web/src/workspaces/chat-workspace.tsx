@@ -4,8 +4,6 @@ import {
   Clipboard,
   Clock3,
   Loader2,
-  Mic,
-  Plus,
   Search,
   ShieldCheck,
 } from "lucide-react";
@@ -208,24 +206,10 @@ function Composer({
           className={cn(
             "grid w-full cursor-text overflow-clip border border-border bg-transparent bg-clip-padding p-2.5 shadow-lg transition-[border-radius] duration-200 ease-out dark:bg-muted/50",
             isExpanded
-              ? "rounded-3xl [grid-template-areas:'header'_'primary'_'footer'] [grid-template-columns:1fr] [grid-template-rows:auto_1fr_auto]"
-              : "rounded-3xl [grid-template-areas:'header_header_header'_'leading_primary_trailing'_'._footer_.'] [grid-template-columns:auto_1fr_auto] [grid-template-rows:auto_1fr_auto]",
+              ? "rounded-3xl [grid-template-areas:'primary'_'footer'] [grid-template-columns:1fr] [grid-template-rows:1fr_auto]"
+              : "rounded-3xl [grid-template-areas:'primary_trailing'] [grid-template-columns:1fr_auto] [grid-template-rows:auto]",
           )}
         >
-          <div className={cn("flex items-center", isExpanded && "hidden")} style={{ gridArea: "leading" }}>
-            <Button
-              aria-label="Published SOP scope"
-              className="rounded-full text-muted-foreground outline-none ring-0 hover:bg-accent hover:text-foreground"
-              onClick={() => inputRef.current?.focus()}
-              size="icon"
-              title="Answers are limited to published SOPs"
-              type="button"
-              variant="ghost"
-            >
-              <Plus className="size-6" />
-            </Button>
-          </div>
-
           <div
             className={cn("flex min-h-14 items-center overflow-x-hidden px-1.5", {
               "mb-0 px-2 py-1": isExpanded,
@@ -240,7 +224,7 @@ function Composer({
                 disabled={busy}
                 onChange={onDraftChange}
                 onKeyDown={onKeyDown}
-                placeholder="Ask anything"
+                placeholder="Ask a published SOP question"
                 rows={1}
                 value={draft}
               />
@@ -274,18 +258,6 @@ function Composer({
                   </SelectContent>
                 </Select>
               </div>
-
-              <Button
-                aria-label="Voice input unavailable"
-                className={cn("rounded-full text-muted-foreground hover:bg-accent hover:text-foreground", draft.trim() && "hidden")}
-                disabled={busy}
-                size="icon"
-                title="Voice input is not connected yet"
-                type="button"
-                variant="ghost"
-              >
-                <Mic className="size-5" />
-              </Button>
 
               {draft.trim() ? (
                 <Button

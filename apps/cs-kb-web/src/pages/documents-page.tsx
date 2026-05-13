@@ -180,7 +180,7 @@ export function DocumentsPage() {
       return;
     }
     if (upload.file.size > maxBytes) {
-      reportError("File is too large for the demo pipeline. Keep uploads under 15MB.");
+      reportError("File is too large for extraction. Keep uploads under 15MB.");
       return;
     }
 

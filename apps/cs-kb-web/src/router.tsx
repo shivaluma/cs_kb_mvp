@@ -8,7 +8,6 @@ import { DashboardPage } from "@/pages/dashboard-page";
 import { DocumentsPage } from "@/pages/documents-page";
 import { IssueRouterPage } from "@/pages/issue-router-page";
 import { LookupPage } from "@/pages/lookup-page";
-import { OnboardingPage } from "@/pages/onboarding-page";
 import { RelationsPage } from "@/pages/relations-page";
 import { RetrievalPage } from "@/pages/retrieval-page";
 import { SynonymsPage } from "@/pages/synonyms-page";
@@ -55,12 +54,6 @@ const collectionsRoute = createRoute({
   component: CollectionsPage,
 });
 
-const onboardingRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: workspacePaths.onboarding,
-  component: OnboardingPage,
-});
-
 const documentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: workspacePaths.documents,
@@ -92,7 +85,6 @@ const routeTree = rootRoute.addChildren([
   issueRouterRoute,
   toolsRoute,
   collectionsRoute,
-  onboardingRoute,
   documentsRoute,
   relationsRoute,
   synonymsRoute,

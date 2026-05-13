@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useCollection, useCollections, useRecordKBEvent } from "@/hooks/api/kb-index";
 import { CollectionsWorkspace } from "@/workspaces/collections-workspace";
@@ -8,6 +8,13 @@ export function CollectionsPage() {
   const [selectedCollection, setSelectedCollection] = useState("");
   const collectionQuery = useCollection(selectedCollection);
   const eventMutation = useRecordKBEvent();
+
+  useEffect(() => {
+    const firstCollection = collectionsQuery.data?.[0];
+    if (!selectedCollection && firstCollection) {
+      setSelectedCollection(firstCollection.id);
+    }
+  }, [collectionsQuery.data, selectedCollection]);
 
   function selectCollection(collectionId: string) {
     setSelectedCollection(collectionId);

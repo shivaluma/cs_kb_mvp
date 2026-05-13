@@ -99,7 +99,7 @@ export function RelationsWorkspace({
                 <Badge variant={unresolvedCount ? "destructive" : "outline"}>{unresolvedCount} unresolved</Badge>
                 <Badge variant={suggestedCount ? "secondary" : "outline"}>{suggestedCount} suggested</Badge>
               </div>
-              <CardTitle className="mt-3">Unresolved Relations</CardTitle>
+              <CardTitle className="mt-3">Relations Review</CardTitle>
               <CardDescription className="mt-2 max-w-[72ch] leading-6">
                 Review extracted SOP dependencies. Search and chat expansion only use relations approved here.
               </CardDescription>
@@ -133,7 +133,7 @@ export function RelationsWorkspace({
             </div>
           ) : visibleRelations.length === 0 ? (
             <div className="py-6">
-              <EmptyPanel icon={GitBranch} title="No relations in this view" text="New related_document units will appear here after extraction." compact />
+              <EmptyPanel icon={GitBranch} title="No relations in this view" text="Auto-detected relation candidates and manual relations appear here after extraction or creation." compact />
             </div>
           ) : (
             <div className="divide-y">

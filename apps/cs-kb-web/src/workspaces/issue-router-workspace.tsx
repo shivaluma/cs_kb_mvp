@@ -1,7 +1,6 @@
 import { FileText, Search, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -13,34 +12,38 @@ export function IssueRouterWorkspace({
   collections,
   loading,
   query,
+  riskLevel,
   results,
   setAudience,
   setCollection,
   setQuery,
+  setRiskLevel,
+  setTaskType,
+  setVertical,
+  taskType,
   tools,
+  vertical,
 }: {
   audience: string;
   collection: string;
   collections: KBCollectionSummary[];
   loading: boolean;
   query: string;
+  riskLevel: string;
   results: IssueRouterItem[];
   setAudience: (value: string) => void;
   setCollection: (value: string) => void;
   setQuery: (value: string) => void;
+  setRiskLevel: (value: string) => void;
+  setTaskType: (value: string) => void;
+  setVertical: (value: string) => void;
+  taskType: string;
   tools: ToolLinkSummary[];
+  vertical: string;
 }) {
   return (
     <div className="space-y-5">
-      <header className="space-y-2">
-        <Badge variant="outline">operational index</Badge>
-        <h1 className="text-3xl font-semibold tracking-tight">Issue Router</h1>
-        <p className="max-w-3xl text-sm text-muted-foreground">
-          Search an issue and open the reviewed SOP reference, quick action, or tool from the CS daily operations index.
-        </p>
-      </header>
-
-      <div className="grid gap-3 lg:grid-cols-[1fr_220px_220px]">
+      <div className="grid gap-3 xl:grid-cols-[1fr_220px_180px_180px_180px_160px]">
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-3 size-4 text-muted-foreground" />
           <Input
@@ -76,6 +79,44 @@ export function IssueRouterWorkspace({
             <SelectItem value="vip_customer">VIP</SelectItem>
           </SelectContent>
         </Select>
+        <Select onValueChange={(value) => setVertical(value === "all" ? "" : value)} value={vertical || "all"}>
+          <SelectTrigger>
+            <SelectValue placeholder="Vertical" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All verticals</SelectItem>
+            <SelectItem value="food">Food</SelectItem>
+            <SelectItem value="payment">Payment</SelectItem>
+            <SelectItem value="promotion">Promotion</SelectItem>
+            <SelectItem value="account">Account</SelectItem>
+            <SelectItem value="trip_order">Trip / order</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select onValueChange={(value) => setTaskType(value === "all" ? "" : value)} value={taskType || "all"}>
+          <SelectTrigger>
+            <SelectValue placeholder="Task" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All tasks</SelectItem>
+            <SelectItem value="create_case">Create case</SelectItem>
+            <SelectItem value="create_tasklist">Create tasklist</SelectItem>
+            <SelectItem value="transfer_queue">Transfer queue</SelectItem>
+            <SelectItem value="send_email">Send email</SelectItem>
+            <SelectItem value="call_customer">Call customer</SelectItem>
+            <SelectItem value="copy_macro">Copy macro</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select onValueChange={(value) => setRiskLevel(value === "all" ? "" : value)} value={riskLevel || "all"}>
+          <SelectTrigger>
+            <SelectValue placeholder="Risk" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All risk</SelectItem>
+            <SelectItem value="high">High</SelectItem>
+            <SelectItem value="medium">Medium</SelectItem>
+            <SelectItem value="low">Low</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="grid gap-3 xl:grid-cols-2">
@@ -87,40 +128,48 @@ export function IssueRouterWorkspace({
             </CardContent>
           </Card>
         ) : null}
-        {results.map((item) => (
-          <Card key={item.chunk_id} className="overflow-hidden">
-            <CardHeader className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge>{item.relation_status || "approved unit"}</Badge>
-                {item.risk_level ? <Badge variant="outline">{item.risk_level} risk</Badge> : null}
-                {item.collection ? <Badge variant="outline">{item.collection}</Badge> : null}
-              </div>
-              <CardTitle className="text-base">{item.title}</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4 text-sm">
-              <p className="line-clamp-4 whitespace-pre-line text-muted-foreground">{item.content}</p>
-              <div className="flex flex-wrap gap-2">
-                {item.audience.map((value) => <Badge key={value} variant="secondary">{value}</Badge>)}
-                {item.vertical.map((value) => <Badge key={value} variant="secondary">{value}</Badge>)}
-                {item.task_type.map((value) => <Badge key={value} variant="secondary">{value}</Badge>)}
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <div className="rounded-md border p-3">
-                  <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                    <FileText className="size-3.5" /> Target SOP
-                  </div>
-                  <div>{item.target_sop_title || "Unresolved target"}</div>
+        {results.map((item) => {
+          const relatedTools = tools.filter((tool) => item.tool_ids.includes(tool.id));
+          return (
+            <Card key={item.chunk_id} className="overflow-hidden">
+              <CardHeader className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge>{item.relation_status || "approved unit"}</Badge>
+                  {item.risk_level ? <Badge variant="outline">{item.risk_level} risk</Badge> : null}
+                  {item.collection ? <Badge variant="outline">{item.collection}</Badge> : null}
                 </div>
-                <div className="rounded-md border p-3">
-                  <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                    <Wrench className="size-3.5" /> Related tools
-                  </div>
-                  <div>{tools.length} approved tools available</div>
+                <CardTitle className="text-base">{item.title}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4 text-sm">
+                <p className="line-clamp-4 whitespace-pre-line text-muted-foreground">{item.content}</p>
+                <div className="flex flex-wrap gap-2">
+                  {item.audience.map((value) => <Badge key={value} variant="secondary">{value}</Badge>)}
+                  {item.vertical.map((value) => <Badge key={value} variant="secondary">{value}</Badge>)}
+                  {item.case_type.map((value) => <Badge key={value} variant="outline">{value}</Badge>)}
+                  {item.task_type.map((value) => <Badge key={value} variant="outline">{value}</Badge>)}
                 </div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-md border p-3">
+                    <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                      <FileText className="size-3.5" /> Target SOP
+                    </div>
+                    <div>{item.target_sop_title || "Unresolved target"}</div>
+                  </div>
+                  <div className="rounded-md border p-3">
+                    <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                      <Wrench className="size-3.5" /> Linked tools
+                    </div>
+                    <div className="space-y-1">
+                      {relatedTools.length ? relatedTools.slice(0, 3).map((tool) => (
+                        <div className="truncate" key={tool.id}>{tool.name}</div>
+                      )) : <span className="text-muted-foreground">No tool linked to this router unit.</span>}
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
       </div>
     </div>
   );

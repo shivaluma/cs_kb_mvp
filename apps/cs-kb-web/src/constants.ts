@@ -3,7 +3,6 @@ import {
   Boxes,
   FileText,
   GitBranch,
-  GraduationCap,
   LayoutDashboard,
   MessageSquareText,
   Route,
@@ -21,7 +20,6 @@ export const workspacePaths = {
   issueRouter: "/issue-router",
   tools: "/tools",
   collections: "/collections",
-  onboarding: "/onboarding",
   documents: "/documents",
   relations: "/relations",
   synonyms: "/synonyms",
@@ -113,13 +111,6 @@ export const navItems = [
     description: "Operational groupings by audience, task, channel, owner, and risk.",
   },
   {
-    id: "onboarding",
-    path: workspacePaths.onboarding,
-    label: "CS Onboarding",
-    icon: GraduationCap,
-    description: "Start points for new CS agents: core rules, common tasks, and tools.",
-  },
-  {
     id: "documents",
     path: workspacePaths.documents,
     label: "Documents",
@@ -129,9 +120,9 @@ export const navItems = [
   {
     id: "relations",
     path: workspacePaths.relations,
-    label: "Unresolved Relations",
+    label: "Relations",
     icon: GitBranch,
-    description: "Resolve SOP dependencies before AI can expand answers across documents.",
+    description: "Resolve suggested and unresolved SOP dependencies before AI can expand across documents.",
   },
   {
     id: "synonyms",
@@ -146,6 +137,21 @@ export const navItems = [
     label: "Retrieval Lab",
     icon: Bot,
     description: "Debug hybrid retrieval, citations, and ranking signals.",
+  },
+] as const;
+
+export const navGroups = [
+  {
+    label: "Agent surfaces",
+    items: navItems.filter((item) => ["dashboard", "lookup", "chat", "issueRouter", "tools", "collections"].includes(item.id)),
+  },
+  {
+    label: "Review operations",
+    items: navItems.filter((item) => ["documents", "relations"].includes(item.id)),
+  },
+  {
+    label: "Admin and debug",
+    items: navItems.filter((item) => ["synonyms", "retrieval"].includes(item.id)),
   },
 ] as const;
 

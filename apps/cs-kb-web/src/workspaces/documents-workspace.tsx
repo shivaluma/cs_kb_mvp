@@ -209,6 +209,8 @@ export function DocumentsWorkspace({
   const missingWorkflowUnits = requiredWorkflowUnits.filter(
     (required) => !extractionUnits.some((unit) => required.types.includes(unit.unit_type) && unit.review_status !== "needs_review"),
   );
+  const showWorkflowTab = workflowRequiresGraph || requiredWorkflowUnits.length > 0 || workflowGraphUnits.length > 0;
+  const showKbIndexTab = isKbIndexWorkbook;
   const workflowRequirementStatuses = requiredWorkflowUnits.map((required) => {
     const matchingUnits = extractionUnits.filter((unit) => required.types.includes(unit.unit_type));
     const reviewedUnits = matchingUnits.filter((unit) => unit.review_status !== "needs_review");
@@ -352,6 +354,19 @@ export function DocumentsWorkspace({
   const canBulkApproveVisible = Boolean(selectedVersion) && canEditSelectedVersion && filteredUnitsCount > 0 && !bulkReviewBlocked;
   const bulkApproveScope: "all" | "atomic" = reviewFilter === "atomic" ? "atomic" : "all";
   const bulkApproveLabel = bulkApproveScope === "atomic" ? "Approve all atomic units" : "Approve all units";
+
+  useEffect(() => {
+    const allowedSteps = new Set<DocumentStep>(["view", "review", "sop", "gate", "publish", "chunks"]);
+    if (showWorkflowTab) {
+      allowedSteps.add("workflow");
+    }
+    if (showKbIndexTab) {
+      allowedSteps.add("kbIndex");
+    }
+    if (!allowedSteps.has(documentStep)) {
+      setDocumentStep("view");
+    }
+  }, [documentStep, showKbIndexTab, showWorkflowTab]);
 
   function focusReviewRequirement(requirement: RequiredWorkflowUnit) {
     setRequiredUnitFocus(requirement);
@@ -769,7 +784,7 @@ export function DocumentsWorkspace({
 
         <Tabs className="space-y-4" onValueChange={(value) => setDocumentStep(value as DocumentStep)} value={documentStep}>
           <div className="sticky top-4 z-20 rounded-xl border bg-background/95 p-2 shadow-sm backdrop-blur">
-            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-4 xl:grid-cols-8">
+            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-3 lg:grid-cols-6 xl:grid-cols-7">
               <TabsTrigger value="view">0. View</TabsTrigger>
               <TabsTrigger className="gap-2" value="review">
                 1. Review
@@ -779,15 +794,17 @@ export function DocumentsWorkspace({
                   </span>
                 ) : null}
               </TabsTrigger>
-              <TabsTrigger className="gap-2" value="workflow">
-                2. Workflow
-                {workflowGraphIssueCount || missingWorkflowUnits.length ? (
-                  <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    {workflowGraphIssueCount + missingWorkflowUnits.length}
-                  </span>
-                ) : null}
-              </TabsTrigger>
-              {isKbIndexWorkbook ? (
+              {showWorkflowTab ? (
+                <TabsTrigger className="gap-2" value="workflow">
+                  2. Workflow
+                  {workflowGraphIssueCount || missingWorkflowUnits.length ? (
+                    <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {workflowGraphIssueCount + missingWorkflowUnits.length}
+                    </span>
+                  ) : null}
+                </TabsTrigger>
+              ) : null}
+              {showKbIndexTab ? (
                 <TabsTrigger className="gap-2" value="kbIndex">
                   2. Index
                   {kbIndexPlan?.summary?.unresolved_target_count ? (
@@ -797,7 +814,7 @@ export function DocumentsWorkspace({
                   ) : null}
                 </TabsTrigger>
               ) : null}
-              <TabsTrigger value="sop">3. SOP page</TabsTrigger>
+              <TabsTrigger value="sop">3. SOP Preview</TabsTrigger>
               <TabsTrigger className="gap-2" value="gate">
                 4. Verify
                 <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
@@ -990,56 +1007,56 @@ export function DocumentsWorkspace({
           </Card>
           </TabsContent>
 
-          <TabsContent className="mt-0 space-y-4" value="kbIndex">
-            <KBIndexReviewPanel
-              canEdit={canEditSelectedVersion}
-              defaultEffectiveFrom={defaultEffectiveFrom}
-              kbIndexPlan={kbIndexPlan}
-              onUpdateExtractionUnit={onUpdateExtractionUnit}
-              savingUnitId={savingUnitId}
-              units={extractionUnits}
-            />
-          </TabsContent>
-
-          <TabsContent className="mt-0 space-y-4" value="workflow">
-            {requiredWorkflowUnits.length ? (
-              <WorkflowRequirementsPanel
-                busy={busyKey === "create-unit"}
+          {showKbIndexTab ? (
+            <TabsContent className="mt-0 space-y-4" value="kbIndex">
+              <KBIndexReviewPanel
                 canEdit={canEditSelectedVersion}
                 defaultEffectiveFrom={defaultEffectiveFrom}
-                onCreate={(requirement) => {
-                  if (!selectedVersion) {
-                    return;
-                  }
-                  onCreateExtractionUnit(selectedVersion.version_id, buildWorkflowRequirementStub(requirement, selectedDocument, selectedVersion, defaultEffectiveFrom));
-                  focusReviewRequirement(requirement);
-                }}
-                onConvertCandidate={(unit, requirement) => {
-                  onUpdateExtractionUnit(unit, buildWorkflowRequirementConversion(unit, requirement, defaultEffectiveFrom));
-                  focusReviewRequirement(requirement);
-                }}
-                onReviewExisting={focusReviewRequirement}
-                requirements={workflowRequirementStatuses}
+                kbIndexPlan={kbIndexPlan}
+                onUpdateExtractionUnit={onUpdateExtractionUnit}
+                savingUnitId={savingUnitId}
+                units={extractionUnits}
               />
-            ) : null}
+            </TabsContent>
+          ) : null}
 
-            {workflowRequiresGraph ? (
-              <WorkflowGraphPanel
-                canEdit={canEditSelectedVersion}
-                graph={workflowGraph}
-                graphUnit={workflowGraphUnit}
-                confidence={workflowGraphConfidence}
-                onAcknowledge={(unit, reason) => onUpdateExtractionUnit(unit, buildWorkflowGraphAcknowledgement(unit, reason))}
-                onReviewOpenEdges={(unit, edges, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowBulkEdgeReviewUpdate(unit, edges, status, reason))}
-                onReviewEdge={(unit, edge, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowEdgeReviewUpdate(unit, edge, status, reason))}
-                saving={savingUnitId === workflowGraphUnit?.unit_id}
-              />
-            ) : null}
+          {showWorkflowTab ? (
+            <TabsContent className="mt-0 space-y-4" value="workflow">
+              {requiredWorkflowUnits.length ? (
+                <WorkflowRequirementsPanel
+                  busy={busyKey === "create-unit"}
+                  canEdit={canEditSelectedVersion}
+                  defaultEffectiveFrom={defaultEffectiveFrom}
+                  onCreate={(requirement) => {
+                    if (!selectedVersion) {
+                      return;
+                    }
+                    onCreateExtractionUnit(selectedVersion.version_id, buildWorkflowRequirementStub(requirement, selectedDocument, selectedVersion, defaultEffectiveFrom));
+                    focusReviewRequirement(requirement);
+                  }}
+                  onConvertCandidate={(unit, requirement) => {
+                    onUpdateExtractionUnit(unit, buildWorkflowRequirementConversion(unit, requirement, defaultEffectiveFrom));
+                    focusReviewRequirement(requirement);
+                  }}
+                  onReviewExisting={focusReviewRequirement}
+                  requirements={workflowRequirementStatuses}
+                />
+              ) : null}
 
-            {!requiredWorkflowUnits.length && !workflowRequiresGraph ? (
-              <EmptyPanel icon={Network} title="No workflow review required" text="This document type does not require workflow graph or required workflow unit review." compact />
-            ) : null}
-          </TabsContent>
+              {workflowRequiresGraph ? (
+                <WorkflowGraphPanel
+                  canEdit={canEditSelectedVersion}
+                  graph={workflowGraph}
+                  graphUnit={workflowGraphUnit}
+                  confidence={workflowGraphConfidence}
+                  onAcknowledge={(unit, reason) => onUpdateExtractionUnit(unit, buildWorkflowGraphAcknowledgement(unit, reason))}
+                  onReviewOpenEdges={(unit, edges, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowBulkEdgeReviewUpdate(unit, edges, status, reason))}
+                  onReviewEdge={(unit, edge, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowEdgeReviewUpdate(unit, edge, status, reason))}
+                  saving={savingUnitId === workflowGraphUnit?.unit_id}
+                />
+              ) : null}
+            </TabsContent>
+          ) : null}
 
           <TabsContent className="mt-0 space-y-4" value="sop">
             <Card className="rounded-xl">
@@ -3285,7 +3302,7 @@ function buildWorkflowRequirementStub(
   const isWorkflow = selectedDocument?.latest_document_type === "workflow_diagram";
   return {
     title: requirement.label,
-    content: `TODO: Curate ${requirement.label} from the source evidence before approval. Do not publish this placeholder.`,
+    content: `Draft ${requirement.label} stub. Curate this from source evidence before approval; publishing remains blocked while it needs review.`,
     unit_type: requirement.key,
     confidence: 0.5,
     review_status: "needs_review",

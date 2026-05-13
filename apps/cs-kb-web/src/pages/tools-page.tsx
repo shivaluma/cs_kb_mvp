@@ -5,9 +5,17 @@ import { ToolsWorkspace } from "@/workspaces/tools-workspace";
 
 export function ToolsPage() {
   const [collection, setCollection] = useState("");
+  const [query, setQuery] = useState("");
   const collectionsQuery = useCollections();
   const toolsQuery = useTools(collection);
   const eventMutation = useRecordKBEvent();
+  const tools = (toolsQuery.data ?? []).filter((tool) => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return true;
+    }
+    return [tool.name, tool.description, tool.tool_type, tool.owner_team].join(" ").toLowerCase().includes(normalizedQuery);
+  });
 
   return (
     <ToolsWorkspace
@@ -22,8 +30,10 @@ export function ToolsPage() {
           metadata: { name: tool.name, url: tool.url },
         })
       }
+      query={query}
       setCollection={setCollection}
-      tools={toolsQuery.data ?? []}
+      setQuery={setQuery}
+      tools={tools}
     />
   );
 }

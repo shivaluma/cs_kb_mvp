@@ -20,14 +20,6 @@ export function CollectionsWorkspace({
 }) {
   return (
     <div className="space-y-5">
-      <header className="space-y-2">
-        <Badge variant="outline">navigation graph</Badge>
-        <h1 className="text-3xl font-semibold tracking-tight">Collections</h1>
-        <p className="max-w-3xl text-sm text-muted-foreground">
-          Dynamic KB groupings by audience, task, channel, owner, and risk. Collections boost retrieval and make browse flows easier for CS agents.
-        </p>
-      </header>
-
       {loading ? <Card><CardContent className="p-6 text-sm text-muted-foreground">Loading collections...</CardContent></Card> : null}
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="grid gap-3 md:grid-cols-2">
