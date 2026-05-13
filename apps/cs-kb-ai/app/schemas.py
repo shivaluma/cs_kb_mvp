@@ -43,6 +43,17 @@ RelationType = Literal[
     "possible_conflict",
 ]
 RelationStatus = Literal["suggested", "unresolved", "approved", "rejected", "archived"]
+ChatSessionStatus = Literal["active", "archived"]
+ChatModelRoute = Literal[
+    "auto",
+    "simple",
+    "policy",
+    "high_risk",
+    "complex",
+    "google/gemini-2.5-flash",
+    "google/gemini-3-flash-preview",
+    "anthropic/claude-3.5-haiku",
+]
 ExtractionUnitType = Literal[
     "full_sop",
     "routing_rule",
@@ -1093,19 +1104,13 @@ class GroundedChatRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     question: str = Field(min_length=1, max_length=4000)
+    retrieval_query: str = Field(default="", max_length=4000)
+    session_summary: str = Field(default="", max_length=700)
+    recent_user_context: list[str] = Field(default_factory=list, max_length=2)
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
     limit: int = Field(default=10, ge=1, le=14)
     conversation: list[ChatMessage] = Field(default_factory=list, max_length=8)
-    model_route: Literal[
-        "auto",
-        "simple",
-        "policy",
-        "high_risk",
-        "complex",
-        "google/gemini-2.5-flash",
-        "google/gemini-3-flash-preview",
-        "anthropic/claude-3.5-haiku",
-    ] = "simple"
+    model_route: ChatModelRoute = "simple"
 
 
 class GroundedAnswerPayload(BaseModel):
@@ -1133,6 +1138,65 @@ class GroundedChatResponse(BaseModel):
     model_route: str = "auto"
     model_used: str = ""
     model_reason: str = ""
+
+
+class ChatSessionSummary(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    id: str
+    title: str
+    summary: str = ""
+    model_route: str = "simple"
+    filters: dict[str, Any] = Field(default_factory=dict)
+    status: ChatSessionStatus = "active"
+    message_count: int = 0
+    last_message_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatSessionCreateRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    title: str = ""
+    model_route: ChatModelRoute = "simple"
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatSessionUpdateRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    title: Optional[str] = None
+    status: Optional[ChatSessionStatus] = None
+    model_route: Optional[ChatModelRoute] = None
+    filters: Optional[dict[str, Any]] = None
+
+
+class ChatStoredMessage(BaseModel):
+    id: str
+    session_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    response_payload: dict[str, Any] = Field(default_factory=dict)
+    source_chunk_ids: list[str] = Field(default_factory=list)
+    token_context_metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ChatSessionMessageRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    question: str = Field(min_length=1, max_length=4000)
+    filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
+    limit: int = Field(default=12, ge=1, le=14)
+    model_route: ChatModelRoute = "simple"
+
+
+class ChatSessionMessageResponse(BaseModel):
+    session: ChatSessionSummary
+    user_message: ChatStoredMessage
+    assistant_message: ChatStoredMessage
+    response: GroundedChatResponse
 
 
 class SynonymTerm(BaseModel):

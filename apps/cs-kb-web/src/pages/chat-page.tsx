@@ -4,12 +4,27 @@ import { useNavigate } from "@tanstack/react-router";
 import { RouteLoading } from "@/components/route-loading";
 import { defaultFilters, workspacePaths } from "@/constants";
 import { useCollections } from "@/hooks/api/kb-index";
-import { useChatModelRoutes, useGroundedChat } from "@/hooks/api/chat";
+import {
+  useChatModelRoutes,
+  useChatSessionMessages,
+  useChatSessions,
+  useCreateChatSession,
+  useCreateChatSessionMessage,
+  useUpdateChatSession,
+} from "@/hooks/api/chat";
 import { useSearchFilterOptions } from "@/hooks/api/search";
 import { useUrlSearch } from "@/hooks/use-url-search";
-import { compactFilters, optionizeFilterValues } from "@/lib/format";
+import { optionizeFilterValues } from "@/lib/format";
 import { useFeedback } from "@/providers/feedback-context";
-import type { ChatMessage, ChatModelRoute, ChatThreadMessage, FilterOption, FilterState, RetrievalResult } from "@/types";
+import type {
+  ChatModelRoute,
+  ChatStoredMessage,
+  ChatThreadMessage,
+  FilterOption,
+  FilterState,
+  GroundedChatResponse,
+  RetrievalResult,
+} from "@/types";
 
 const ChatWorkspace = lazy(() =>
   import("@/workspaces/chat-workspace").then((module) => ({ default: module.ChatWorkspace })),
@@ -24,10 +39,19 @@ export function ChatPage() {
   const chatModelRoutesQuery = useChatModelRoutes();
   const collectionsQuery = useCollections();
   const filterOptionsQuery = useSearchFilterOptions();
-  const groundedChatMutation = useGroundedChat();
+  const chatSessionsQuery = useChatSessions();
+  const createChatSessionMutation = useCreateChatSession();
+  const updateChatSessionMutation = useUpdateChatSession();
+  const createChatSessionMessageMutation = useCreateChatSessionMessage();
+  const [activeSessionId, setActiveSessionId] = useState("");
+  const chatSessionMessagesQuery = useChatSessionMessages(activeSessionId);
   const [messages, setMessages] = useState<ChatThreadMessage[]>([]);
   const [modelRoute, setModelRoute] = useState<ChatModelRoute>("simple");
   const [scopeFilters, setScopeFilters] = useState<FilterState>(defaultFilters);
+  const busy =
+    createChatSessionMutation.isPending ||
+    createChatSessionMessageMutation.isPending ||
+    updateChatSessionMutation.isPending;
   const collectionOptions: FilterOption[] = useMemo(
     () =>
       (collectionsQuery.data ?? []).map((collection) => ({
@@ -46,6 +70,39 @@ export function ChatPage() {
   );
 
   useEffect(() => {
+    if (!activeSessionId && chatSessionsQuery.data?.length) {
+      setActiveSessionId(chatSessionsQuery.data[0].id);
+    }
+  }, [activeSessionId, chatSessionsQuery.data]);
+
+  useEffect(() => {
+    const activeSession = chatSessionsQuery.data?.find((session) => session.id === activeSessionId);
+    if (!activeSession) {
+      return;
+    }
+    if (isChatModelRoute(activeSession.model_route)) {
+      setModelRoute(activeSession.model_route);
+    }
+    setScopeFilters((current) => ({
+      ...current,
+      collection: firstFilterValue(activeSession.filters.collections) ?? "all",
+      audience: firstFilterValue(activeSession.filters.audience) ?? "all",
+      vertical: firstFilterValue(activeSession.filters.vertical) ?? "all",
+      taskType: firstFilterValue(activeSession.filters.task_types) ?? "all",
+    }));
+  }, [activeSessionId, chatSessionsQuery.data]);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      setMessages([]);
+      return;
+    }
+    if (chatSessionMessagesQuery.data) {
+      setMessages(chatSessionMessagesQuery.data.map(storedMessageToThreadMessage));
+    }
+  }, [activeSessionId, chatSessionMessagesQuery.data]);
+
+  useEffect(() => {
     const trimmedInitialQuestion = initialQuestion.trim();
     if (!trimmedInitialQuestion || initialQuestionSent.current === trimmedInitialQuestion) {
       return;
@@ -54,9 +111,21 @@ export function ChatPage() {
     askGroundedChat(trimmedInitialQuestion);
   }, [initialQuestion]);
 
-  function askGroundedChat(question: string) {
+  async function ensureSession() {
+    if (activeSessionId) {
+      return activeSessionId;
+    }
+    const session = await createChatSessionMutation.mutateAsync({
+      model_route: modelRoute,
+      filters: {},
+    });
+    setActiveSessionId(session.id);
+    return session.id;
+  }
+
+  async function askGroundedChat(question: string) {
     const trimmed = question.trim();
-    if (!trimmed || groundedChatMutation.isPending) {
+    if (!trimmed || busy) {
       return;
     }
     const userMessage: ChatThreadMessage = {
@@ -73,54 +142,87 @@ export function ChatPage() {
       createdAt: new Date().toISOString(),
       pending: true,
     };
-    const conversation: ChatMessage[] = messages
-      .filter((message) => !message.pending)
-      .slice(-6)
-      .map((message) => ({ role: message.role, content: message.content }));
     setMessages((current) => [...current, userMessage, pendingMessage]);
-    groundedChatMutation.mutate(
-      {
+    try {
+      const sessionId = await ensureSession();
+      const chatResponse = await createChatSessionMessageMutation.mutateAsync({
+        sessionId,
         question: trimmed,
+        filters: scopeFilters,
         limit: 12,
-        conversation,
         model_route: modelRoute,
-        filters: {
-          ...compactFilters(scopeFilters),
-          status: ["published"],
-        },
-      },
-      {
-        onSuccess: (response) => {
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === pendingId
-                ? {
-                    ...message,
-                    content: response.answer,
-                    pending: false,
-                    response,
-                  }
-                : message,
-            ),
-          );
-          reportNotice(`Grounded answer generated from ${response.citations.length} published citation(s).`);
-        },
-        onError: (chatError) => {
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === pendingId
-                ? {
-                    ...message,
-                    content: "Chat failed before a grounded answer could be generated. Retrieval/AI service may be unavailable.",
-                    pending: false,
-                  }
-                : message,
-            ),
-          );
-          reportError(chatError instanceof Error ? chatError.message : "SOP Chat failed. Check cs-kb-ai, OpenRouter, and published retrieval data.");
-        },
-      },
-    );
+      });
+      setActiveSessionId(chatResponse.session.id);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingId
+            ? {
+                ...message,
+                content: chatResponse.response.answer,
+                pending: false,
+                response: chatResponse.response,
+              }
+            : message,
+        ),
+      );
+      reportNotice(`Grounded answer generated from ${chatResponse.response.citations.length} published citation(s).`);
+    } catch (chatError) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingId
+            ? {
+                ...message,
+                content: "Chat failed before a grounded answer could be generated. Retrieval/AI service may be unavailable.",
+                pending: false,
+              }
+            : message,
+        ),
+      );
+      reportError(chatError instanceof Error ? chatError.message : "SOP Chat failed. Check cs-kb-ai, OpenRouter, and published retrieval data.");
+    }
+  }
+
+  async function startNewSession() {
+    if (busy) {
+      return;
+    }
+    try {
+      const session = await createChatSessionMutation.mutateAsync({
+        model_route: modelRoute,
+        filters: {},
+      });
+      setActiveSessionId(session.id);
+      setMessages([]);
+      reportNotice("New chat session created.");
+    } catch (error) {
+      reportError(error instanceof Error ? error.message : "Could not create chat session.");
+    }
+  }
+
+  function selectSession(sessionId: string) {
+    if (sessionId === activeSessionId) {
+      return;
+    }
+    setActiveSessionId(sessionId);
+  }
+
+  async function archiveSession(sessionId: string) {
+    if (!sessionId || updateChatSessionMutation.isPending) {
+      return;
+    }
+    try {
+      await updateChatSessionMutation.mutateAsync({ sessionId, status: "archived" });
+      if (sessionId === activeSessionId) {
+        const nextSession = chatSessionsQuery.data?.find((session) => session.id !== sessionId);
+        setActiveSessionId(nextSession?.id ?? "");
+        if (!nextSession) {
+          setMessages([]);
+        }
+      }
+      reportNotice("Chat session archived.");
+    } catch (error) {
+      reportError(error instanceof Error ? error.message : "Could not archive chat session.");
+    }
   }
 
   function updateScopeFilter(key: keyof FilterState, value: string) {
@@ -158,7 +260,8 @@ export function ChatPage() {
   return (
     <Suspense fallback={<RouteLoading label="Loading SOP chat" />}>
       <ChatWorkspace
-        busy={groundedChatMutation.isPending}
+        activeSessionId={activeSessionId}
+        busy={busy}
         collectionOptions={collectionOptions}
         dynamicFilterOptions={dynamicFilterOptions}
         filters={scopeFilters}
@@ -167,12 +270,53 @@ export function ChatPage() {
         modelRoutes={chatModelRoutesQuery.data?.routes}
         modelRoute={modelRoute}
         onAsk={askGroundedChat}
+        onArchiveSession={archiveSession}
         onCopy={copyText}
         onModelRouteChange={setModelRoute}
+        onNewSession={startNewSession}
         onOpenDocument={openDocumentSource}
         onOpenQuickSource={openQuickSource}
+        onSelectSession={selectSession}
         onUpdateFilter={updateScopeFilter}
+        sessions={chatSessionsQuery.data ?? []}
+        sessionsLoading={chatSessionsQuery.isLoading || chatSessionMessagesQuery.isLoading}
       />
     </Suspense>
+  );
+}
+
+function storedMessageToThreadMessage(message: ChatStoredMessage): ChatThreadMessage {
+  const response = isGroundedChatResponse(message.response_payload) ? message.response_payload : undefined;
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.role === "assistant" && response?.answer ? response.answer : message.content,
+    createdAt: message.created_at,
+    response,
+  };
+}
+
+function isGroundedChatResponse(value: ChatStoredMessage["response_payload"]): value is GroundedChatResponse {
+  return Boolean(value && typeof value === "object" && "answer" in value && "citations" in value && "retrieval" in value);
+}
+
+function firstFilterValue(value: unknown) {
+  if (Array.isArray(value)) {
+    const first = value.find((item) => typeof item === "string" && item.trim());
+    return typeof first === "string" ? first : undefined;
+  }
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function isChatModelRoute(value: unknown): value is ChatModelRoute {
+  return (
+    value === "auto" ||
+    value === "simple" ||
+    value === "policy" ||
+    value === "high_risk" ||
+    value === "complex" ||
+    value === "google/gemini-2.5-flash" ||
+    value === "google/gemini-3-flash-preview" ||
+    value === "anthropic/claude-3.5-haiku"
   );
 }

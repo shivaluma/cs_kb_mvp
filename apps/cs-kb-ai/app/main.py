@@ -11,7 +11,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.responses import Response
 
 from app import repository
-from app.chat import grounded_chat
+from app.chat import grounded_chat, grounded_chat_session_message
 from app.config import settings
 from app.embedding import embed_text
 from app.ingestion import prepare_document_version, preview_document_metadata
@@ -19,6 +19,12 @@ from app.retrieval import retrieve
 from app.schemas import (
     BulkReviewVersionRequest,
     AssignRelationRequest,
+    ChatSessionCreateRequest,
+    ChatSessionMessageRequest,
+    ChatSessionMessageResponse,
+    ChatSessionSummary,
+    ChatSessionUpdateRequest,
+    ChatStoredMessage,
     CreateRelationRequest,
     DocumentMetadata,
     DocumentMetadataPreviewResponse,
@@ -948,6 +954,50 @@ def retrieve_documents(request: RetrievalRequest) -> RetrievalResponse:
 @app.post("/ai/v1/chat", response_model=GroundedChatResponse)
 def chat(request: GroundedChatRequest) -> GroundedChatResponse:
     return grounded_chat(request)
+
+
+@app.get("/ai/v1/chat/sessions", response_model=list[ChatSessionSummary])
+def list_chat_sessions(status: str = "active") -> list[ChatSessionSummary]:
+    return [ChatSessionSummary(**row) for row in repository.list_chat_sessions(status)]
+
+
+@app.post("/ai/v1/chat/sessions", response_model=ChatSessionSummary)
+def create_chat_session(payload: ChatSessionCreateRequest) -> ChatSessionSummary:
+    return ChatSessionSummary(**repository.create_chat_session(payload.title, payload.model_route, payload.filters))
+
+
+@app.post("/ai/v1/chat/sessions/{session_id}/update", response_model=ChatSessionSummary)
+def update_chat_session(session_id: str, payload: ChatSessionUpdateRequest) -> ChatSessionSummary:
+    try:
+        return ChatSessionSummary(
+            **repository.update_chat_session(
+                session_id,
+                title=payload.title,
+                status=payload.status,
+                model_route=payload.model_route,
+                filters=payload.filters,
+            )
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/ai/v1/chat/sessions/{session_id}/messages", response_model=list[ChatStoredMessage])
+def list_chat_session_messages(session_id: str) -> list[ChatStoredMessage]:
+    try:
+        return [ChatStoredMessage(**row) for row in repository.list_chat_messages(session_id)]
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/chat/sessions/{session_id}/messages", response_model=ChatSessionMessageResponse)
+def create_chat_session_message(session_id: str, payload: ChatSessionMessageRequest) -> ChatSessionMessageResponse:
+    try:
+        return ChatSessionMessageResponse(**grounded_chat_session_message(session_id, payload))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/ai/v1/search/taxonomy/intents")

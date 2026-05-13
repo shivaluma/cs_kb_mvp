@@ -22,6 +22,8 @@ export const queryKeys = {
     ["retrieval", query, mode, filters] as const,
   collections: ["kb-collections"] as const,
   collection: (id: string) => ["kb-collection", id] as const,
+  chatSessions: (status: string) => ["chat-sessions", status] as const,
+  chatSessionMessages: (sessionId: string) => ["chat-session-messages", sessionId] as const,
   issueRouter: (params: Record<string, string>) => ["issue-router", params] as const,
   tools: (collection: string) => ["tool-links", collection] as const,
   actionTemplates: (collection: string) => ["action-templates", collection] as const,

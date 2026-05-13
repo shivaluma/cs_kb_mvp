@@ -170,6 +170,37 @@ export type ChatThreadMessage = {
   pending?: boolean;
 };
 
+export type ChatSessionSummary = {
+  id: string;
+  title: string;
+  summary: string;
+  model_route: ChatModelRoute;
+  filters: Record<string, unknown>;
+  status: "active" | "archived";
+  message_count: number;
+  last_message_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatStoredMessage = {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant";
+  content: string;
+  response_payload: Partial<GroundedChatResponse> | Record<string, unknown>;
+  source_chunk_ids: string[];
+  token_context_metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ChatSessionMessageResponse = {
+  session: ChatSessionSummary;
+  user_message: ChatStoredMessage;
+  assistant_message: ChatStoredMessage;
+  response: GroundedChatResponse;
+};
+
 export type RetrievalResult = {
   document_id: string;
   version_id: string;

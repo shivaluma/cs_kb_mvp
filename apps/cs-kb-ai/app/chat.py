@@ -6,9 +6,9 @@ from typing import Any
 
 from app import repository
 from app.config import settings
-from app.openrouter import generate_grounded_answer
+from app.openrouter import generate_chat_session_title, generate_grounded_answer
 from app.retrieval import retrieve, to_result
-from app.schemas import GroundedChatRequest, GroundedChatResponse, RetrievalFilters, RetrievalRequest, RetrievalResponse, RetrievalResult
+from app.schemas import ChatSessionMessageRequest, GroundedChatRequest, GroundedChatResponse, RetrievalFilters, RetrievalRequest, RetrievalResponse, RetrievalResult
 
 
 DIRECT_SOP_UNIT_TYPES = {
@@ -59,6 +59,26 @@ SOURCE_GROUP_LABELS = {
     "tool_link": "Tools",
     "parent_sop": "Parent SOP",
 }
+FOLLOW_UP_MARKERS = (
+    "cái đó",
+    "cai do",
+    "vậy",
+    "vay",
+    "nó",
+    "no",
+    "tiếp",
+    "tiep",
+    "ở trên",
+    "o tren",
+    "trên",
+    "tren",
+    "khác gì",
+    "khac gi",
+    "thì sao",
+    "thi sao",
+    "còn",
+    "con",
+)
 
 
 @dataclass(frozen=True)
@@ -138,6 +158,8 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         request.question,
         retrieval,
         [message.model_dump() for message in request.conversation],
+        session_summary=request.session_summary,
+        recent_user_context=request.recent_user_context,
         model=selection.model,
         strict_grounding=selection.strict_grounding,
     )
@@ -147,6 +169,8 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             request.question,
             retrieval,
             [message.model_dump() for message in request.conversation],
+            session_summary=request.session_summary,
+            recent_user_context=request.recent_user_context,
             model=selection.fallback_model,
             strict_grounding=True,
         )
@@ -222,10 +246,11 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
     base_filters = request.filters.model_copy(update={"status": ["published"]})
     direct_limit = max(request.limit, 10)
     index_limit = max(6, min(request.limit, 10))
+    query_text = request.retrieval_query.strip() or request.question
 
     direct_retrieval = retrieve(
         RetrievalRequest(
-            query=request.question,
+            query=query_text,
             filters=filters_with_unit_types(base_filters, DIRECT_SOP_UNIT_TYPES),
             limit=direct_limit,
             mode="hybrid",
@@ -234,7 +259,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
     )
     index_retrieval = retrieve(
         RetrievalRequest(
-            query=request.question,
+            query=query_text,
             filters=filters_with_unit_types(base_filters, INDEX_UNIT_TYPES),
             limit=index_limit,
             mode="hybrid",
@@ -289,7 +314,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         warnings.append("no_reliable_source")
 
     retrieval = RetrievalResponse(
-        query=request.question,
+        query=query_text,
         normalized_query=direct_retrieval.normalized_query or index_retrieval.normalized_query,
         query_expansion=direct_retrieval.query_expansion or index_retrieval.query_expansion,
         mode="hybrid",
@@ -306,12 +331,107 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         "parent_count": len(parent_results),
         "final_count": len(final_results),
         "scope_filters": base_filters.model_dump(),
+        "retrieval_query_used": query_text != request.question,
     }
     return ChatRetrievalBundle(
         retrieval=retrieval,
         source_groups=source_groups(final_results),
         trace=trace,
     )
+
+
+def grounded_chat_session_message(session_id: str, payload: ChatSessionMessageRequest) -> dict[str, object]:
+    session = repository.chat_session_by_id(session_id)
+    if session["status"] != "active":
+        raise ValueError("chat_session_archived")
+
+    recent_user_context = repository.recent_chat_user_messages(session_id, 2)
+    retrieval_query = contextual_retrieval_query(payload.question, recent_user_context, str(session.get("summary") or ""))
+    token_context_metadata = {
+        "recent_user_context": recent_user_context,
+        "session_summary_chars": len(str(session.get("summary") or "")),
+        "retrieval_query_used": retrieval_query != payload.question,
+    }
+    user_message = repository.insert_chat_message(
+        session_id,
+        "user",
+        payload.question,
+        token_context_metadata=token_context_metadata,
+    )
+    request = GroundedChatRequest(
+        question=payload.question,
+        retrieval_query=retrieval_query if retrieval_query != payload.question else "",
+        session_summary=str(session.get("summary") or "")[:600],
+        recent_user_context=recent_user_context,
+        filters=payload.filters,
+        limit=payload.limit,
+        conversation=[],
+        model_route=payload.model_route,
+    )
+    response = grounded_chat(request)
+    title = ""
+    if int(session.get("message_count") or 0) == 0 or str(session.get("title") or "") in {"", "New chat"}:
+        title, title_warnings = generate_chat_session_title(payload.question)
+        response.warnings = [*response.warnings, *title_warnings]
+    source_chunk_ids = [citation.chunk_id for citation in response.citations]
+    assistant_message = repository.insert_chat_message(
+        session_id,
+        "assistant",
+        response.answer,
+        response_payload=response.model_dump(mode="json"),
+        source_chunk_ids=source_chunk_ids,
+        token_context_metadata=token_context_metadata,
+    )
+
+    summary = updated_session_summary(
+        str(session.get("summary") or ""),
+        payload.question,
+        payload.filters.model_dump(),
+    )
+    updated_session = repository.update_chat_session_after_assistant(
+        session_id,
+        title=title,
+        summary=summary,
+        model_route=payload.model_route,
+        filters=payload.filters.model_dump(),
+    )
+    return {
+        "session": updated_session,
+        "user_message": user_message,
+        "assistant_message": assistant_message,
+        "response": response,
+    }
+
+
+def contextual_retrieval_query(question: str, recent_user_context: list[str], session_summary: str) -> str:
+    if not should_use_recent_context(question, recent_user_context):
+        return question
+    context = " ".join([*recent_user_context[-2:], session_summary[:300]]).strip()
+    if not context:
+        return question
+    return f"{question}\n\nContext for resolving references only: {context[:900]}"
+
+
+def should_use_recent_context(question: str, recent_user_context: list[str]) -> bool:
+    if not recent_user_context:
+        return False
+    normalized = question.lower()
+    return any(marker in normalized for marker in FOLLOW_UP_MARKERS) or len(normalized.split()) <= 5
+
+
+def updated_session_summary(current_summary: str, question: str, filters: dict[str, object]) -> str:
+    active_filters = {
+        key: value
+        for key, value in filters.items()
+        if value and value != ["published"] and value != "published"
+    }
+    topic = question.strip().replace("\n", " ")[:180]
+    filter_text = f" Filters: {active_filters}." if active_filters else ""
+    addition = f"Latest user intent: {topic}.{filter_text}"
+    prefix = current_summary.strip()
+    if not prefix:
+        return addition[:600]
+    return f"{prefix} {addition}"[-600:]
 
 
 def filters_with_unit_types(filters: RetrievalFilters, unit_types: set[str]) -> RetrievalFilters:

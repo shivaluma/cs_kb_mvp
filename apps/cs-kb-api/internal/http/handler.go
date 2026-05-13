@@ -85,6 +85,11 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/source/pages/{page}", h.proxyAIVersionSourcePage)
 	mux.HandleFunc("POST /api/v1/ai/retrieve", h.proxyAI("/ai/v1/retrieve"))
 	mux.HandleFunc("GET /api/v1/ai/chat/model-routes", h.proxyAI("/ai/v1/chat/model-routes"))
+	mux.HandleFunc("GET /api/v1/ai/chat/sessions", h.proxyAI("/ai/v1/chat/sessions"))
+	mux.HandleFunc("POST /api/v1/ai/chat/sessions", h.proxyAIChatSessionCreate)
+	mux.HandleFunc("GET /api/v1/ai/chat/sessions/{id}/messages", h.proxyAIChatSessionMessages)
+	mux.HandleFunc("POST /api/v1/ai/chat/sessions/{id}/messages", h.proxyAIChatSessionMessageCreate)
+	mux.HandleFunc("POST /api/v1/ai/chat/sessions/{id}/update", h.proxyAIChatSessionUpdate)
 	mux.HandleFunc("POST /api/v1/ai/chat", h.proxyAIChat)
 
 	return logging.Middleware(h.logger, cors(mux))
@@ -470,6 +475,22 @@ func (h *Handler) proxyAIVersionExtractionUnitCreate(w http.ResponseWriter, r *h
 
 func (h *Handler) proxyAIChat(w http.ResponseWriter, r *http.Request) {
 	h.proxyAIWithBody("/ai/v1/chat", 120*time.Second, nil)(w, r)
+}
+
+func (h *Handler) proxyAIChatSessionCreate(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithBody("/ai/v1/chat/sessions", 30*time.Second, nil)(w, r)
+}
+
+func (h *Handler) proxyAIChatSessionMessages(w http.ResponseWriter, r *http.Request) {
+	h.proxyAI("/ai/v1/chat/sessions/"+r.PathValue("id")+"/messages")(w, r)
+}
+
+func (h *Handler) proxyAIChatSessionMessageCreate(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithBody("/ai/v1/chat/sessions/"+r.PathValue("id")+"/messages", 120*time.Second, nil)(w, r)
+}
+
+func (h *Handler) proxyAIChatSessionUpdate(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithBody("/ai/v1/chat/sessions/"+r.PathValue("id")+"/update", 30*time.Second, nil)(w, r)
 }
 
 func (h *Handler) proxyAISynonymAction(action string) http.HandlerFunc {

@@ -1388,6 +1388,8 @@ def generate_grounded_answer(
     question: str,
     retrieval: RetrievalResponse,
     conversation: list[dict[str, str]] | None = None,
+    session_summary: str = "",
+    recent_user_context: list[str] | None = None,
     model: str | None = None,
     strict_grounding: bool = True,
 ) -> tuple[GroundedAnswerPayload | None, list[str]]:
@@ -1423,11 +1425,14 @@ def generate_grounded_answer(
             )
         )
 
-    conversation_text = "\n".join(
-        f"{message.get('role', 'user')}: {message.get('content', '')[:800]}"
-        for message in (conversation or [])[-6:]
-        if message.get("content")
-    )
+    fallback_recent_user_context = [
+        str(message.get("content", ""))[:500]
+        for message in (conversation or [])
+        if message.get("role") == "user" and message.get("content")
+    ][-2:]
+    recent_user_items = [str(item or "")[:500] for item in (recent_user_context or fallback_recent_user_context) if str(item or "").strip()][-2:]
+    recent_user_text = "\n".join(f"- {item}" for item in recent_user_items)
+    session_summary_text = str(session_summary or "")[:700]
     payload = {
         "model": model or settings.openrouter_chat_model,
         "messages": [
@@ -1456,8 +1461,9 @@ def generate_grounded_answer(
             {
                 "role": "user",
                 "content": (
-                    f"Question: {question}\n\n"
-                    f"Recent conversation, for wording context only, not as source of policy:\n{conversation_text or '(none)'}\n\n"
+                    f"Current question: {question}\n\n"
+                    f"Recent user context, for intent resolution only, not policy evidence:\n{recent_user_text or '(none)'}\n\n"
+                    f"Session summary, for intent resolution only, not policy evidence:\n{session_summary_text or '(none)'}\n\n"
                     "SOURCES, the only allowed evidence:\n"
                     + "\n\n---\n\n".join(sources)
                 ),
@@ -1492,6 +1498,49 @@ def generate_grounded_answer(
         return answer, warnings
     except Exception as exc:
         return None, [f"openrouter_grounded_answer_failed:{exc.__class__.__name__}"]
+
+
+def generate_chat_session_title(question: str, model: str | None = None) -> tuple[str, list[str]]:
+    fallback = deterministic_chat_title(question)
+    if not enabled():
+        return fallback, ["openrouter_disabled_title_fallback"]
+    payload = {
+        "model": model or settings.openrouter_chat_simple_model or settings.openrouter_chat_model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Đặt tên ngắn cho một chat session SOP nội bộ. "
+                    "Tên tối đa 60 ký tự, không dấu ngoặc kép, không markdown, cùng ngôn ngữ với câu hỏi nếu rõ. "
+                    "Chỉ trả JSON object: {\"title\":\"...\"}."
+                ),
+            },
+            {"role": "user", "content": question[:1200]},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": settings.public_app_url,
+        "X-Title": "CS SOP Knowledge Base",
+    }
+    try:
+        content = completion_content(payload, headers)
+        parsed, _ = parse_json_with_repair(content, payload, headers)
+        title = str(parsed.get("title") or "").strip()
+        if title:
+            return title[:60], ["openrouter_chat_title_used"]
+    except Exception as exc:
+        return fallback, [f"openrouter_chat_title_failed:{exc.__class__.__name__}"]
+    return fallback, ["openrouter_chat_title_empty_fallback"]
+
+
+def deterministic_chat_title(question: str) -> str:
+    words = re.findall(r"[\wÀ-ỹ/.-]+", str(question or ""), flags=re.UNICODE)
+    title = " ".join(words[:10]).strip()
+    return title[:60] or "New chat"
 
 
 def suggest_document_metadata(

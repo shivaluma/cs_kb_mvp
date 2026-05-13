@@ -352,6 +352,38 @@ def ensure_schema() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS ai_chat_sessions (
+              id uuid PRIMARY KEY,
+              title text NOT NULL DEFAULT 'New chat',
+              summary text NOT NULL DEFAULT '',
+              model_route text NOT NULL DEFAULT 'simple',
+              filters jsonb NOT NULL DEFAULT '{}'::jsonb,
+              status text NOT NULL DEFAULT 'active',
+              message_count integer NOT NULL DEFAULT 0,
+              last_message_at timestamptz,
+              created_at timestamptz NOT NULL DEFAULT now(),
+              updated_at timestamptz NOT NULL DEFAULT now(),
+              CONSTRAINT ai_chat_sessions_status_check CHECK (status IN ('active', 'archived'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_chat_messages (
+              id uuid PRIMARY KEY,
+              session_id uuid NOT NULL REFERENCES ai_chat_sessions(id) ON DELETE CASCADE,
+              role text NOT NULL,
+              content text NOT NULL,
+              response_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+              source_chunk_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+              token_context_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+              created_at timestamptz NOT NULL DEFAULT now(),
+              CONSTRAINT ai_chat_messages_role_check CHECK (role IN ('user', 'assistant'))
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS ai_audit_events (
               id uuid PRIMARY KEY,
               actor text NOT NULL DEFAULT 'system',
@@ -371,6 +403,8 @@ def ensure_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_relations_status ON ai_document_relations(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_relations_source ON ai_document_relations(source_document_id, source_version_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_relations_target ON ai_document_relations(target_document_id, target_version_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chat_sessions_status_last ON ai_chat_sessions(status, last_message_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_session_created ON ai_chat_messages(session_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_jobs_version ON extraction_jobs(version_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_stage_outputs_job ON extraction_stage_outputs(job_id, stage)")
         conn.execute("DROP INDEX IF EXISTS idx_ai_chunks_content_fts")
@@ -4758,6 +4792,227 @@ def log_retrieval(query: str, filters: dict[str, Any], mode: str, result_count: 
             (str(uuid.uuid4()), query, json.dumps(filters), mode, result_count, latency_ms),
         )
     return latency_ms
+
+
+def list_chat_sessions(status: str = "active", limit: int = 50) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status and status != "all":
+        clauses.append("status = %s")
+        params.append(pg_text(status))
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    params.append(max(1, min(int(limit or 50), 100)))
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT id::text AS id,
+                   title,
+                   summary,
+                   model_route,
+                   filters,
+                   status,
+                   message_count,
+                   last_message_at,
+                   created_at,
+                   updated_at
+            FROM ai_chat_sessions
+            {where}
+            ORDER BY COALESCE(last_message_at, created_at) DESC
+            LIMIT %s
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def create_chat_session(title: str = "", model_route: str = "simple", filters: dict[str, Any] | None = None) -> dict[str, Any]:
+    session_id = str(uuid.uuid4())
+    clean_title = pg_text(title).strip() or "New chat"
+    with connection() as conn:
+        conn.row_factory = dict_row
+        conn.execute(
+            """
+            INSERT INTO ai_chat_sessions (id, title, model_route, filters)
+            VALUES (%s, %s, %s, %s::jsonb)
+            """,
+            (session_id, clean_title[:120], pg_text(model_route or "simple"), pg_text(json.dumps(filters or {}))),
+        )
+    return chat_session_by_id(session_id)
+
+
+def update_chat_session(
+    session_id: str,
+    *,
+    title: str | None = None,
+    status: str | None = None,
+    model_route: str | None = None,
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current = chat_session_by_id(session_id)
+    next_title = current["title"] if title is None else (pg_text(title).strip() or current["title"])[:120]
+    next_status = current["status"] if status is None else status
+    next_model_route = current["model_route"] if model_route is None else pg_text(model_route or current["model_route"])
+    next_filters = current.get("filters") if filters is None else filters
+    with connection() as conn:
+        conn.execute(
+            """
+            UPDATE ai_chat_sessions
+            SET title = %s,
+                status = %s,
+                model_route = %s,
+                filters = %s::jsonb,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (next_title, next_status, next_model_route, pg_text(json.dumps(next_filters or {})), session_id),
+        )
+    return chat_session_by_id(session_id)
+
+
+def chat_session_by_id(session_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        row = conn.execute(
+            """
+            SELECT id::text AS id,
+                   title,
+                   summary,
+                   model_route,
+                   filters,
+                   status,
+                   message_count,
+                   last_message_at,
+                   created_at,
+                   updated_at
+            FROM ai_chat_sessions
+            WHERE id = %s
+            """,
+            (session_id,),
+        ).fetchone()
+        if not row:
+            raise LookupError("chat_session_not_found")
+        return dict(row)
+
+
+def list_chat_messages(session_id: str, limit: int = 80) -> list[dict[str, Any]]:
+    chat_session_by_id(session_id)
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT id::text AS id,
+                   session_id::text AS session_id,
+                   role,
+                   content,
+                   response_payload,
+                   source_chunk_ids,
+                   token_context_metadata,
+                   created_at
+            FROM ai_chat_messages
+            WHERE session_id = %s
+            ORDER BY created_at ASC
+            LIMIT %s
+            """,
+            (session_id, max(1, min(int(limit or 80), 200))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def recent_chat_user_messages(session_id: str, limit: int = 2) -> list[str]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT content
+            FROM ai_chat_messages
+            WHERE session_id = %s AND role = 'user'
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (session_id, max(1, min(int(limit or 2), 4))),
+        ).fetchall()
+        return [str(row["content"]) for row in reversed(rows)]
+
+
+def insert_chat_message(
+    session_id: str,
+    role: str,
+    content: str,
+    *,
+    response_payload: dict[str, Any] | None = None,
+    source_chunk_ids: list[str] | None = None,
+    token_context_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    message_id = str(uuid.uuid4())
+    with connection() as conn:
+        conn.row_factory = dict_row
+        row = conn.execute(
+            """
+            INSERT INTO ai_chat_messages (
+              id, session_id, role, content, response_payload, source_chunk_ids, token_context_metadata
+            )
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
+            RETURNING id::text AS id,
+                      session_id::text AS session_id,
+                      role,
+                      content,
+                      response_payload,
+                      source_chunk_ids,
+                      token_context_metadata,
+                      created_at
+            """,
+            (
+                message_id,
+                session_id,
+                pg_text(role),
+                pg_text(content),
+                pg_text(json.dumps(response_payload or {}, ensure_ascii=False)),
+                pg_text(json.dumps(source_chunk_ids or [], ensure_ascii=False)),
+                pg_text(json.dumps(token_context_metadata or {}, ensure_ascii=False)),
+            ),
+        ).fetchone()
+        conn.execute(
+            """
+            UPDATE ai_chat_sessions
+            SET message_count = message_count + 1,
+                last_message_at = now(),
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (session_id,),
+        )
+        return dict(row)
+
+
+def update_chat_session_after_assistant(
+    session_id: str,
+    *,
+    title: str | None,
+    summary: str,
+    model_route: str,
+    filters: dict[str, Any],
+) -> dict[str, Any]:
+    with connection() as conn:
+        conn.execute(
+            """
+            UPDATE ai_chat_sessions
+            SET title = COALESCE(NULLIF(%s, ''), title),
+                summary = %s,
+                model_route = %s,
+                filters = %s::jsonb,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (
+                pg_text((title or "")[:120]),
+                pg_text(summary[:700]),
+                pg_text(model_route or "simple"),
+                pg_text(json.dumps(filters or {})),
+                session_id,
+            ),
+        )
+    return chat_session_by_id(session_id)
 
 
 def log_chat(response: Any) -> None:

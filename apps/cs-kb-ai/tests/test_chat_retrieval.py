@@ -5,9 +5,12 @@ from unittest.mock import patch
 
 from app.chat import (
     ChatRetrievalBundle,
+    contextual_retrieval_query,
     grounded_chat,
     has_policy_source,
     retrieve_for_chat,
+    should_use_recent_context,
+    updated_session_summary,
 )
 from app.schemas import Citation, GroundedChatRequest, RetrievalResponse, RetrievalResult
 
@@ -83,6 +86,29 @@ class ChatRetrievalTest(unittest.TestCase):
             ["direct_sop", "parent_sop"],
         )
         self.assertEqual(bundle.retrieval.results[0].chunk_id, "direct-chunk")
+
+    def test_session_context_only_expands_follow_up_queries(self) -> None:
+        recent = ["Quy định xác minh tài khoản hotline là gì?"]
+
+        self.assertTrue(should_use_recent_context("cái đó áp dụng cho chat social không?", recent))
+        self.assertFalse(should_use_recent_context("Quy định hoàn tiền đơn food", recent))
+
+        expanded = contextual_retrieval_query("vậy chat social thì sao", recent, "Scope: account verification")
+        plain = contextual_retrieval_query("Quy định hoàn tiền đơn food", recent, "Scope: account verification")
+
+        self.assertIn("Context for resolving references only", expanded)
+        self.assertEqual(plain, "Quy định hoàn tiền đơn food")
+
+    def test_session_summary_stays_short_and_intent_only(self) -> None:
+        summary = updated_session_summary(
+            "Previous intent: user compared hotline account verification.",
+            "Hỏi tiếp về CIA và Chat Social",
+            {"status": ["published"], "collections": ["account-verification"]},
+        )
+
+        self.assertLessEqual(len(summary), 600)
+        self.assertIn("Latest user intent", summary)
+        self.assertIn("account-verification", summary)
 
 
 def retrieval_response(results: list[RetrievalResult]) -> RetrievalResponse:

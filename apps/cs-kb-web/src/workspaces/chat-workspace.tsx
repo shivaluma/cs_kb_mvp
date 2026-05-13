@@ -1,10 +1,14 @@
 import {
+  Archive,
   ArrowUp,
   BookOpen,
   ChevronDown,
   Clipboard,
   Clock3,
   Loader2,
+  MessageSquarePlus,
+  PanelLeftClose,
+  PanelLeftOpen,
   Search,
   ShieldCheck,
   SlidersHorizontal,
@@ -32,6 +36,7 @@ import { cn } from "@/lib/utils";
 import type {
   ChatModelRoute,
   ChatModelRouteConfig,
+  ChatSessionSummary,
   ChatThreadMessage,
   FilterOption,
   FilterState,
@@ -85,6 +90,7 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
 ];
 
 export function ChatWorkspace({
+  activeSessionId,
   busy,
   collectionOptions,
   dynamicFilterOptions,
@@ -93,12 +99,18 @@ export function ChatWorkspace({
   modelRoutes,
   modelRoute,
   onAsk,
+  onArchiveSession,
   onCopy,
   onModelRouteChange,
+  onNewSession,
   onOpenDocument,
   onOpenQuickSource,
+  onSelectSession,
   onUpdateFilter,
+  sessions,
+  sessionsLoading,
 }: {
+  activeSessionId: string;
   busy: boolean;
   collectionOptions: FilterOption[];
   dynamicFilterOptions: {
@@ -112,17 +124,27 @@ export function ChatWorkspace({
   modelRoutes?: ChatModelRouteConfig[];
   modelRoute: ChatModelRoute;
   onAsk: (question: string) => void;
+  onArchiveSession: (sessionId: string) => void;
   onCopy: (text: string) => void;
   onModelRouteChange: (route: ChatModelRoute) => void;
+  onNewSession: () => void;
   onOpenDocument: (source: RetrievalResult) => void;
   onOpenQuickSource: (source: RetrievalResult) => void;
+  onSelectSession: (sessionId: string) => void;
   onUpdateFilter: (key: keyof FilterState, value: string) => void;
+  sessions: ChatSessionSummary[];
+  sessionsLoading: boolean;
 }) {
   const [draft, setDraft] = useState("");
   const [isExpanded, setIsExpanded] = useState(false);
+  const [sessionPanelOpen, setSessionPanelOpen] = useState(true);
+  const [sessionSearch, setSessionSearch] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const routeOptions = modelRoutes?.length ? modelRoutes : FALLBACK_CHAT_MODEL_ROUTES;
   const hasMessages = messages.length > 0;
+  const filteredSessions = sessions.filter((session) =>
+    session.title.toLowerCase().includes(sessionSearch.trim().toLowerCase()),
+  );
 
   function resetComposer() {
     setDraft("");
@@ -164,45 +186,185 @@ export function ChatWorkspace({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
-      <div className={cn("min-h-0 flex-1 overflow-y-auto", hasMessages ? "px-1 py-2" : "grid place-items-center px-4 py-10")}>
-        {hasMessages ? (
-          <div className="mx-auto grid w-full max-w-3xl gap-6 pb-6">
-            {messages.map((message) => (
-              <ChatBubble
-                key={message.id}
-                message={message}
-                onCopy={onCopy}
-                onOpenDocument={onOpenDocument}
-                onOpenQuickSource={onOpenQuickSource}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="w-full pb-20">
-            <EmptyChatState />
-          </div>
-        )}
-      </div>
-
-      <div className="shrink-0 bg-background px-2 pb-2 pt-3 md:px-4 md:pb-3">
-        <Composer
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background md:flex-row">
+      {sessionPanelOpen ? (
+        <SessionPanel
+          activeSessionId={activeSessionId}
           busy={busy}
-          collectionOptions={collectionOptions}
-          draft={draft}
-          dynamicFilterOptions={dynamicFilterOptions}
-          filters={filters}
-          inputRef={inputRef}
-          isExpanded={isExpanded}
-          onDraftChange={handleDraftChange}
-          onKeyDown={handleKeyDown}
-          onModelRouteChange={onModelRouteChange}
-          onSubmit={handleSubmit}
-          onUpdateFilter={onUpdateFilter}
-          routeOptions={routeOptions}
-          modelRoute={modelRoute}
+          onArchiveSession={onArchiveSession}
+          onNewSession={onNewSession}
+          onSearchChange={setSessionSearch}
+          onSelectSession={onSelectSession}
+          searchValue={sessionSearch}
+          sessions={filteredSessions}
+          sessionsLoading={sessionsLoading}
         />
+      ) : null}
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex h-12 shrink-0 items-center justify-between border-b px-3 md:px-4">
+          <Button
+            aria-label={sessionPanelOpen ? "Hide chat sessions" : "Show chat sessions"}
+            className="h-8 rounded-full px-2 text-xs text-muted-foreground"
+            onClick={() => setSessionPanelOpen((open) => !open)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            {sessionPanelOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
+            <span className="hidden sm:inline">Sessions</span>
+          </Button>
+          <div className="truncate text-xs font-medium text-muted-foreground">SOP Chat</div>
+        </div>
+
+        <div className={cn("min-h-0 flex-1 overflow-y-auto", hasMessages ? "px-1 py-2" : "grid place-items-center px-4 py-10")}>
+          {hasMessages ? (
+            <div className="mx-auto grid w-full max-w-3xl gap-6 pb-6">
+              {messages.map((message) => (
+                <ChatBubble
+                  key={message.id}
+                  message={message}
+                  onCopy={onCopy}
+                  onOpenDocument={onOpenDocument}
+                  onOpenQuickSource={onOpenQuickSource}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="w-full pb-20">
+              <EmptyChatState />
+            </div>
+          )}
+        </div>
+
+        <div className="shrink-0 bg-background px-2 pb-2 pt-3 md:px-4 md:pb-3">
+          <Composer
+            busy={busy}
+            collectionOptions={collectionOptions}
+            draft={draft}
+            dynamicFilterOptions={dynamicFilterOptions}
+            filters={filters}
+            inputRef={inputRef}
+            isExpanded={isExpanded}
+            onDraftChange={handleDraftChange}
+            onKeyDown={handleKeyDown}
+            onModelRouteChange={onModelRouteChange}
+            onSubmit={handleSubmit}
+            onUpdateFilter={onUpdateFilter}
+            routeOptions={routeOptions}
+            modelRoute={modelRoute}
+          />
+        </div>
       </div>
+    </div>
+  );
+}
+
+function SessionPanel({
+  activeSessionId,
+  busy,
+  onArchiveSession,
+  onNewSession,
+  onSearchChange,
+  onSelectSession,
+  searchValue,
+  sessions,
+  sessionsLoading,
+}: {
+  activeSessionId: string;
+  busy: boolean;
+  onArchiveSession: (sessionId: string) => void;
+  onNewSession: () => void;
+  onSearchChange: (value: string) => void;
+  onSelectSession: (sessionId: string) => void;
+  searchValue: string;
+  sessions: ChatSessionSummary[];
+  sessionsLoading: boolean;
+}) {
+  return (
+    <aside className="flex max-h-64 min-h-0 shrink-0 flex-col border-b bg-muted/15 md:h-full md:max-h-none md:w-72 md:border-b-0 md:border-r">
+      <div className="shrink-0 px-3 py-3">
+        <Button className="h-9 w-full rounded-full" disabled={busy} onClick={onNewSession} type="button">
+          <MessageSquarePlus data-icon="inline-start" className="size-4" />
+          New chat
+        </Button>
+        <label className="mt-2 flex h-9 items-center gap-2 rounded-full border bg-background px-3 text-sm">
+          <Search className="size-4 text-muted-foreground" />
+          <input
+            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="Search sessions"
+            value={searchValue}
+          />
+        </label>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        {sessionsLoading && !sessions.length ? (
+          <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin" />
+            Loading sessions
+          </div>
+        ) : null}
+        {!sessionsLoading && !sessions.length ? (
+          <p className="px-2 py-3 text-xs leading-5 text-muted-foreground">
+            No chat sessions yet. Start a chat to keep the trail for later.
+          </p>
+        ) : null}
+        <div className="grid gap-1.5">
+          {sessions.map((session) => (
+            <SessionListItem
+              active={session.id === activeSessionId}
+              busy={busy}
+              key={session.id}
+              onArchive={() => onArchiveSession(session.id)}
+              onSelect={() => onSelectSession(session.id)}
+              session={session}
+            />
+          ))}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function SessionListItem({
+  active,
+  busy,
+  onArchive,
+  onSelect,
+  session,
+}: {
+  active: boolean;
+  busy: boolean;
+  onArchive: () => void;
+  onSelect: () => void;
+  session: ChatSessionSummary;
+}) {
+  return (
+    <div
+      className={cn(
+        "group/session flex min-w-0 items-start gap-2 rounded-xl px-2 py-2 text-left transition-colors",
+        active ? "bg-background shadow-sm ring-1 ring-border" : "hover:bg-background/60",
+      )}
+    >
+      <button className="min-w-0 flex-1 text-left" onClick={onSelect} type="button">
+        <p className="truncate text-sm font-medium text-foreground">{session.title || "New chat"}</p>
+        <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+          {session.message_count} messages · {formatSessionTime(session.last_message_at ?? session.updated_at)}
+        </p>
+      </button>
+      <Button
+        aria-label="Archive chat session"
+        className={cn("h-7 w-7 rounded-full opacity-70 md:opacity-0 md:group-hover/session:opacity-100", active && "opacity-100")}
+        disabled={busy}
+        onClick={onArchive}
+        size="icon"
+        title="Archive"
+        type="button"
+        variant="ghost"
+      >
+        <Archive className="size-3.5" />
+      </Button>
     </div>
   );
 }
@@ -697,6 +859,19 @@ function sourceRoleLabel(role: string) {
     parent_sop: "Parent SOP",
   };
   return labels[role] ?? role;
+}
+
+function formatSessionTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "no activity";
+  }
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function CompactBadge({
