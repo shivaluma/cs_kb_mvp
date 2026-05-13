@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 
 import { RouteLoading } from "@/components/route-loading";
 import { defaultFilters, workspacePaths } from "@/constants";
@@ -35,6 +35,8 @@ export function ChatPage() {
   const { getParam } = useUrlSearch();
   const { reportError, reportNotice } = useFeedback();
   const initialQuestion = getParam("q", "");
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const routeSessionId = chatSessionIdFromPathname(pathname);
   const initialQuestionSent = useRef("");
   const chatModelRoutesQuery = useChatModelRoutes();
   const collectionsQuery = useCollections();
@@ -70,10 +72,16 @@ export function ChatPage() {
   );
 
   useEffect(() => {
-    if (!activeSessionId && chatSessionsQuery.data?.length) {
+    if (routeSessionId && routeSessionId !== activeSessionId) {
+      setActiveSessionId(routeSessionId);
+    }
+  }, [activeSessionId, routeSessionId]);
+
+  useEffect(() => {
+    if (!routeSessionId && !activeSessionId && chatSessionsQuery.data?.length) {
       setActiveSessionId(chatSessionsQuery.data[0].id);
     }
-  }, [activeSessionId, chatSessionsQuery.data]);
+  }, [activeSessionId, chatSessionsQuery.data, routeSessionId]);
 
   useEffect(() => {
     const activeSession = chatSessionsQuery.data?.find((session) => session.id === activeSessionId);
@@ -120,6 +128,7 @@ export function ChatPage() {
       filters: {},
     });
     setActiveSessionId(session.id);
+    navigateToChatSession(navigate, session.id);
     return session.id;
   }
 
@@ -153,6 +162,7 @@ export function ChatPage() {
         model_route: modelRoute,
       });
       setActiveSessionId(chatResponse.session.id);
+      navigateToChatSession(navigate, chatResponse.session.id);
       setMessages((current) =>
         current.map((message) =>
           message.id === pendingId
@@ -192,6 +202,7 @@ export function ChatPage() {
         filters: {},
       });
       setActiveSessionId(session.id);
+      navigateToChatSession(navigate, session.id);
       setMessages([]);
       reportNotice("New chat session created.");
     } catch (error) {
@@ -201,9 +212,13 @@ export function ChatPage() {
 
   function selectSession(sessionId: string) {
     if (sessionId === activeSessionId) {
+      if (routeSessionId !== sessionId) {
+        navigateToChatSession(navigate, sessionId);
+      }
       return;
     }
     setActiveSessionId(sessionId);
+    navigateToChatSession(navigate, sessionId);
   }
 
   async function archiveSession(sessionId: string) {
@@ -217,6 +232,9 @@ export function ChatPage() {
         setActiveSessionId(nextSession?.id ?? "");
         if (!nextSession) {
           setMessages([]);
+          void navigate({ to: workspacePaths.chat });
+        } else {
+          navigateToChatSession(navigate, nextSession.id);
         }
       }
       reportNotice("Chat session archived.");
@@ -298,6 +316,19 @@ function storedMessageToThreadMessage(message: ChatStoredMessage): ChatThreadMes
 
 function isGroundedChatResponse(value: ChatStoredMessage["response_payload"]): value is GroundedChatResponse {
   return Boolean(value && typeof value === "object" && "answer" in value && "citations" in value && "retrieval" in value);
+}
+
+function chatSessionIdFromPathname(pathname: string) {
+  const prefix = `${workspacePaths.chat}/`;
+  if (!pathname.startsWith(prefix)) {
+    return "";
+  }
+  const [sessionId = ""] = pathname.slice(prefix.length).split("/");
+  return sessionId ? decodeURIComponent(sessionId) : "";
+}
+
+function navigateToChatSession(navigate: ReturnType<typeof useNavigate>, sessionId: string) {
+  void navigate({ to: `${workspacePaths.chat}/${encodeURIComponent(sessionId)}` as never });
 }
 
 function firstFilterValue(value: unknown) {

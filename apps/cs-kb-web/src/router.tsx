@@ -36,6 +36,12 @@ const chatRoute = createRoute({
   component: ChatPage,
 });
 
+const chatSessionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: `${workspacePaths.chat}/$sessionId`,
+  component: ChatPage,
+});
+
 const issueRouterRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: workspacePaths.issueRouter,
@@ -82,6 +88,7 @@ const routeTree = rootRoute.addChildren([
   dashboardRoute,
   lookupRoute,
   chatRoute,
+  chatSessionRoute,
   issueRouterRoute,
   toolsRoute,
   collectionsRoute,

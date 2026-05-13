@@ -14,6 +14,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import {
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -88,6 +89,7 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
     description: "Manual model override cho câu trả lời ngắn, nhanh và grounded.",
   },
 ];
+const COMPOSER_MAX_HEIGHT = 176;
 
 export function ChatWorkspace({
   activeSessionId,
@@ -149,9 +151,7 @@ export function ChatWorkspace({
   function resetComposer() {
     setDraft("");
     setIsExpanded(false);
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
+    resizeComposerTextarea(inputRef.current);
   }
 
   function submit(question = draft) {
@@ -170,12 +170,9 @@ export function ChatWorkspace({
 
   function handleDraftChange(event: ChangeEvent<HTMLTextAreaElement>) {
     const value = event.target.value;
+    const nextHeight = resizeComposerTextarea(event.currentTarget);
     setDraft(value);
-    setIsExpanded(value.length > 120 || value.includes("\n"));
-
-    const target = event.currentTarget;
-    target.style.height = "auto";
-    target.style.height = `${Math.min(target.scrollHeight, 176)}px`;
+    setIsExpanded(value.length > 120 || value.includes("\n") || nextHeight > 36);
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -433,6 +430,10 @@ function Composer({
       : [{ label: "All tasks", value: "all" }],
   };
 
+  useLayoutEffect(() => {
+    resizeComposerTextarea(inputRef.current);
+  });
+
   return (
     <div className="mx-auto w-full max-w-3xl space-y-2">
       <div className="flex justify-end">
@@ -495,10 +496,10 @@ function Composer({
             })}
             style={{ gridArea: "primary" }}
           >
-            <div className="max-h-52 flex-1 overflow-auto">
+            <div className="max-h-52 flex-1 overflow-hidden">
               <textarea
                 ref={inputRef}
-                className="block w-full min-h-0 resize-none rounded-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-muted-foreground focus-visible:ring-0 disabled:cursor-not-allowed disabled:opacity-60"
+                className="block w-full min-h-6 resize-none overflow-hidden rounded-none border-0 bg-transparent p-0 text-base leading-6 outline-none placeholder:text-muted-foreground focus-visible:ring-0 disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={busy}
                 onChange={onDraftChange}
                 onKeyDown={onKeyDown}
@@ -872,6 +873,17 @@ function formatSessionTime(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function resizeComposerTextarea(textarea: HTMLTextAreaElement | null) {
+  if (!textarea) {
+    return 0;
+  }
+  textarea.style.height = "0px";
+  const nextHeight = Math.min(textarea.scrollHeight, COMPOSER_MAX_HEIGHT);
+  textarea.style.height = `${Math.max(nextHeight, 24)}px`;
+  textarea.style.overflowY = textarea.scrollHeight > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
+  return nextHeight;
 }
 
 function CompactBadge({

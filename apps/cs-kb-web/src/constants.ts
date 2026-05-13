@@ -182,6 +182,9 @@ export function pathForWorkspace(workspace: Workspace) {
 }
 
 export function workspaceFromPath(pathname: string): Workspace {
+  if (pathname === workspacePaths.chat || pathname.startsWith(`${workspacePaths.chat}/`)) {
+    return "chat";
+  }
   const current = navItems.find((item) => item.path === pathname);
   return current?.id ?? "dashboard";
 }
