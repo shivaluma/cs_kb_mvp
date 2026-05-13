@@ -1444,6 +1444,8 @@ def generate_grounded_answer(
                     "Không dùng model knowledge ngoài sources. Không dùng raw upload, draft, archived content. "
                     "Nếu sources không đủ căn cứ, trả lời rằng không tìm thấy SOP published đủ tin cậy. "
                     "Không tự tạo policy, điều kiện xử lý, hoặc cảnh báo rủi ro ngoài source. "
+                    "Giữ nguyên wording vận hành nhạy cảm từ source khi có thể, nhất là các cụm như 'chưa thể hỗ trợ', 'từ chối hỗ trợ', 'KHÔNG cần chuyển case', thời hạn, điều kiện Yes/No, tên queue/tool/email. "
+                    "Không đổi nhẹ wording làm thay đổi mức độ policy, ví dụ không tự đổi 'chưa thể hỗ trợ' thành 'từ chối hỗ trợ' nếu source không dùng cụm đó. "
                     "Nguồn có metadata chat_source_role=issue_router/tool_link/action_template chỉ là context điều hướng/tool/action, không đủ để kết luận policy nếu không có direct_sop hoặc related_sop. "
                     "Nếu chỉ có context index/tool/action mà không có source role direct_sop hoặc related_sop, phải nói chưa đủ SOP được link để trả lời chắc chắn. "
                     "Câu trả lời phải ngắn, actionable, tiếng Việt, và có warning nếu source có risk/compliance/security/financial/account/escalation signal. "

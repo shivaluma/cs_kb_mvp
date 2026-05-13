@@ -6,13 +6,14 @@ from unittest.mock import patch
 from app.chat import (
     ChatRetrievalBundle,
     contextual_retrieval_query,
+    evidence_confidence,
     grounded_chat,
     has_policy_source,
     retrieve_for_chat,
     should_use_recent_context,
     updated_session_summary,
 )
-from app.schemas import Citation, GroundedChatRequest, RetrievalResponse, RetrievalResult
+from app.schemas import Citation, GroundedAnswerPayload, GroundedChatRequest, RetrievalResponse, RetrievalResult
 
 
 class ChatRetrievalTest(unittest.TestCase):
@@ -87,6 +88,105 @@ class ChatRetrievalTest(unittest.TestCase):
         )
         self.assertEqual(bundle.retrieval.results[0].chunk_id, "direct-chunk")
 
+    def test_condition_rerank_penalizes_wrong_boundary_context(self) -> None:
+        si_lock = retrieval_result(
+            "si-lock",
+            "handling_rule",
+            score=0.8,
+            heading="Xử lý TX bị khóa bởi SI yêu cầu gọi số khác",
+            content="Trường hợp TX bị khóa bởi SI liên hệ yêu cầu Be liên hệ qua SĐT khác thì kiểm tra lý do khóa theo case ID.",
+        )
+        outbound = retrieval_result(
+            "outbound",
+            "handling_rule",
+            score=0.72,
+            heading="Xử lý KH/TX yêu cầu gọi số khác",
+            content="Nếu CS liên hệ TX để xử lý vấn đề do KH phản ánh nhưng TX yêu cầu CS gọi ra 1 số khác thì CS liên hệ SĐT TX cung cấp để xử lý tiếp.",
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([si_lock, outbound]), retrieval_response([])]),
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]),
+        ):
+            bundle = retrieve_for_chat(GroundedChatRequest(question="CS gọi TX để xử lý phản ánh từ KH, TX yêu cầu gọi sang số khác thì sao?", limit=10))
+
+        self.assertEqual(bundle.retrieval.results[0].chunk_id, "outbound")
+        self.assertIn("si_lock_not_asked", bundle.retrieval.results[1].metadata["chat_match_penalties"])
+
+    def test_semantic_duplicate_chunks_merge_before_context(self) -> None:
+        first = retrieval_result(
+            "policy",
+            "handling_rule",
+            score=0.62,
+            heading="Xử lý yêu cầu TX trên Hotline 1900232345",
+            content="TX liên hệ hỗ trợ qua Hotline 1900232345, CS hướng dẫn TX liên hệ lại đúng kênh hỗ trợ hoặc gửi mail đến hộp thư hotro@be.com.vn.",
+        )
+        duplicate = retrieval_result(
+            "workflow",
+            "workflow_step",
+            score=0.6,
+            heading="Xử lý yêu cầu TX trên Hotline",
+            content="Đối với TX liên hệ qua Hotline 1900232345, CS hướng dẫn TX liên hệ lại đúng kênh hỗ trợ hoặc gửi mail đến hộp thư hotro@be.com.vn.",
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([first, duplicate]), retrieval_response([])]),
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]),
+        ):
+            bundle = retrieve_for_chat(GroundedChatRequest(question="TX liên hệ Hotline 1900232345 để được hỗ trợ thì xử lý sao?", limit=10))
+
+        self.assertEqual(len(bundle.retrieval.results), 1)
+        self.assertEqual(bundle.retrieval.results[0].chunk_id, "policy")
+        self.assertEqual(bundle.retrieval.results[0].metadata["chat_dedupe_status"], "semantic_duplicates_merged")
+
+    def test_evidence_confidence_caps_single_policy_citation(self) -> None:
+        result = retrieval_result(
+            "single",
+            "handling_rule",
+            score=0.2,
+            heading="Xử lý KH/TX yêu cầu gọi số khác",
+            content="Nếu CS liên hệ TX để xử lý vấn đề do KH phản ánh nhưng TX yêu cầu CS gọi ra 1 số khác thì CS liên hệ SĐT TX cung cấp.",
+        )
+        confidence = evidence_confidence(
+            "CS gọi TX để xử lý phản ánh từ KH, TX yêu cầu gọi sang số khác thì sao?",
+            [result],
+            [result],
+            model_confidence=1.0,
+            has_unresolved_dependency=False,
+        )
+
+        self.assertLess(confidence, 1.0)
+        self.assertLessEqual(confidence, 0.82)
+
+    def test_grounded_chat_overrides_model_confidence(self) -> None:
+        result = retrieval_result(
+            "source",
+            "handling_rule",
+            score=0.21,
+            heading="Xử lý yêu cầu TX trên Hotline",
+            content="TX liên hệ hỗ trợ qua Hotline 1900232345, CS hướng dẫn TX liên hệ đúng kênh hoặc gửi mail.",
+        )
+        retrieval = retrieval_response([result.model_copy(update={"metadata": {**result.metadata, "chat_source_role": "direct_sop"}})])
+        bundle = ChatRetrievalBundle(
+            retrieval=retrieval,
+            source_groups=[{"role": "direct_sop", "label": "Direct SOP", "sources": [result.model_dump()]}],
+            trace={"strategy": "chat_kb_index_multi_stage", "final_count": 1},
+        )
+        answer = GroundedAnswerPayload(answer="Hướng dẫn TX liên hệ đúng kênh hoặc gửi mail.", steps=[], warnings=[], confidence=1.0, source_indices=[1])
+
+        with (
+            patch("app.chat.retrieve_for_chat", return_value=bundle),
+            patch("app.chat.generate_grounded_answer", return_value=(answer, ["model_used"])),
+            patch("app.chat.repository.unresolved_relations_for_chunks", return_value=[]),
+            patch("app.chat.repository.log_chat"),
+        ):
+            response = grounded_chat(GroundedChatRequest(question="TX liên hệ Hotline 1900232345 để được hỗ trợ thì xử lý sao?"))
+
+        self.assertLess(response.confidence, 1.0)
+        self.assertIn("model_confidence_overridden_by_evidence_score", response.warnings)
+
     def test_session_context_only_expands_follow_up_queries(self) -> None:
         recent = ["Quy định xác minh tài khoản hotline là gì?"]
 
@@ -123,8 +223,14 @@ def retrieval_response(results: list[RetrievalResult]) -> RetrievalResponse:
     )
 
 
-def retrieval_result(chunk_id: str, unit_type: str, score: float = 0.5) -> RetrievalResult:
-    row = retrieval_row(chunk_id, unit_type, score=score)
+def retrieval_result(
+    chunk_id: str,
+    unit_type: str,
+    score: float = 0.5,
+    heading: str | None = None,
+    content: str | None = None,
+) -> RetrievalResult:
+    row = retrieval_row(chunk_id, unit_type, score=score, heading=heading, content=content)
     citation = Citation(
         document_id=row["document_id"],
         version_id=row["version_id"],
@@ -155,7 +261,14 @@ def retrieval_result(chunk_id: str, unit_type: str, score: float = 0.5) -> Retri
     )
 
 
-def retrieval_row(chunk_id: str, unit_type: str, score: float = 0.5, relation_type: str | None = None) -> dict[str, object]:
+def retrieval_row(
+    chunk_id: str,
+    unit_type: str,
+    score: float = 0.5,
+    relation_type: str | None = None,
+    heading: str | None = None,
+    content: str | None = None,
+) -> dict[str, object]:
     metadata: dict[str, object] = {
         "unit_type": unit_type,
         "review_status": "approved",
@@ -165,15 +278,15 @@ def retrieval_row(chunk_id: str, unit_type: str, score: float = 0.5, relation_ty
         metadata["relation_type"] = relation_type
     return {
         "chunk_id": chunk_id,
-        "document_id": f"doc-{chunk_id}",
-        "version_id": f"version-{chunk_id}",
+        "document_id": "doc-shared" if chunk_id in {"policy", "workflow"} else f"doc-{chunk_id}",
+        "version_id": "version-shared" if chunk_id in {"policy", "workflow"} else f"version-{chunk_id}",
         "title": f"Title {chunk_id}",
         "source_filename": f"{chunk_id}.md",
         "version_number": 1,
         "chunk_index": 0,
         "section": unit_type,
-        "heading": f"Heading {chunk_id}",
-        "content": f"Content for {chunk_id}",
+        "heading": heading or f"Heading {chunk_id}",
+        "content": content or f"Content for {chunk_id}",
         "score": score,
         "lexical_score": score,
         "vector_score": 0.0,

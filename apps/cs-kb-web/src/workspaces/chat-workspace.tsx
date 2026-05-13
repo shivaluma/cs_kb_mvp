@@ -643,7 +643,7 @@ function ChatBubble({
                   onClick={() => setSourcesOpen((current) => !current)}
                   type="button"
                 >
-                  <span className="shrink-0 text-xs font-semibold text-muted-foreground">Sources used</span>
+                  <span className="shrink-0 text-xs font-semibold text-muted-foreground">Context candidates</span>
                   <CompactBadge variant="secondary">{sourceCount}</CompactBadge>
                   <span className="flex min-w-0 flex-1 flex-wrap gap-1.5">
                     {groupedSources.map((group) => (
@@ -698,8 +698,8 @@ function ResponseMeta({
       <CompactBadge variant={response.citations.length ? "secondary" : "destructive"}>
         {response.citations.length ? `${response.citations.length} citations` : "no citation"}
       </CompactBadge>
-      <CompactBadge>{Math.round(response.confidence * 100)}% confidence</CompactBadge>
-      {finalSourceCount ? <CompactBadge>{finalSourceCount} sources</CompactBadge> : null}
+      <CompactBadge>{Math.round(response.confidence * 100)}% evidence</CompactBadge>
+      {finalSourceCount ? <CompactBadge>{finalSourceCount} context candidates</CompactBadge> : null}
       {response.model_route ? <CompactBadge>{response.model_route}</CompactBadge> : null}
       {response.model_used ? <CompactBadge className="max-w-[13rem]">{response.model_used}</CompactBadge> : null}
       <CompactBadge>
@@ -716,10 +716,12 @@ function ResponseMeta({
 
 function RetrievalTrace({ trace }: { trace: Record<string, unknown> }) {
   const stages = [
-    { label: "Direct SOP", value: numericTraceValue(trace, "direct_count") },
-    { label: "Index", value: numericTraceValue(trace, "index_count") },
-    { label: "Related", value: numericTraceValue(trace, "relation_count") },
-    { label: "Parent", value: numericTraceValue(trace, "parent_count") },
+    { label: "Direct candidates", value: numericTraceValue(trace, "direct_count") },
+    { label: "Index candidates", value: numericTraceValue(trace, "index_count") },
+    { label: "Related fetched", value: numericTraceValue(trace, "relation_count") },
+    { label: "Parent fetched", value: numericTraceValue(trace, "parent_count") },
+    { label: "Final context", value: numericTraceValue(trace, "final_count") },
+    { label: "Merged duplicates", value: numericTraceValue(trace, "semantic_deduped_count") },
   ].filter((stage) => stage.value > 0);
 
   if (!stages.length) {
@@ -728,7 +730,7 @@ function RetrievalTrace({ trace }: { trace: Record<string, unknown> }) {
 
   return (
     <section className="min-w-0 rounded-xl border bg-muted/15 px-3 py-2">
-      <p className="text-xs font-semibold text-muted-foreground">Retrieval trace</p>
+      <p className="text-xs font-semibold text-muted-foreground">Retrieval debug</p>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {stages.map((stage) => (
           <CompactBadge key={stage.label}>
