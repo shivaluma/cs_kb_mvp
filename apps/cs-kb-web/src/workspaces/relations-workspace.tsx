@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowRight, CheckCircle2, CircleHelp, FilePlus2, GitBranch, Loader2, PlusCircle, RefreshCw, Search, XCircle } from "lucide-react";
+import { Archive, ArrowRight, CheckCircle2, CircleHelp, FilePlus2, GitBranch, Loader2, PlusCircle, RefreshCw, Search, XCircle } from "lucide-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
@@ -43,10 +43,12 @@ const RELATION_TYPE_OPTIONS: Array<{ value: RelationType; label: string; help: s
 const BLOCKING_RELATION_TYPES = new Set<RelationType>(["requires", "must_follow", "exception_of", "supersedes"]);
 
 export function RelationsWorkspace({
+  archivingRelationId,
   assigningRelationId,
   creatingRelation,
   documentsLoading,
   onAssign,
+  onArchive,
   onCreate,
   onRefresh,
   onReject,
@@ -59,10 +61,12 @@ export function RelationsWorkspace({
   sourceDocuments,
   status,
 }: {
+  archivingRelationId: string;
   assigningRelationId: string;
   creatingRelation: boolean;
   documentsLoading: boolean;
   onAssign: (relation: DocumentRelation, targetDocumentId: string) => void;
+  onArchive: (relation: DocumentRelation) => void;
   onCreate: (payload: CreateRelationPayload) => void;
   onRefresh: () => void;
   onReject: (relation: DocumentRelation) => void;
@@ -137,7 +141,7 @@ export function RelationsWorkspace({
             </div>
           ) : (
             <div className="divide-y">
-              <div className="grid gap-3 px-2 py-3 text-xs font-medium text-muted-foreground md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7rem_8rem_18rem]">
+              <div className="grid gap-3 px-2 py-3 text-xs font-medium text-muted-foreground md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7rem_8rem_24rem]">
                 <span>Source SOP</span>
                 <span>Target title</span>
                 <span>Type</span>
@@ -148,9 +152,11 @@ export function RelationsWorkspace({
                 <RelationRow
                   assigning={assigningRelationId === relation.id}
                   assigningOpen={assigningId === relation.id}
+                  archiving={archivingRelationId === relation.id}
                   documentsLoading={documentsLoading}
                   key={relation.id}
                   onAssign={onAssign}
+                  onArchive={onArchive}
                   onOpenAssign={() => {
                     setAssigningId(assigningId === relation.id ? "" : relation.id);
                     setTargetSearch("");
@@ -497,10 +503,12 @@ function unitLabel(chunk: DocumentChunk) {
 }
 
 function RelationRow({
+  archiving,
   assigning,
   assigningOpen,
   documentsLoading,
   onAssign,
+  onArchive,
   onOpenAssign,
   onReject,
   onUploadTarget,
@@ -510,10 +518,12 @@ function RelationRow({
   setTargetSearch,
   targetSearch,
 }: {
+  archiving: boolean;
   assigning: boolean;
   assigningOpen: boolean;
   documentsLoading: boolean;
   onAssign: (relation: DocumentRelation, targetDocumentId: string) => void;
+  onArchive: (relation: DocumentRelation) => void;
   onOpenAssign: () => void;
   onReject: (relation: DocumentRelation) => void;
   onUploadTarget: (relation: DocumentRelation) => void;
@@ -532,6 +542,7 @@ function RelationRow({
   }, [publishedDocuments, relation.source_document_id, targetSearch]);
   const resolvedTarget = relation.target_title_resolved || relation.target_title;
   const canResolve = relation.status === "unresolved" || relation.status === "suggested";
+  const canArchive = relation.status !== "archived";
   const relationSource = typeof relation.metadata?.relation_source === "string" ? relation.metadata.relation_source : "";
   const evidenceText = typeof relation.metadata?.evidence_text === "string" ? relation.metadata.evidence_text : "";
   const sourceScope = typeof relation.metadata?.source_scope === "string" ? relation.metadata.source_scope : relation.source_chunk_id ? "unit" : "whole";
@@ -540,7 +551,7 @@ function RelationRow({
 
   return (
     <article className="px-2 py-3">
-      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7rem_8rem_18rem] md:items-start">
+      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7rem_8rem_24rem] md:items-start">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{relation.source_title}</p>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -572,6 +583,10 @@ function RelationRow({
           <Button disabled={!canResolve || rejecting} onClick={() => onReject(relation)} size="sm" type="button" variant="ghost">
             {rejecting ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <XCircle data-icon="inline-start" className="size-3.5" />}
             Reject
+          </Button>
+          <Button disabled={!canArchive || archiving} onClick={() => onArchive(relation)} size="sm" type="button" variant="destructive">
+            {archiving ? <Loader2 data-icon="inline-start" className="size-3.5 animate-spin" /> : <Archive data-icon="inline-start" className="size-3.5" />}
+            Archive
           </Button>
         </div>
       </div>

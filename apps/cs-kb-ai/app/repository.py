@@ -2382,6 +2382,27 @@ def archive_document_collection_items_tx(conn: Connection[Any], document_id: str
     )
 
 
+def archive_document_relations_for_document_tx(conn: Connection[Any], document_id: str, actor: str) -> int:
+    archived_metadata = {
+        "archive_reason": "document_archived",
+        "archived_document_id": document_id,
+        "archived_by": actor,
+    }
+    return conn.execute(
+        """
+        UPDATE ai_document_relations
+        SET status = 'archived',
+            reviewed_by = %s,
+            reviewed_at = now(),
+            metadata = metadata || %s::jsonb,
+            updated_at = now()
+        WHERE status <> 'archived'
+          AND (source_document_id = %s OR target_document_id = %s)
+        """,
+        (pg_text(actor), pg_text(json.dumps(archived_metadata)), document_id, document_id),
+    ).rowcount
+
+
 def materialize_collection_items_for_version_tx(conn: Connection[Any], document_id: str, version_id: str, actor: str, source: str) -> dict[str, int]:
     conn.row_factory = dict_row
     archive_document_collection_items_tx(conn, document_id)
@@ -2695,13 +2716,15 @@ def archive_document(document_id: str, actor: str) -> None:
                 "UPDATE ai_document_versions SET status = 'archived', archived_at = now() WHERE document_id = %s",
                 (document_id,),
             )
+            archive_document_collection_items_tx(conn, document_id)
+            archived_relation_count = archive_document_relations_for_document_tx(conn, document_id, actor)
             audit_tx(
                 conn,
                 actor=actor,
                 action="document_archive",
                 entity_type="ai_document",
                 entity_id=document_id,
-                metadata={},
+                metadata={"archived_relation_count": archived_relation_count},
             )
 
 
@@ -3432,6 +3455,44 @@ def reject_document_relation(relation_id: str, actor: str, rejection_reason: str
                 entity_type="ai_document_relation",
                 entity_id=relation_id,
                 metadata=dict(row),
+            )
+    return relation_by_id(relation_id)
+
+
+def archive_document_relation(relation_id: str, actor: str, archive_reason: str = "") -> dict[str, Any]:
+    archived_metadata = {
+        "archive_reason": archive_reason or "manual_archive",
+        "archived_by": actor,
+    }
+    with connection() as conn:
+        with conn.transaction():
+            conn.row_factory = dict_row
+            row = conn.execute(
+                """
+                UPDATE ai_document_relations
+                SET status = 'archived',
+                    reviewed_by = %s,
+                    reviewed_at = now(),
+                    metadata = metadata || %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id::text AS relation_id,
+                          source_document_id::text AS source_document_id,
+                          target_document_id::text AS target_document_id,
+                          relation_type,
+                          status
+                """,
+                (pg_text(actor), pg_text(json.dumps(archived_metadata)), relation_id),
+            ).fetchone()
+            if not row:
+                raise LookupError("relation_not_found")
+            audit_tx(
+                conn,
+                actor=pg_text(actor),
+                action="document_relation_archive",
+                entity_type="ai_document_relation",
+                entity_id=relation_id,
+                metadata=dict(row) | {"archive_reason": archived_metadata["archive_reason"]},
             )
     return relation_by_id(relation_id)
 

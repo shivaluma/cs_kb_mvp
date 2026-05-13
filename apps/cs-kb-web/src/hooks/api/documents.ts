@@ -285,6 +285,7 @@ export function useArchiveDocument() {
       queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
       queryClient.invalidateQueries({ queryKey: ["ai-document-chunks"] });
       queryClient.invalidateQueries({ queryKey: ["ai-extraction-units"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-document-relations"] });
     },
   });
 }

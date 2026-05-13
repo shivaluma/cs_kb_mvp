@@ -33,6 +33,7 @@ from app.schemas import (
     ExtractionUnitUpdateRequest,
     GroundedChatRequest,
     GroundedChatResponse,
+    ArchiveRelationRequest,
     ActionTemplateSummary,
     IssueRouterItem,
     IndexSOPVersionRequest,
@@ -702,6 +703,15 @@ def reject_relation(relation_id: str, payload: RejectRelationRequest | None = No
     data = payload or RejectRelationRequest()
     try:
         return DocumentRelation(**repository.reject_document_relation(relation_id, data.actor, data.rejection_reason))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/relations/{relation_id}/archive", response_model=DocumentRelation)
+def archive_relation(relation_id: str, payload: ArchiveRelationRequest | None = None) -> DocumentRelation:
+    data = payload or ArchiveRelationRequest()
+    try:
+        return DocumentRelation(**repository.archive_document_relation(relation_id, data.actor, data.archive_reason))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

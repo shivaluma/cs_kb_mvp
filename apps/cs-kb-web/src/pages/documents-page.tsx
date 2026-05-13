@@ -398,7 +398,7 @@ export function DocumentsPage() {
   }
 
   function archiveDocument(document: DocumentSummary) {
-    const confirmed = window.confirm(`Archive "${document.title}"? It will be removed from active retrieval and Meilisearch.`);
+    const confirmed = window.confirm(`Archive "${document.title}"? It will be removed from active retrieval, Meilisearch, collection membership, and approved relation expansion.`);
     if (!confirmed) {
       return;
     }

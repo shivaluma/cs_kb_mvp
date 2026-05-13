@@ -919,6 +919,11 @@ class RejectRelationRequest(BaseModel):
     rejection_reason: str = ""
 
 
+class ArchiveRelationRequest(BaseModel):
+    actor: str = "cs-ops-ui"
+    archive_reason: str = ""
+
+
 class RetrievalFilters(BaseModel):
     audience: list[str] = Field(default_factory=list)
     vertical: list[str] = Field(default_factory=list)

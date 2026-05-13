@@ -67,3 +67,17 @@ export function useRejectRelation() {
     },
   });
 }
+
+export function useArchiveRelation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { relationId: string; actor: string; archiveReason?: string }) =>
+      apiPost<DocumentRelation>(`/api/v1/ai/relations/${payload.relationId}/archive`, {
+        actor: payload.actor,
+        archive_reason: payload.archiveReason ?? "",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["ai-document-relations"] });
+    },
+  });
+}

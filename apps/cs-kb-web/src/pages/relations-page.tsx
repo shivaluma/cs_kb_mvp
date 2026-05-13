@@ -4,7 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { RouteLoading } from "@/components/route-loading";
 import { workspacePaths } from "@/constants";
 import { useDocuments } from "@/hooks/api/documents";
-import { useAssignRelation, useCreateRelation, useRejectRelation, useRelations } from "@/hooks/api/relations";
+import { useArchiveRelation, useAssignRelation, useCreateRelation, useRejectRelation, useRelations } from "@/hooks/api/relations";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { useFeedback } from "@/providers/feedback-context";
 import type { DocumentRelation, RelationStatus, RelationType } from "@/types";
@@ -23,6 +23,7 @@ export function RelationsPage() {
   const assignRelationMutation = useAssignRelation();
   const createRelationMutation = useCreateRelation();
   const rejectRelationMutation = useRejectRelation();
+  const archiveRelationMutation = useArchiveRelation();
   const sourceDocuments = (documentsQuery.data ?? []).filter((document) => document.status === "active");
   const publishedDocuments = (documentsQuery.data ?? []).filter(
     (document) => document.status === "active" && document.latest_version_status === "published",
@@ -44,6 +45,20 @@ export function RelationsPage() {
       {
         onSuccess: () => reportNotice(`Rejected relation to ${relation.target_title}.`),
         onError: () => reportError("Reject failed. Check AI service health and retry."),
+      },
+    );
+  }
+
+  function archiveRelation(relation: DocumentRelation) {
+    const confirmed = window.confirm(`Archive relation from "${relation.source_title}" to "${relation.target_title_resolved || relation.target_title}"? It will be removed from chat and lookup expansion.`);
+    if (!confirmed) {
+      return;
+    }
+    archiveRelationMutation.mutate(
+      { relationId: relation.id, actor: "cs-ops-ui", archiveReason: "Archived from Relations page" },
+      {
+        onSuccess: () => reportNotice(`Archived relation to ${relation.target_title_resolved || relation.target_title}.`),
+        onError: () => reportError("Archive relation failed. Check AI service health and retry."),
       },
     );
   }
@@ -85,7 +100,9 @@ export function RelationsPage() {
         assigningRelationId={assignRelationMutation.isPending ? assignRelationMutation.variables?.relationId ?? "" : ""}
         creatingRelation={createRelationMutation.isPending}
         documentsLoading={documentsQuery.isFetching}
+        archivingRelationId={archiveRelationMutation.isPending ? archiveRelationMutation.variables?.relationId ?? "" : ""}
         onAssign={assignRelation}
+        onArchive={archiveRelation}
         onCreate={createRelation}
         onRefresh={() => void relationsQuery.refetch()}
         onReject={rejectRelation}
