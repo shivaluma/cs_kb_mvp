@@ -305,10 +305,12 @@ class WorkflowNode(BaseModel):
     shape_kind: str = ""
     terminal_state: str = ""
     actor: str = ""
+    lane_id: str = ""
     phase: str = ""
     title: str = Field(min_length=1, max_length=240)
     content: str = ""
     question: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
     source_refs: list[SourceRef] = Field(default_factory=list)
     bbox: list[float] = Field(default_factory=list)
     page: int | None = None
@@ -321,9 +323,11 @@ class WorkflowNode(BaseModel):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
-        for key in ("id", "type", "semantic_node_type", "step_code", "shape_kind", "terminal_state", "actor", "phase", "title", "content", "question", "dedupe_status"):
+        for key in ("id", "type", "semantic_node_type", "step_code", "shape_kind", "terminal_state", "actor", "lane_id", "phase", "title", "content", "question", "dedupe_status"):
             raw = normalized.get(key)
             normalized[key] = "" if raw in (None, "null") else str(raw)
+        if not isinstance(normalized.get("metadata"), dict):
+            normalized["metadata"] = {}
         title = normalized.get("title") or normalized.get("question") or normalized.get("content") or normalized.get("id") or "Workflow node"
         normalized["title"] = str(title)[:240]
         if not normalized.get("type"):

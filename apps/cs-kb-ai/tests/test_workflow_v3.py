@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import unittest
 
 from app.workflow_v3 import compile_workflow_v3_payload, workflow_v3_quality_error_from_report
@@ -121,19 +122,58 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         decision_codes = {node["step_code"] for node in graph["nodes"] if node["type"] == "decision"}
         self.assertTrue({"1", "2", "3", "4", "6", "10", "11", "12"}.issubset(decision_codes))
         edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        self.assertIn(("start", "next", "node_1"), edge_keys)
         self.assertIn(("node_4", "no", "node_6"), edge_keys)
         self.assertIn(("node_6", "yes", "node_6_1"), edge_keys)
         self.assertIn(("node_6", "no", "node_6_2"), edge_keys)
         self.assertIn(("node_3", "no", "node_9_2"), edge_keys)
         self.assertNotIn(("node_3", "no", "node_12"), edge_keys)
+        for step_code in {"1.1", "5", "6.1", "6.2", "13", "10.2", "11.1", "11.2"}:
+            node_id = f"node_{step_code.replace('.', '_')}"
+            self.assertIn((node_id, "next", "end"), edge_keys)
         annotation_text = "\n".join(annotation.content for annotation in payload.annotations)
         self.assertIn("Riêng case SI", annotation_text)
+        annotations = [annotation.model_dump() for annotation in payload.annotations]
+        info_note = next(annotation for annotation in annotations if "Thông tin chung" in annotation["content"])
+        si_note = next(annotation for annotation in annotations if "Riêng case SI" in annotation["content"])
+        self.assertEqual(info_note["attached_to"], "node_1")
+        self.assertEqual(si_note["attached_to"], "node_6_1")
         relation_units = [unit for unit in payload.atomic_units if unit.unit_type == "related_document"]
         self.assertEqual(relation_units[0].metadata["relation_type"], "requires")
         self.assertEqual(relation_units[0].metadata["target_title"], "Quy định xác minh tài khoản TX, KH.xlsx")
 
+    def test_missing_start_end_and_terminal_edges_are_synthesized(self) -> None:
+        transcription = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
+        page = transcription["canvas"]["pages"][0]
+        page["nodes"] = [node for node in page["nodes"] if node.get("node_type") not in {"start", "end"}]
+        page["edges"] = [
+            edge for edge in page["edges"]
+            if edge.get("from_node") != "start" and edge.get("to_node") != "end"
+        ]
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="email_workflow.pdf",
+            raw_text=RAW_TEXT,
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        nodes_by_id = {node["id"]: node for node in graph["nodes"]}
+        self.assertEqual(nodes_by_id["start"]["title"], "KH/TX liên hệ qua email hotro@be.com.vn")
+        self.assertEqual(nodes_by_id["start"]["type"], "start")
+        self.assertEqual(nodes_by_id["start"]["lane_id"], "lane_customer_driver")
+        self.assertEqual(nodes_by_id["end"]["type"], "end")
+        edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        self.assertIn(("start", "next", "node_1"), edge_keys)
+        self.assertIn(("node_13", "next", "end"), edge_keys)
+        self.assertIn("workflow_v3_start_node_synthesized", report["warnings"])
+        self.assertIn("workflow_v3_end_node_synthesized", report["warnings"])
+
     def test_missing_visible_step_blocks_v3_success(self) -> None:
-        broken = {**EMAIL_WORKFLOW_CANVAS, "canvas": {"pages": [dict(EMAIL_WORKFLOW_CANVAS["canvas"]["pages"][0])]}}
+        broken = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
         broken["canvas"]["pages"][0]["nodes"] = [
             node for node in EMAIL_WORKFLOW_CANVAS["canvas"]["pages"][0]["nodes"]
             if node.get("step_code") != "6"
@@ -151,7 +191,7 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         self.assertIn("workflow_v3_missing_visible_steps:6", workflow_v3_quality_error_from_report(report))
 
     def test_branching_node_not_decision_blocks_v3_success(self) -> None:
-        broken = {**EMAIL_WORKFLOW_CANVAS, "canvas": {"pages": [dict(EMAIL_WORKFLOW_CANVAS["canvas"]["pages"][0])]}}
+        broken = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
         nodes = [dict(node) for node in EMAIL_WORKFLOW_CANVAS["canvas"]["pages"][0]["nodes"]]
         for node in nodes:
             if node.get("step_code") == "6":
@@ -167,6 +207,40 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         )
 
         self.assertTrue(any("workflow_v3_branching_node_not_decision:6" == blocker for blocker in report["blockers"]))
+
+    def test_decision_marked_not_decision_blocks_v3_success(self) -> None:
+        broken = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
+        for node in broken["canvas"]["pages"][0]["nodes"]:
+            if node.get("step_code") == "4":
+                node["metadata"] = {"review_status": "not decision"}
+
+        _payload, report, _canvas = compile_workflow_v3_payload(
+            filename="email_workflow.pdf",
+            raw_text=RAW_TEXT,
+            transcription=broken,
+            visual_context={},
+        )
+
+        self.assertIn("workflow_v3_decision_marked_not_decision:4", report["blockers"])
+
+    def test_action_without_outgoing_terminal_or_external_marker_blocks_v3_success(self) -> None:
+        broken = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
+        for node in broken["canvas"]["pages"][0]["nodes"]:
+            if node.get("step_code") == "6.1":
+                node["text"] = "6.1. CS ghi nhận thông tin nội bộ"
+        broken["canvas"]["pages"][0]["edges"] = [
+            edge for edge in broken["canvas"]["pages"][0]["edges"]
+            if edge.get("from_step_code") != "6.1"
+        ]
+
+        _payload, report, _canvas = compile_workflow_v3_payload(
+            filename="email_workflow.pdf",
+            raw_text=RAW_TEXT,
+            transcription=broken,
+            visual_context={},
+        )
+
+        self.assertIn("workflow_v3_action_missing_terminal_or_outgoing:6.1", report["blockers"])
 
     def test_summary_like_graph_blocks_v3_success(self) -> None:
         summary = {

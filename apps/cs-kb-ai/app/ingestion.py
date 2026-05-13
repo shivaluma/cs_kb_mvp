@@ -18,6 +18,7 @@ from app.openrouter import (
     suggest_document_metadata,
 )
 from app.schemas import DocumentMetadata
+from app.search_labels import embedding_text_for_unit, meaningful_search_label
 from app.text_processing import (
     Chunk,
     ai_units_to_chunks,
@@ -3900,6 +3901,7 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
     document_title = str(base_metadata.get("title") or path_title(filename))
     for chunk in source_chunks:
         unit_type = str(chunk.metadata.get("unit_type") or chunk.section or "text_section")
+        search_label = meaningful_search_label(chunk.heading, chunk.content, unit_type)
         extraction_status = str(chunk.metadata.get("extraction_status") or enrichment.get("extraction_status") or "structured")
         review_status = str(chunk.metadata.get("review_status") or "needs_review")
         publish_blocked = bool(chunk.metadata.get("publish_blocked") or extraction_status == "degraded")
@@ -3921,6 +3923,8 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
             **chunk.metadata,
             "artifact_type": chunk.metadata.get("artifact_type") or ("draft_unit" if extraction_status != "failed" else "source_evidence"),
             "document_title": document_title,
+            "extracted_heading": chunk.metadata.get("extracted_heading") or chunk.heading,
+            "search_label_generated": search_label != str(chunk.heading or "").strip(),
             "index_eligible": index_eligible,
             "pipeline_stage": chunk.metadata.get("pipeline_stage") or ("plan" if extraction_status == "degraded" else "refine"),
             "section_path": section_path,
@@ -3932,10 +3936,10 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
             {
                 "chunk_index": chunk.chunk_index,
                 "section": chunk.section,
-                "heading": chunk.heading,
+                "heading": search_label,
                 "content": chunk.content,
                 "token_count": chunk.token_count,
-                "embedding": embed_text(" ".join([chunk.heading, chunk.content])),
+                "embedding": embed_text(embedding_text_for_unit(chunk.heading, chunk.content, unit_type)),
                 "metadata": chunk_metadata,
             }
         )

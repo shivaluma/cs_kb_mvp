@@ -14,6 +14,7 @@ from psycopg_pool import ConnectionPool
 
 from app.config import settings
 from app.embedding import vector_literal
+from app.search_labels import is_bad_search_label, meaningful_search_label
 from app.schemas import DocumentMetadata, RetrievalFilters, SynonymGroupCreateRequest, SynonymSuggestionAcceptRequest
 from app.text_processing import normalize_phrase, render_pdf_page_jpeg, tokenize
 
@@ -21,6 +22,15 @@ from app.text_processing import normalize_phrase, render_pdf_page_jpeg, tokenize
 pool = ConnectionPool(settings.database_url, min_size=1, max_size=10, open=False)
 _synonym_cache: tuple[float, list[dict[str, Any]]] = (0, [])
 SYNONYM_CACHE_SECONDS = 30
+EFFECTIVE_HEADING_SQL = """
+CASE
+  WHEN COALESCE(c.heading, '') ~ '^[[:space:]]*([Bb][uư][oơ]?c[[:space:]]*)?[0-9]{1,3}(\\.[0-9]{1,3})*\\.?[[:space:]]*$' THEN ''
+  WHEN length(trim(COALESCE(c.heading, ''))) > 7
+       AND immutable_unaccent(lower(COALESCE(c.content, ''))) LIKE immutable_unaccent(lower(trim(COALESCE(c.heading, '')))) || '%' THEN ''
+  WHEN immutable_unaccent(lower(trim(COALESCE(c.heading, '')))) IN ('yes', 'no', 'start', 'end', 'row', 'dong', 'link') THEN ''
+  ELSE COALESCE(c.heading, '')
+END
+"""
 RELATION_TYPES = (
     "references",
     "requires",
@@ -3006,6 +3016,7 @@ def list_issue_router(
     risk_level: str = "",
     limit: int = 50,
 ) -> list[dict[str, Any]]:
+    effective_heading = EFFECTIVE_HEADING_SQL
     clauses = [
         "d.status = 'active'",
         "v.status = 'published'",
@@ -3017,7 +3028,7 @@ def list_issue_router(
     ]
     params: list[Any] = [["structured", "manually_curated"], ["issue_router_unit", "vip_overlay_rule", "product_update_note"]]
     if query:
-        clauses.append("immutable_unaccent(lower(concat_ws(' ', c.heading, c.content, c.metadata::text))) LIKE immutable_unaccent(lower(%s))")
+        clauses.append(f"immutable_unaccent(lower(concat_ws(' ', {effective_heading}, c.content, c.metadata::text))) LIKE immutable_unaccent(lower(%s))")
         params.append(f"%{query}%")
     if audience:
         clauses.append("(c.metadata->'audience') ?| %s")
@@ -3047,7 +3058,7 @@ def list_issue_router(
                    COALESCE(MAX(r.status), '') AS relation_status,
                    ARRAY_REMOVE(ARRAY_AGG(DISTINCT r.id::text), NULL) AS relation_ids,
                    CASE
-                     WHEN %s <> '' AND immutable_unaccent(lower(c.heading)) LIKE immutable_unaccent(lower(%s)) THEN 2.0
+                     WHEN %s <> '' AND immutable_unaccent(lower({effective_heading})) LIKE immutable_unaccent(lower(%s)) THEN 2.0
                      WHEN %s <> '' AND immutable_unaccent(lower(c.content)) LIKE immutable_unaccent(lower(%s)) THEN 1.0
                      ELSE 0.0
                    END AS score
@@ -3574,7 +3585,9 @@ def rerank_structural_matches(query: str, rows: list[dict[str, Any]]) -> list[di
     for row in rows:
         metadata = row.get("metadata") or {}
         sheet = normalize_phrase(str(metadata.get("sheet_name") or ""))
-        heading = normalize_phrase(str(row.get("heading") or ""))
+        heading = normalize_phrase(meaningful_search_label(row.get("heading") or "", row.get("content") or "", str(metadata.get("unit_type") or row.get("section") or "")))
+        if is_bad_search_label(row.get("heading") or "", row.get("content") or ""):
+            heading = ""
         section = normalize_phrase(str(row.get("section") or ""))
         structural_text = " ".join([sheet, heading, section])
         matched = sum(1 for token in query_tokens if token in structural_text)
@@ -4475,6 +4488,7 @@ def lexical_search(query: str, filters: RetrievalFilters, limit: int) -> list[di
         return []
     normalized_like = f"%{normalize_phrase(query)}%"
     where_sql, params = filter_sql(filters)
+    effective_heading = EFFECTIVE_HEADING_SQL
     with connection() as conn:
         conn.row_factory = dict_row
         rows = conn.execute(
@@ -4495,13 +4509,13 @@ def lexical_search(query: str, filters: RetrievalFilters, limit: int) -> list[di
                        to_tsvector(
                          'simple',
                          immutable_unaccent(
-                           concat_ws(' ', c.heading, c.section, c.metadata->>'sheet_name', c.content)
+                           concat_ws(' ', {effective_heading}, c.section, c.metadata->>'sheet_name', c.content)
                          )
                        ),
                        to_tsquery('simple', %s)
                      )
                      + CASE WHEN immutable_unaccent(lower(COALESCE(c.metadata->>'sheet_name', ''))) LIKE %s THEN 1.2 ELSE 0 END
-                     + CASE WHEN immutable_unaccent(lower(COALESCE(c.heading, ''))) LIKE %s THEN 0.8 ELSE 0 END
+                     + CASE WHEN immutable_unaccent(lower(COALESCE({effective_heading}, ''))) LIKE %s THEN 0.8 ELSE 0 END
                    ) AS score
             FROM ai_chunks c
             JOIN ai_documents d ON d.id = c.document_id
@@ -4509,7 +4523,7 @@ def lexical_search(query: str, filters: RetrievalFilters, limit: int) -> list[di
             WHERE {where_sql}
               AND to_tsvector(
                     'simple',
-                    immutable_unaccent(concat_ws(' ', c.heading, c.section, c.metadata->>'sheet_name', c.content))
+                    immutable_unaccent(concat_ws(' ', {effective_heading}, c.section, c.metadata->>'sheet_name', c.content))
                   ) @@ to_tsquery('simple', %s)
             ORDER BY score DESC, v.published_at DESC NULLS LAST
             LIMIT %s

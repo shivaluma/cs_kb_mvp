@@ -89,14 +89,16 @@ export function ExtractionReviewEditor({
 }) {
   const initialDraft = useMemo(() => unitToDraft(unit), [unit]);
   const [draft, setDraft] = useState<Draft>(initialDraft);
+  const normalizedSearchLabel = meaningfulSearchLabel(draft.title, draft.content, draft.unitType);
+  const searchLabelWillNormalize = normalizedSearchLabel !== draft.title.trim();
 
   useEffect(() => {
     setDraft(initialDraft);
   }, [initialDraft]);
 
-  const changed = JSON.stringify(draft) !== JSON.stringify(initialDraft);
+  const changed = JSON.stringify(draft) !== JSON.stringify(initialDraft) || normalizedSearchLabel !== initialDraft.title.trim();
   const workflowGraphError = workflowGraphJsonError(draft.workflowGraphJson);
-  const valid = draft.title.trim().length > 0 && draft.content.trim().length > 0 && Number.isFinite(Number(draft.confidence)) && !workflowGraphError;
+  const valid = normalizedSearchLabel.length > 0 && draft.content.trim().length > 0 && Number.isFinite(Number(draft.confidence)) && !workflowGraphError;
   const confidence = Math.max(0, Math.min(Number(draft.confidence) || 0, 1));
 
   function buildUpdate(reviewStatus = draft.reviewStatus): ExtractionUnitUpdate {
@@ -105,7 +107,7 @@ export function ExtractionReviewEditor({
     const autoReviewing = reviewStatus === "reviewed" || reviewStatus === "approved";
     const effectiveFrom = draft.effectiveFrom || defaultEffectiveFrom || "";
     return {
-      title: draft.title.trim(),
+      title: normalizedSearchLabel,
       content: draft.content.trim(),
       unit_type: draft.unitType,
       confidence,
@@ -156,15 +158,32 @@ export function ExtractionReviewEditor({
       </div>
 
       <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_11rem_9rem]">
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Retrieval title
+        <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+          Search label
           <Input
             disabled={disabled}
             onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-            placeholder="Short searchable label, not the full rule"
+            placeholder="Short label for cards and search"
             value={draft.title}
           />
-        </label>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] leading-4 text-muted-foreground">
+            <span>
+              {searchLabelWillNormalize
+                ? `Will save as: ${normalizedSearchLabel}`
+                : "Used for source cards and retrieval weighting."}
+            </span>
+            {searchLabelWillNormalize && !disabled ? (
+              <Button
+                className="h-6 px-2 text-[11px]"
+                onClick={() => setDraft((current) => ({ ...current, title: normalizedSearchLabel }))}
+                type="button"
+                variant="ghost"
+              >
+                Use generated label
+              </Button>
+            ) : null}
+          </div>
+        </div>
         <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
           Unit type
           <Select
@@ -412,6 +431,100 @@ function unitToDraft(unit: ExtractionUnit): Draft {
     sourceRefAcknowledged: unit.metadata.source_ref_acknowledged === true,
     workflowGraphJson: unit.metadata.workflow_graph ? JSON.stringify(unit.metadata.workflow_graph, null, 2) : "",
   };
+}
+
+function meaningfulSearchLabel(label: string, content: string, unitType: string) {
+  const cleanLabel = compactText(label);
+  const cleanContent = compactText(content);
+  if (!isWeakSearchLabel(cleanLabel, cleanContent)) {
+    return cleanLabel.slice(0, 180);
+  }
+  return generatedSearchLabel(cleanContent, unitType).slice(0, 180);
+}
+
+function isWeakSearchLabel(label: string, content: string) {
+  const cleanLabel = compactText(label);
+  if (!cleanLabel) {
+    return true;
+  }
+  const normalizedLabel = normalizeSearchText(cleanLabel);
+  const normalizedContent = normalizeSearchText(content);
+  if (/^(?:buoc\s*)?\d{1,3}(?:\.\d{1,3})*\.?$/.test(normalizedLabel)) {
+    return true;
+  }
+  if (["yes", "no", "start", "end", "row", "dong", "link"].includes(normalizedLabel)) {
+    return true;
+  }
+  if (cleanLabel.length > 110) {
+    return true;
+  }
+  if (normalizedContent && normalizedLabel.length >= 8 && normalizedContent.startsWith(normalizedLabel)) {
+    return true;
+  }
+  return false;
+}
+
+function generatedSearchLabel(content: string, unitType: string) {
+  const [stepCode, body] = splitLeadingStep(content);
+  const summary = trimWords(firstSentence(body || content), 10);
+  if (stepCode && summary) {
+    return unitType.includes("decision") || summary.endsWith("?")
+      ? `Điều kiện ${stepCode}: ${summary}`
+      : `Bước ${stepCode}: ${summary}`;
+  }
+  const prefix = unitTypeLabel(unitType);
+  return summary && !normalizeSearchText(summary).startsWith(normalizeSearchText(prefix))
+    ? `${prefix}: ${summary}`
+    : summary || prefix;
+}
+
+function splitLeadingStep(content: string): [string, string] {
+  const match = content.match(/^\s*(?:bước\s*)?(\d{1,3}(?:\.\d{1,3})*)[.)]?\s*/i);
+  if (!match) {
+    return ["", content];
+  }
+  return [match[1] ?? "", content.slice(match[0].length).trim()];
+}
+
+function firstSentence(value: string) {
+  return compactText(value).split(/[.;\n]/, 1)[0] ?? compactText(value);
+}
+
+function trimWords(value: string, limit: number) {
+  const words = compactText(value).split(/\s+/).filter(Boolean);
+  return words.slice(0, limit).join(" ");
+}
+
+function unitTypeLabel(unitType: string) {
+  const labels: Record<string, string> = {
+    decision_point: "Điều kiện",
+    decision_rule: "Điều kiện",
+    workflow_step: "Bước xử lý",
+    operational_instruction: "Hướng dẫn",
+    routing_rule: "Điều hướng",
+    policy_rule: "Quy định",
+    handling_rule: "Xử lý",
+    sla_rule: "SLA",
+    handoff_rule: "Handoff",
+    warning: "Cảnh báo",
+    operational_note: "Lưu ý",
+    related_document: "Tài liệu liên quan",
+  };
+  return labels[unitType] ?? (compactText(unitType.replace(/_/g, " ")) || "Search label");
+}
+
+function compactText(value: string) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeSearchText(value: string) {
+  return compactText(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/[^a-z0-9?]+/g, " ")
+    .trim();
 }
 
 function inheritedLabel(value?: string) {

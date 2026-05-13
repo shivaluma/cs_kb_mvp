@@ -16,6 +16,7 @@ from app.config import settings
 from app.embedding import embed_text
 from app.ingestion import prepare_document_version, preview_document_metadata
 from app.retrieval import retrieve
+from app.search_labels import embedding_text_for_unit, meaningful_search_label
 from app.schemas import (
     BulkReviewVersionRequest,
     AssignRelationRequest,
@@ -843,14 +844,14 @@ def update_extraction_unit(unit_id: str, request: ExtractionUnitUpdateRequest) -
     try:
         unit = repository.update_extraction_unit(
             unit_id=unit_id,
-            title=request.title,
+            title=meaningful_search_label(request.title, request.content, request.unit_type),
             content=request.content,
             unit_type=request.unit_type,
             confidence=request.confidence,
             review_status=request.review_status,
             metadata=request.metadata,
             actor=request.actor,
-            embedding=embed_text(" ".join([request.title, request.content])),
+            embedding=embed_text(embedding_text_for_unit(request.title, request.content, request.unit_type)),
         )
         return ExtractionUnit(**unit)
     except LookupError as exc:
@@ -864,14 +865,14 @@ def create_extraction_unit(version_id: str, request: ExtractionUnitCreateRequest
     try:
         unit = repository.create_extraction_unit(
             version_id=version_id,
-            title=request.title,
+            title=meaningful_search_label(request.title, request.content, request.unit_type),
             content=request.content,
             unit_type=request.unit_type,
             confidence=request.confidence,
             review_status=request.review_status,
             metadata=request.metadata,
             actor=request.actor,
-            embedding=embed_text(" ".join([request.title, request.content])),
+            embedding=embed_text(embedding_text_for_unit(request.title, request.content, request.unit_type)),
         )
         return ExtractionUnit(**unit)
     except LookupError as exc:

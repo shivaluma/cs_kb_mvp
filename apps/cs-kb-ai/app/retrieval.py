@@ -5,6 +5,7 @@ from typing import Any
 
 from app.embedding import embed_text
 from app import repository
+from app.search_labels import is_bad_search_label
 from app.schemas import Citation, RetrievalRequest, RetrievalResponse, RetrievalResult
 from app.text_processing import expand_query, normalize_phrase
 
@@ -171,7 +172,8 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
     if not isinstance(metadata, dict):
         metadata = {}
     unit_type = str(metadata.get("unit_type") or row.get("section") or "").strip()
-    text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or "")]))
+    heading = "" if is_bad_search_label(row.get("heading") or "", row.get("content") or "") else str(row.get("heading") or "")
+    text = normalize_phrase(" ".join([heading, str(row.get("content") or "")]))
     boost = 0.0
 
     query_tokens = set(token for token in normalized_query.split() if len(token) >= 3)

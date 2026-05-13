@@ -11,6 +11,7 @@ STEP_CODE_RE = re.compile(r"(?<![\d/])(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[
 LINE_STEP_CODE_RE = re.compile(r"^\s*(?:yes|no|có|không)?\s*(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[.)]?\s)", re.IGNORECASE)
 NOTE_MARKER_RE = re.compile(r"^\s*(?:\(\*+\)|\([a-z]\)|lưu ý|luu y|ghi chú|ghi chu|note|quy định audit|quy dinh audit)\b", re.IGNORECASE)
 VALID_EDGE_CONDITIONS = {"yes", "no", "next", "timeout", "escalation", "fallback", "handoff", "return", "retry"}
+EXTERNAL_CONTINUATION_STATES = {"continues_with_related_sop"}
 WORKFLOW_LINE_HINT_RE = re.compile(
     r"\b("
     r"cs|kh|tx|khách hàng|khach hang|tài xế|tai xe|kiểm tra|kiem tra|cung cấp|cung cap|xử lý|xu ly|"
@@ -31,9 +32,12 @@ def compile_workflow_v3_payload(
     canvas = normalize_canvas_transcription(transcription)
     visible_step_codes = visible_step_codes_from_sources(raw_text, canvas, visual_context or {})
     nodes, node_lookup, node_conflicts = compile_canvas_nodes(filename, canvas)
+    title_hint = str(transcription.get("title") or transcription.get("document_metadata", {}).get("title") or filename)
+    node_conflicts.extend(ensure_boundary_nodes(filename, raw_text, title_hint, canvas, nodes, node_lookup))
     annotations = compile_canvas_annotations(filename, canvas, node_lookup)
     relations = compile_canvas_relations(filename, canvas)
     edges, uncertain_edges, edge_conflicts, expected_edges = compile_canvas_edges(filename, canvas, node_lookup)
+    edge_conflicts.extend(ensure_boundary_and_terminal_edges(filename, nodes, edges, uncertain_edges))
 
     fidelity_report = workflow_v3_fidelity_report(
         nodes=nodes,
@@ -165,8 +169,10 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
             page_number = int_or_default(item.get("page"), page.get("page") or 1)
             step_code = normalize_step_code(item.get("step_code") or extract_step_code(text))
             node_type = infer_node_type(item, text, step_code)
-            node_id = stable_node_id(step_code or item.get("id") or text, prefix="node")
+            node_id = node_identifier(item, node_type, step_code, text)
             node_source_ref = source_ref(filename, page_number, item.get("bbox"))
+            lane = str(item.get("lane") or item.get("swimlane") or item.get("actor") or "")
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
             raw_nodes.append(
                 {
                     "id": node_id,
@@ -175,12 +181,14 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
                     "semantic_node_type": node_type,
                     "step_code": step_code,
                     "shape_kind": str(item.get("shape_kind") or item.get("shape") or item.get("type") or ""),
-                    "actor": str(item.get("actor") or item.get("lane") or item.get("swimlane") or ""),
+                    "actor": str(item.get("actor") or lane),
+                    "lane_id": str(item.get("lane_id") or normalized_key(lane) or ""),
                     "phase": str(item.get("phase") or ""),
                     "title": node_title(text, step_code, node_type),
                     "content": text,
                     "question": decision_question(text) if node_type == "decision" else "",
-                    "terminal_state": terminal_state_for_text(text),
+                    "terminal_state": normalize_terminal_state(item.get("terminal_state")) or terminal_state_for_text(text),
+                    "metadata": metadata,
                     "source_refs": [node_source_ref],
                     "bbox": normalize_bbox(item.get("bbox")),
                     "page": page_number,
@@ -211,6 +219,8 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
             existing["type"] = "decision"
             existing["semantic_node_type"] = "decision"
             existing["question"] = node["question"] or decision_question(existing["content"])
+        if not existing.get("terminal_state") and node.get("terminal_state"):
+            existing["terminal_state"] = node["terminal_state"]
     nodes = sorted(merged.values(), key=lambda item: (item.get("page") or 0, item.get("_order") or 0))
     lookup: dict[str, str] = {}
     for node in nodes:
@@ -242,6 +252,7 @@ def compile_canvas_annotations(filename: str, canvas: dict[str, Any], node_looku
             page_number = int_or_default(item.get("page"), page.get("page") or 1)
             attached_codes = metadata_list(item.get("attached_to_step_codes") or item.get("attached_to") or item.get("attached_to_node_ids"))
             attached_ids = [node_lookup.get(str(code), str(code)) for code in attached_codes if str(code)]
+            attached_ids = enrich_annotation_attachment_ids(text, attached_ids, node_lookup)
             annotation_type = infer_annotation_type(item, text)
             annotation_id = stable_node_id(item.get("id") or text, prefix="ann")
             annotations.append(
@@ -264,7 +275,8 @@ def compile_canvas_annotations(filename: str, canvas: dict[str, Any], node_looku
 def compile_canvas_relations(filename: str, canvas: dict[str, Any]) -> list[dict[str, Any]]:
     relations: list[dict[str, Any]] = []
     for page in canvas.get("pages", []):
-        candidates = [*page.get("relations", []), *page.get("annotations", [])]
+        note_nodes = [node for node in page.get("nodes", []) if isinstance(node, dict) and is_note_text(node_text(node))]
+        candidates = [*page.get("relations", []), *page.get("annotations", []), *note_nodes]
         for item in candidates:
             if not isinstance(item, dict):
                 continue
@@ -341,6 +353,148 @@ def compile_canvas_edges(
     return edges, uncertain_edges, conflicts, expected_edges
 
 
+def ensure_boundary_nodes(
+    filename: str,
+    raw_text: str,
+    title_hint: str,
+    canvas: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    node_lookup: dict[str, str],
+) -> list[str]:
+    if not nodes:
+        return []
+    conflicts: list[str] = []
+    if not any(node.get("type") == "start" for node in nodes):
+        source_hint = f"{raw_text}\n{title_hint}"
+        raw_norm = normalized_text(source_hint)
+        start = {
+            "id": "start",
+            "type": "start",
+            "semantic_node_type": "start",
+            "step_code": "",
+            "shape_kind": "synthetic",
+            "actor": "KH/TX" if "kh tx" in raw_norm or "hotro be" in raw_norm or "ho tro be" in raw_norm else "",
+            "lane_id": "lane_customer_driver" if "hotro be" in raw_norm or "ho tro be" in raw_norm else "",
+            "phase": "",
+            "title": synthesized_start_title(source_hint),
+            "content": synthesized_start_title(source_hint),
+            "question": "",
+            "terminal_state": "",
+            "metadata": {"synthesized": True, "reason": "missing_start_node"},
+            "source_refs": [page_source_ref(filename, canvas)],
+            "bbox": [],
+            "page": int_or_default(next((page.get("page") for page in canvas.get("pages", []) if isinstance(page, dict)), 1), 1),
+            "attached_annotations": [],
+            "dedupe_status": "synthesized",
+        }
+        nodes.insert(0, start)
+        node_lookup["start"] = "start"
+        conflicts.append("workflow_v3_start_node_synthesized")
+    if not any(node.get("type") == "end" for node in nodes):
+        end = {
+            "id": "end",
+            "type": "end",
+            "semantic_node_type": "end",
+            "step_code": "",
+            "shape_kind": "synthetic",
+            "actor": "",
+            "lane_id": "",
+            "phase": "",
+            "title": "End",
+            "content": "End",
+            "question": "",
+            "terminal_state": "terminal",
+            "metadata": {"synthesized": True, "reason": "missing_end_node"},
+            "source_refs": [page_source_ref(filename, canvas)],
+            "bbox": [],
+            "page": int_or_default(next((page.get("page") for page in canvas.get("pages", []) if isinstance(page, dict)), 1), 1),
+            "attached_annotations": [],
+            "dedupe_status": "synthesized",
+        }
+        nodes.append(end)
+        node_lookup["end"] = "end"
+        conflicts.append("workflow_v3_end_node_synthesized")
+    for node in nodes:
+        node_lookup[str(node.get("id"))] = str(node.get("id"))
+    return conflicts
+
+
+def ensure_boundary_and_terminal_edges(
+    filename: str,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    uncertain_edges: list[dict[str, Any]],
+) -> list[str]:
+    conflicts: list[str] = []
+    node_by_id = {str(node.get("id")): node for node in nodes}
+    start_id = first_start_node_id(nodes)
+    end_id = next((str(node.get("id")) for node in nodes if node.get("type") == "end"), "")
+    edge_keys = {(str(edge.get("from_node")), str(edge.get("to_node")), normalize_condition(edge.get("condition"))) for edge in [*edges, *uncertain_edges]}
+
+    if start_id and not any(edge.get("from_node") == start_id for edge in [*edges, *uncertain_edges]):
+        first_target = first_root_node_id(nodes, edges, uncertain_edges, start_id)
+        if first_target and (start_id, first_target, "next") not in edge_keys:
+            edges.append(synthetic_edge(filename, node_by_id[start_id], node_by_id[first_target], "next", "synthesized_start_edge"))
+            edge_keys.add((start_id, first_target, "next"))
+            conflicts.append(f"workflow_v3_start_edge_synthesized:{start_id}->{first_target}")
+
+    if not end_id:
+        return conflicts
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        if node.get("type") in {"start", "end", "decision"}:
+            continue
+        if any(edge.get("from_node") == node_id for edge in [*edges, *uncertain_edges]):
+            continue
+        if is_external_continuation_node(node):
+            continue
+        if not terminal_action_evidence(node):
+            continue
+        if (node_id, end_id, "next") in edge_keys:
+            continue
+        edges.append(synthetic_edge(filename, node, node_by_id[end_id], "next", "synthesized_terminal_edge"))
+        edge_keys.add((node_id, end_id, "next"))
+        conflicts.append(f"workflow_v3_terminal_edge_synthesized:{node.get('step_code') or node_id}->{end_id}")
+    return conflicts
+
+
+def first_root_node_id(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    uncertain_edges: list[dict[str, Any]],
+    start_id: str,
+) -> str:
+    incoming = {str(edge.get("to_node")) for edge in [*edges, *uncertain_edges] if edge.get("to_node")}
+    candidates = [
+        node for node in nodes
+        if node.get("type") not in {"start", "end"} and str(node.get("id")) not in incoming
+    ]
+    if not candidates:
+        candidates = [node for node in nodes if node.get("type") not in {"start", "end"}]
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda node: (0 if node.get("type") == "decision" else 1, step_sort_key(str(node.get("step_code") or "999")), str(node.get("id"))))
+    target = str(candidates[0].get("id") or "")
+    return "" if target == start_id else target
+
+
+def synthetic_edge(filename: str, from_node: dict[str, Any], to_node: dict[str, Any], condition: str, reason: str) -> dict[str, Any]:
+    refs = from_node.get("source_refs") if isinstance(from_node.get("source_refs"), list) else []
+    if not refs:
+        refs = to_node.get("source_refs") if isinstance(to_node.get("source_refs"), list) else []
+    if not refs:
+        refs = [source_ref(filename, int_or_default(from_node.get("page") or to_node.get("page"), 1), [])]
+    return {
+        "from_node": str(from_node.get("id") or ""),
+        "to_node": str(to_node.get("id") or ""),
+        "condition": normalize_condition(condition),
+        "confidence": 0.72,
+        "review_status": "needs_review",
+        "review_reason": reason,
+        "source_refs": refs[:2],
+    }
+
+
 def workflow_v3_fidelity_report(
     *,
     nodes: list[dict[str, Any]],
@@ -369,10 +523,14 @@ def workflow_v3_fidelity_report(
     node_by_id = {node["id"]: node for node in nodes}
     outgoing: dict[str, list[dict[str, Any]]] = {}
     uncertain_outgoing: dict[str, list[dict[str, Any]]] = {}
+    incoming: dict[str, list[dict[str, Any]]] = {}
+    uncertain_incoming: dict[str, list[dict[str, Any]]] = {}
     for edge in edges:
         outgoing.setdefault(str(edge.get("from_node")), []).append(edge)
+        incoming.setdefault(str(edge.get("to_node")), []).append(edge)
     for edge in uncertain_edges:
         uncertain_outgoing.setdefault(str(edge.get("from_node")), []).append(edge)
+        uncertain_incoming.setdefault(str(edge.get("to_node")), []).append(edge)
     for node in nodes:
         node_id = str(node.get("id") or "")
         text = " ".join(str(node.get(key) or "") for key in ("title", "question", "content"))
@@ -383,15 +541,21 @@ def workflow_v3_fidelity_report(
         if node.get("type") not in {"decision", "start", "end"} and {"yes", "no"}.issubset(set(branch_conditions)):
             blockers.append(f"workflow_v3_branching_node_not_decision:{node.get('step_code') or node_id}")
         if node.get("type") == "decision":
+            if decision_metadata_says_not_decision(node.get("metadata")):
+                blockers.append(f"workflow_v3_decision_marked_not_decision:{node.get('step_code') or node_id}")
             conditions = branch_conditions
             if len(conditions) < 2:
                 blockers.append(f"workflow_v3_decision_missing_two_branches:{node.get('step_code') or node_id}")
             elif not (any(condition == "yes" for condition in conditions) and any(condition == "no" for condition in conditions)):
                 blockers.append(f"workflow_v3_decision_missing_yes_no:{node.get('step_code') or node_id}")
-        if node.get("type") == "end" and outgoing.get(node_id):
+        if node.get("type") == "end" and (outgoing.get(node_id) or uncertain_outgoing.get(node_id)):
             blockers.append(f"workflow_v3_end_has_outgoing:{node_id}")
-        if node.get("type") == "start" and any(edge.get("to_node") == node_id for edge in edges):
+        if node.get("type") == "start" and (incoming.get(node_id) or uncertain_incoming.get(node_id)):
             blockers.append(f"workflow_v3_start_has_incoming:{node_id}")
+        if node.get("type") not in {"decision", "start", "end"}:
+            has_outgoing = bool(outgoing.get(node_id) or uncertain_outgoing.get(node_id))
+            if not has_outgoing and not is_external_continuation_node(node):
+                blockers.append(f"workflow_v3_action_missing_terminal_or_outgoing:{node.get('step_code') or node_id}")
     for edge in edges:
         if edge.get("from_node") not in node_by_id or edge.get("to_node") not in node_by_id:
             blockers.append(f"workflow_v3_edge_unknown_endpoint:{edge.get('from_node')}->{edge.get('to_node')}")
@@ -590,6 +754,19 @@ def workflow_v3_review_reason(report: dict[str, Any]) -> str:
     return "Workflow V3 graph extracted from page image and still requires human topology review."
 
 
+def synthesized_start_title(raw_text: str) -> str:
+    normalized = normalized_text(raw_text)
+    if "hotro be com vn" in normalized or "hotro be" in normalized:
+        return "KH/TX liên hệ qua email hotro@be.com.vn"
+    email_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", raw_text or "")
+    if email_match:
+        email = email_match.group(0)
+        if normalized_text(email) == "ho tro be com vn":
+            email = "hotro@be.com.vn"
+        return f"KH/TX liên hệ qua email {email}"
+    return "Start"
+
+
 def first_start_node_id(nodes: list[dict[str, Any]]) -> str:
     return next((node["id"] for node in nodes if node.get("type") == "start"), nodes[0]["id"] if nodes else "start")
 
@@ -626,6 +803,17 @@ def infer_node_type(item: dict[str, Any], text: str, step_code: str) -> str:
     return "action"
 
 
+def node_identifier(item: dict[str, Any], node_type: str, step_code: str, text: str) -> str:
+    if step_code:
+        return stable_node_id(step_code, prefix="node")
+    raw_id = normalized_key(str(item.get("id") or ""))
+    if node_type == "start" and raw_id in {"", "start", "begin", "bat_dau"}:
+        return "start"
+    if node_type == "end" and raw_id in {"", "end", "finish", "done", "ket_thuc"}:
+        return "end"
+    return stable_node_id(item.get("id") or text, prefix="node")
+
+
 def node_title(text: str, step_code: str, node_type: str) -> str:
     if node_type == "decision":
         return decision_question(text)[:240]
@@ -653,6 +841,53 @@ def terminal_state_for_text(text: str) -> str:
     return ""
 
 
+def normalize_terminal_state(value: Any) -> str:
+    normalized = normalized_key(str(value or ""))
+    if normalized in {"", "none", "null"}:
+        return ""
+    if normalized in {"continues_with_related_sop", "continue_with_related_sop"}:
+        return "continues_with_related_sop"
+    return normalized
+
+
+def terminal_action_evidence(node: dict[str, Any]) -> bool:
+    if node.get("terminal_state"):
+        return True
+    text = normalized_text(" ".join(str(node.get(key) or "") for key in ("title", "content")))
+    terminal_phrases = [
+        "status resolved",
+        "resolve case",
+        "resolved",
+        "phan hoi email",
+        "phan hoi mail",
+        "gui mail",
+        "gui email",
+        "chua the ho tro",
+        "khong thanh cong",
+        "cung cap thong tin theo quy dinh",
+        "xu ly theo quy trinh",
+        "xu ly theo quy dinh",
+        "tiep tuc ho tro",
+        "lien he khai thac them thong tin",
+    ]
+    return any(phrase in text for phrase in terminal_phrases)
+
+
+def is_external_continuation_node(node: dict[str, Any]) -> bool:
+    terminal_state = normalize_terminal_state(node.get("terminal_state"))
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    return terminal_state in EXTERNAL_CONTINUATION_STATES or bool(metadata.get("continues_with_related_sop"))
+
+
+def decision_metadata_says_not_decision(metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("is_decision") is False or metadata.get("not_decision") is True:
+        return True
+    text = normalized_text(" ".join(str(metadata.get(key) or "") for key in ("review_status", "decision_status", "classification", "note")))
+    return "not decision" in text or "not a decision" in text
+
+
 def infer_annotation_type(item: dict[str, Any], text: str) -> str:
     raw_type = normalized_text(str(item.get("annotation_type") or item.get("type") or item.get("unit_type") or ""))
     normalized = normalized_text(text)
@@ -665,6 +900,20 @@ def infer_annotation_type(item: dict[str, Any], text: str) -> str:
     if "script" in raw_type or "macro" in raw_type:
         return "macro_script"
     return "annotation"
+
+
+def enrich_annotation_attachment_ids(text: str, attached_ids: list[str], node_lookup: dict[str, str]) -> list[str]:
+    normalized = normalized_text(text)
+    preferred: list[str] = []
+    if "thong tin chung" in normalized and node_lookup.get("1"):
+        preferred.append(node_lookup["1"])
+    if "case si" in normalized and node_lookup.get("6.1"):
+        preferred.append(node_lookup["6.1"])
+    output: list[str] = []
+    for node_id in [*preferred, *attached_ids]:
+        if node_id and node_id not in output:
+            output.append(node_id)
+    return output
 
 
 def annotation_title(text: str, annotation_type: str) -> str:

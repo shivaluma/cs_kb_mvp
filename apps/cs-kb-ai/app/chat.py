@@ -11,6 +11,7 @@ from app import repository
 from app.config import settings
 from app.openrouter import generate_chat_session_title, generate_grounded_answer
 from app.retrieval import retrieve, to_result
+from app.search_labels import is_bad_search_label
 from app.schemas import ChatSessionMessageRequest, GroundedChatRequest, GroundedChatResponse, RetrievalFilters, RetrievalRequest, RetrievalResponse, RetrievalResult
 
 
@@ -698,7 +699,8 @@ def has_structured_source_ref(metadata: dict[str, Any]) -> bool:
 
 
 def semantic_text(result: RetrievalResult) -> str:
-    return normalize_for_match(f"{result.heading} {result.content}")
+    heading = "" if is_bad_search_label(result.heading, result.content) else result.heading
+    return normalize_for_match(f"{heading} {result.content}")
 
 
 def rerank_stage_results(query: str, results: list[RetrievalResult]) -> list[RetrievalResult]:
@@ -800,7 +802,8 @@ def candidate_match_text(result: RetrievalResult) -> str:
         metadata.get("aliases"),
         metadata.get("section_path"),
     ]
-    return " ".join([result.heading, result.section, result.content, *[str(bit) for bit in metadata_bits if bit]])
+    heading = "" if is_bad_search_label(result.heading, result.content) else result.heading
+    return " ".join([heading, result.section, result.content, *[str(bit) for bit in metadata_bits if bit]])
 
 
 def normalize_for_match(text: str) -> str:

@@ -12,6 +12,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.config import settings
+from app.search_labels import meaningful_search_label
 from app.schemas import (
     ExtractionRefinementPayload,
     ExtractedUnit,
@@ -1857,7 +1858,7 @@ def normalize_unit(unit: dict[str, Any]) -> dict[str, Any]:
     content = str(unit.get("content") or "").strip()
     unit_type = str(unit.get("unit_type") or "workflow_step")
     raw_title = vietnamese_title(str(unit.get("title") or "").strip())
-    title = compact_unit_title(raw_title, content, unit_type)
+    title = meaningful_search_label(compact_unit_title(raw_title, content, unit_type), content, unit_type)
     confidence = unit.get("confidence", 0.72)
     try:
         confidence_value = float(confidence)
