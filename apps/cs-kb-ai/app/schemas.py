@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import re
 import unicodedata
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -297,9 +297,67 @@ def normalize_schema_text(value: str) -> str:
     return re.sub(r"\s+", " ", stripped.replace("đ", "d").replace("Đ", "D").lower()).strip()
 
 
-class WorkflowNode(BaseModel):
+WorkflowNodeType = Literal["start", "end", "action", "decision", "annotation", "warning", "relation"]
+
+
+def normalize_workflow_node_type(value: Any) -> str:
+    normalized = normalize_schema_key(str(value or ""))
+    mapping = {
+        "": "action",
+        "task": "action",
+        "step": "action",
+        "process": "action",
+        "workflow_step": "action",
+        "candidate_action": "action",
+        "decision_point": "decision",
+        "candidate_decision": "decision",
+        "note": "annotation",
+        "script": "annotation",
+        "macro_script": "annotation",
+        "sla_rule": "annotation",
+        "audit_rule": "warning",
+        "warning_note": "warning",
+        "related_document": "relation",
+        "sop_relation": "relation",
+    }
+    return mapping.get(normalized, normalized if normalized in {"start", "end", "action", "decision", "annotation", "warning", "relation"} else "action")
+
+
+def workflow_metadata_has_semantic_contradiction(metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("is_decision") is False or metadata.get("not_decision") is True:
+        return True
+    text = normalize_schema_text(
+        " ".join(
+            str(value)
+            for value in metadata.values()
+            if isinstance(value, (str, int, float, bool))
+        )
+    )
+    return "not decision" in text or "not a decision" in text
+
+
+def sanitize_workflow_node_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    removed = False
+    for key, value in metadata.items():
+        key_text = normalize_schema_text(str(key))
+        value_text = normalize_schema_text(str(value)) if isinstance(value, (str, int, float, bool)) else ""
+        if key_text in {"not_decision", "is_decision"} or "not decision" in value_text or "not a decision" in value_text:
+            removed = True
+            continue
+        sanitized[key] = value
+    if removed:
+        sanitized["semantic_contradiction_removed"] = True
+    return sanitized
+
+
+class WorkflowNodeBase(BaseModel):
     id: str = Field(min_length=1, max_length=120)
-    type: str = Field(min_length=1, max_length=60)
+    type: WorkflowNodeType
     semantic_node_type: str = ""
     step_code: str = ""
     shape_kind: str = ""
@@ -323,18 +381,84 @@ class WorkflowNode(BaseModel):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
-        for key in ("id", "type", "semantic_node_type", "step_code", "shape_kind", "terminal_state", "actor", "lane_id", "phase", "title", "content", "question", "dedupe_status"):
+        normalized["type"] = normalize_workflow_node_type(normalized.get("type") or normalized.get("node_type") or normalized.get("semantic_node_type"))
+        for key in ("id", "semantic_node_type", "step_code", "shape_kind", "terminal_state", "actor", "lane_id", "phase", "title", "content", "question", "dedupe_status"):
             raw = normalized.get(key)
             normalized[key] = "" if raw in (None, "null") else str(raw)
-        if not isinstance(normalized.get("metadata"), dict):
-            normalized["metadata"] = {}
+        normalized["metadata"] = sanitize_workflow_node_metadata(normalized.get("metadata"))
         title = normalized.get("title") or normalized.get("question") or normalized.get("content") or normalized.get("id") or "Workflow node"
         normalized["title"] = str(title)[:240]
-        if not normalized.get("type"):
-            normalized["type"] = "action"
         if not normalized.get("id"):
             normalized["id"] = stable_node_id(str(title), 1)
+        if not normalized.get("semantic_node_type"):
+            normalized["semantic_node_type"] = normalized["type"]
         return normalized
+
+
+class StartNode(WorkflowNodeBase):
+    type: Literal["start"] = "start"
+
+
+class EndNode(WorkflowNodeBase):
+    type: Literal["end"] = "end"
+
+
+class ActionNode(WorkflowNodeBase):
+    type: Literal["action"] = "action"
+    content: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_action_content(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            normalized = dict(value)
+            content = normalized.get("content") or normalized.get("text") or normalized.get("title") or ""
+            normalized["content"] = str(content).strip()
+            return normalized
+        return value
+
+
+class DecisionNode(WorkflowNodeBase):
+    type: Literal["decision"] = "decision"
+    question: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_decision_question(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            normalized = dict(value)
+            question = normalized.get("question") or normalized.get("content") or normalized.get("title") or normalized.get("text") or ""
+            normalized["question"] = str(question).strip()
+            return normalized
+        return value
+
+
+class AnnotationNode(WorkflowNodeBase):
+    type: Literal["annotation"] = "annotation"
+    content: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def flag_orphan_annotation(self) -> "AnnotationNode":
+        metadata = dict(self.metadata or {})
+        if not self.attached_annotations and not metadata.get("attached_to") and not metadata.get("attached_to_node_id"):
+            metadata["orphan_annotation"] = True
+            self.metadata = metadata
+        return self
+
+
+class WarningNode(AnnotationNode):
+    type: Literal["warning"] = "warning"
+
+
+class RelationNode(WorkflowNodeBase):
+    type: Literal["relation"] = "relation"
+    content: str = Field(min_length=1)
+
+
+WorkflowNode = Annotated[
+    StartNode | EndNode | ActionNode | DecisionNode | AnnotationNode | WarningNode | RelationNode,
+    Field(discriminator="type"),
+]
 
 
 class WorkflowEdge(BaseModel):
@@ -430,6 +554,14 @@ class WorkflowGraph(BaseModel):
     topology_source: str = ""
     topology_review_required: bool = True
     validation_errors: list[str] = Field(default_factory=list)
+    graph_fidelity_score: float | None = None
+    selected_flow: str = ""
+    repair_applied: bool = False
+    repair_report: dict[str, Any] = Field(default_factory=dict)
+    decision_edges_review_required: int = 0
+    missing_terminal_edges: list[str] = Field(default_factory=list)
+    orphan_annotations: list[str] = Field(default_factory=list)
+    unresolved_relations: list[dict[str, Any]] = Field(default_factory=list)
     requires_human_review: bool = True
     review_reason: str = ""
 
@@ -454,7 +586,9 @@ class WorkflowGraph(BaseModel):
                 node_id = original_id or stable_node_id(title, index)
                 id_map[original_id or str(index)] = node_id
                 id_map[title] = node_id
-                normalized_nodes.append({**node, "id": node_id, "title": title[:240]})
+                node_type = normalize_workflow_node_type(node.get("type") or node.get("node_type") or node.get("semantic_node_type"))
+                node_metadata = sanitize_workflow_node_metadata(node.get("metadata"))
+                normalized_nodes.append({**node, "id": node_id, "type": node_type, "metadata": node_metadata, "title": title[:240]})
             value["nodes"] = normalized_nodes
             if not value.get("start_node_id") and normalized_nodes and isinstance(normalized_nodes[0], dict):
                 value["start_node_id"] = normalized_nodes[0].get("id")

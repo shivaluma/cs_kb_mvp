@@ -46,6 +46,13 @@ type WorkflowGraphMetadata = {
   start_node_id?: string;
   graph_confidence?: number;
   fidelity_score?: number;
+  graph_fidelity_score?: number;
+  selected_flow?: string;
+  repair_applied?: boolean;
+  decision_edges_review_required?: number;
+  missing_terminal_edges?: string[];
+  orphan_annotations?: string[];
+  unresolved_relations?: Array<{ target_title?: string; relation_type?: string; evidence_text?: string }>;
   visible_step_codes?: string[];
   covered_step_codes?: string[];
   missing_step_codes?: string[];
@@ -2368,7 +2375,13 @@ function WorkflowGraphPanel({
   const annotations = graph?.annotations ?? graphUnit?.metadata.annotations ?? [];
   const missingStepCodes = Array.isArray(graph?.missing_step_codes) ? graph.missing_step_codes : [];
   const detectorConflicts = Array.isArray(graph?.detector_conflicts) ? graph.detector_conflicts : [];
-  const fidelityScore = Number(graph?.fidelity_score ?? graph?.graph_confidence ?? confidence ?? 0);
+  const missingTerminalEdges = Array.isArray(graph?.missing_terminal_edges) ? graph.missing_terminal_edges : [];
+  const orphanAnnotations = Array.isArray(graph?.orphan_annotations) ? graph.orphan_annotations : [];
+  const unresolvedRelations = Array.isArray(graph?.unresolved_relations) ? graph.unresolved_relations : [];
+  const decisionEdgesReviewRequired = Number(graph?.decision_edges_review_required ?? graphUnit?.metadata.decision_edges_review_required ?? 0);
+  const repairApplied = Boolean(graph?.repair_applied ?? graphUnit?.metadata.repair_applied);
+  const selectedFlow = String(graph?.selected_flow ?? graphUnit?.metadata.selected_flow ?? "");
+  const fidelityScore = Number(graph?.graph_fidelity_score ?? graph?.fidelity_score ?? graph?.graph_confidence ?? confidence ?? 0);
   const lowConfidenceTopologyIssue = confidence > 0 && confidence < 0.7;
   const uncertainEdgeCount =
     Math.max(Array.isArray(uncertainEdges) ? uncertainEdges.length : 0, Number(graphUnit?.metadata.uncertain_edges_count ?? 0));
@@ -2441,6 +2454,32 @@ function WorkflowGraphPanel({
                   </div>
                 </div>
               ) : null}
+              <div className="mt-3 grid gap-2 text-xs md:grid-cols-3">
+                <div className="rounded-lg border bg-background p-2">
+                  <span className="text-muted-foreground">Selected flow</span>
+                  <p className="mt-1 font-semibold">{selectedFlow || "unknown"}</p>
+                </div>
+                <div className="rounded-lg border bg-background p-2">
+                  <span className="text-muted-foreground">Repair stage</span>
+                  <p className={cn("mt-1 font-semibold", repairApplied && "text-amber-500")}>{repairApplied ? "applied" : "not needed"}</p>
+                </div>
+                <div className="rounded-lg border bg-background p-2">
+                  <span className="text-muted-foreground">Decision edges to review</span>
+                  <p className={cn("mt-1 font-semibold", decisionEdgesReviewRequired && "text-amber-500")}>{decisionEdgesReviewRequired || "none"}</p>
+                </div>
+                <div className="rounded-lg border bg-background p-2">
+                  <span className="text-muted-foreground">Missing terminal edges</span>
+                  <p className={cn("mt-1 font-semibold", missingTerminalEdges.length && "text-destructive")}>{missingTerminalEdges.length ? missingTerminalEdges.join(", ") : "none"}</p>
+                </div>
+                <div className="rounded-lg border bg-background p-2">
+                  <span className="text-muted-foreground">Orphan annotations</span>
+                  <p className={cn("mt-1 font-semibold", orphanAnnotations.length && "text-destructive")}>{orphanAnnotations.length || "none"}</p>
+                </div>
+                <div className="rounded-lg border bg-background p-2">
+                  <span className="text-muted-foreground">Unresolved relations</span>
+                  <p className={cn("mt-1 font-semibold", unresolvedRelations.length && "text-amber-500")}>{unresolvedRelations.length || "none"}</p>
+                </div>
+              </div>
             </div>
             {!acknowledged || edgeReviewSummary.blockingCount ? (
               <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">

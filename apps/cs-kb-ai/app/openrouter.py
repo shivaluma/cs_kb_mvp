@@ -1013,6 +1013,11 @@ def extract_workflow_units_v3(
             "workflow_canvas_transcription": canvas,
             "workflow_graph_draft": payload_model.workflow_graph.model_dump() if payload_model else {},
             "workflow_fidelity_report": fidelity_report,
+            "workflow_graph_repair_report": (
+                payload_model.workflow_graph.repair_report
+                if payload_model and isinstance(payload_model.workflow_graph.repair_report, dict)
+                else {}
+            ),
         }
         quality_error = workflow_v3_quality_error_from_report(fidelity_report)
         if payload_model is None:
@@ -1036,7 +1041,7 @@ def extract_workflow_units_v3(
         if quality_error:
             error = f"workflow_v3_fidelity_failed:{quality_error}"
             output_warnings = warnings
-            return [], output_warnings, artifacts
+            return [unit for unit in normalized if unit["content"]], output_warnings, artifacts
         output_warnings = warnings
         status = "completed"
         return [unit for unit in normalized if unit["content"]], warnings, artifacts
@@ -1058,6 +1063,7 @@ def extract_workflow_units_v3(
                 "parsed_response": json_preview(parsed) if parsed is not None else None,
                 "raw_response": ai_response_preview(content),
                 "workflow_fidelity_report": artifacts.get("workflow_fidelity_report"),
+                "workflow_graph_repair_report": artifacts.get("workflow_graph_repair_report"),
                 "repairs": {"json_repair_used": repaired},
                 "status": status,
                 "warnings": output_warnings[:40],
@@ -1981,8 +1987,16 @@ def workflow_payload_to_units(payload: WorkflowExtractionPayload, filename: str)
             "document_metadata": payload.document_metadata,
             "workflow_graph": graph,
             "graph_confidence": payload.workflow_graph.graph_confidence,
+            "graph_fidelity_score": payload.workflow_graph.graph_fidelity_score or payload.workflow_graph.fidelity_score,
             "requires_human_review": payload.workflow_graph.requires_human_review,
             "review_reason": payload.workflow_graph.review_reason,
+            "selected_flow": payload.workflow_graph.selected_flow,
+            "repair_applied": payload.workflow_graph.repair_applied,
+            "workflow_graph_repair_report": payload.workflow_graph.repair_report,
+            "decision_edges_review_required": payload.workflow_graph.decision_edges_review_required,
+            "missing_terminal_edges": payload.workflow_graph.missing_terminal_edges,
+            "orphan_annotations": payload.workflow_graph.orphan_annotations,
+            "unresolved_relations": payload.workflow_graph.unresolved_relations,
             "annotations": annotations,
             "uncertain_edges": uncertain_edges,
             "uncertain_edges_count": len(uncertain_edges),

@@ -123,11 +123,20 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         self.assertTrue({"1", "2", "3", "4", "6", "10", "11", "12"}.issubset(decision_codes))
         edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
         self.assertIn(("start", "next", "node_1"), edge_keys)
+        self.assertIn(("node_3", "no", "node_9_2"), edge_keys)
         self.assertIn(("node_4", "no", "node_6"), edge_keys)
         self.assertIn(("node_6", "yes", "node_6_1"), edge_keys)
         self.assertIn(("node_6", "no", "node_6_2"), edge_keys)
-        self.assertIn(("node_3", "no", "node_9_2"), edge_keys)
+        self.assertIn(("node_12", "yes", "node_9_2"), edge_keys)
+        self.assertIn(("node_12", "no", "node_13"), edge_keys)
+        self.assertIn(("node_10", "yes", "node_10_1"), edge_keys)
+        self.assertIn(("node_10", "no", "node_10_2"), edge_keys)
+        self.assertIn(("node_11", "yes", "node_11_1"), edge_keys)
+        self.assertIn(("node_11", "no", "node_11_2"), edge_keys)
         self.assertNotIn(("node_3", "no", "node_12"), edge_keys)
+        node_types = {node["id"]: node["type"] for node in graph["nodes"]}
+        self.assertEqual(node_types["start"], "start")
+        self.assertEqual(node_types["end"], "end")
         for step_code in {"1.1", "5", "6.1", "6.2", "13", "10.2", "11.1", "11.2"}:
             node_id = f"node_{step_code.replace('.', '_')}"
             self.assertIn((node_id, "next", "end"), edge_keys)
@@ -141,6 +150,12 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         relation_units = [unit for unit in payload.atomic_units if unit.unit_type == "related_document"]
         self.assertEqual(relation_units[0].metadata["relation_type"], "requires")
         self.assertEqual(relation_units[0].metadata["target_title"], "Quy định xác minh tài khoản TX, KH.xlsx")
+        self.assertNotIn("not decision", str(graph).lower())
+        self.assertGreaterEqual(graph["graph_fidelity_score"], 0.9)
+        self.assertTrue(graph["repair_applied"])
+        self.assertEqual(graph["missing_terminal_edges"], [])
+        self.assertEqual(graph["decision_edges_review_required"], 16)
+        self.assertEqual(graph["unresolved_relations"][0]["target_title"], "Quy định xác minh tài khoản TX, KH.xlsx")
 
     def test_missing_start_end_and_terminal_edges_are_synthesized(self) -> None:
         transcription = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
@@ -171,6 +186,57 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         self.assertIn(("node_13", "next", "end"), edge_keys)
         self.assertIn("workflow_v3_start_node_synthesized", report["warnings"])
         self.assertIn("workflow_v3_end_node_synthesized", report["warnings"])
+
+    def test_boundary_nodes_with_ambiguous_zero_ids_do_not_collide(self) -> None:
+        transcription = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
+        page = transcription["canvas"]["pages"][0]
+        for node in page["nodes"]:
+            if node.get("node_type") in {"start", "end"}:
+                node["id"] = "0"
+        page["edges"] = [
+            {"from_node": "0", "to_step_code": "1", "condition": "next", "confidence": 0.92},
+            {"from_step_code": "1", "to_step_code": "1.1", "condition": "yes", "confidence": 0.94},
+            {"from_step_code": "1", "to_step_code": "1.2", "condition": "no", "confidence": 0.94},
+            {"from_step_code": "1.2", "to_step_code": "2", "condition": "next", "confidence": 0.9},
+            {"from_step_code": "2", "to_step_code": "3", "condition": "yes", "confidence": 0.93},
+            {"from_step_code": "2", "to_step_code": "12", "condition": "no", "confidence": 0.93},
+            {"from_step_code": "3", "to_step_code": "4", "condition": "yes", "confidence": 0.93},
+            {"from_step_code": "3", "to_step_code": "9.2", "condition": "no", "confidence": 0.93},
+            {"from_step_code": "4", "to_step_code": "5", "condition": "yes", "confidence": 0.92},
+            {"from_step_code": "4", "to_step_code": "6", "condition": "no", "confidence": 0.92},
+            {"from_step_code": "6", "to_step_code": "6.1", "condition": "yes", "confidence": 0.91},
+            {"from_step_code": "6", "to_step_code": "6.2", "condition": "no", "confidence": 0.91},
+            {"from_step_code": "12", "to_step_code": "13", "condition": "no", "confidence": 0.92},
+            {"from_step_code": "12", "to_step_code": "9.2", "condition": "yes", "confidence": 0.92},
+            {"from_step_code": "9.2", "to_step_code": "10", "condition": "next", "confidence": 0.9},
+            {"from_step_code": "10", "to_step_code": "10.1", "condition": "yes", "confidence": 0.9},
+            {"from_step_code": "10", "to_step_code": "10.2", "condition": "no", "confidence": 0.9},
+            {"from_step_code": "10.1", "to_step_code": "11", "condition": "next", "confidence": 0.9},
+            {"from_step_code": "11", "to_step_code": "11.1", "condition": "yes", "confidence": 0.9},
+            {"from_step_code": "11", "to_step_code": "11.2", "condition": "no", "confidence": 0.9},
+            {"from_step_code": "1.1", "to_node": "0", "condition": "next", "confidence": 0.82},
+        ]
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="email_workflow.pdf",
+            raw_text=RAW_TEXT,
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(workflow_v3_quality_error_from_report(report), "")
+        graph = payload.workflow_graph.model_dump()
+        node_ids = [node["id"] for node in graph["nodes"]]
+        self.assertIn("start", node_ids)
+        self.assertIn("end", node_ids)
+        self.assertEqual(len(node_ids), len(set(node_ids)))
+        edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        self.assertIn(("start", "next", "node_1"), edge_keys)
+        self.assertIn(("node_1_1", "next", "end"), edge_keys)
+        self.assertFalse(any("workflow_v3_start_has_incoming" in blocker for blocker in report["blockers"]))
+        self.assertFalse(any("workflow_v3_end_has_outgoing" in blocker for blocker in report["blockers"]))
 
     def test_missing_visible_step_blocks_v3_success(self) -> None:
         broken = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
@@ -208,20 +274,25 @@ class WorkflowV3CompilerTest(unittest.TestCase):
 
         self.assertTrue(any("workflow_v3_branching_node_not_decision:6" == blocker for blocker in report["blockers"]))
 
-    def test_decision_marked_not_decision_blocks_v3_success(self) -> None:
+    def test_decision_marked_not_decision_metadata_is_repaired_out_of_graph(self) -> None:
         broken = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
         for node in broken["canvas"]["pages"][0]["nodes"]:
             if node.get("step_code") == "4":
                 node["metadata"] = {"review_status": "not decision"}
 
-        _payload, report, _canvas = compile_workflow_v3_payload(
+        payload, report, _canvas = compile_workflow_v3_payload(
             filename="email_workflow.pdf",
             raw_text=RAW_TEXT,
             transcription=broken,
             visual_context={},
         )
 
-        self.assertIn("workflow_v3_decision_marked_not_decision:4", report["blockers"])
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        self.assertNotIn("not decision", str(graph).lower())
+        self.assertIn("invalid_review_metadata_removed:review_status", report["warnings"])
+        self.assertTrue(payload.workflow_graph.repair_report["repair_applied"])
 
     def test_action_without_outgoing_terminal_or_external_marker_blocks_v3_success(self) -> None:
         broken = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)

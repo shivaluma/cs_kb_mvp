@@ -35,6 +35,7 @@ def compile_workflow_v3_payload(
     title_hint = str(transcription.get("title") or transcription.get("document_metadata", {}).get("title") or filename)
     node_conflicts.extend(ensure_boundary_nodes(filename, raw_text, title_hint, canvas, nodes, node_lookup))
     annotations = compile_canvas_annotations(filename, canvas, node_lookup)
+    annotation_conflicts = attach_orphan_annotations_to_nearest_node(annotations, nodes)
     relations = compile_canvas_relations(filename, canvas)
     edges, uncertain_edges, edge_conflicts, expected_edges = compile_canvas_edges(filename, canvas, node_lookup)
     edge_conflicts.extend(ensure_boundary_and_terminal_edges(filename, nodes, edges, uncertain_edges))
@@ -46,7 +47,16 @@ def compile_workflow_v3_payload(
         uncertain_edges=uncertain_edges,
         visible_step_codes=visible_step_codes,
         expected_edges=expected_edges,
-        detector_conflicts=[*node_conflicts, *edge_conflicts],
+        detector_conflicts=[*node_conflicts, *annotation_conflicts, *edge_conflicts],
+    )
+    repair_report = workflow_graph_repair_report(
+        nodes=nodes,
+        annotations=annotations,
+        relations=relations,
+        edges=edges,
+        uncertain_edges=uncertain_edges,
+        repair_events=[*node_conflicts, *annotation_conflicts, *edge_conflicts],
+        fidelity_report=fidelity_report,
     )
     graph_confidence = fidelity_report["fidelity_score"]
     graph = {
@@ -70,6 +80,13 @@ def compile_workflow_v3_payload(
         "fidelity_score": fidelity_report["fidelity_score"],
         "detector_conflicts": fidelity_report["detector_conflicts"],
         "validation_errors": fidelity_report["blockers"],
+        "repair_applied": repair_report["repair_applied"],
+        "repair_report": repair_report,
+        "graph_fidelity_score": fidelity_report["fidelity_score"],
+        "decision_edges_review_required": repair_report["decision_edges_review_required"],
+        "missing_terminal_edges": repair_report["missing_terminal_edges"],
+        "orphan_annotations": repair_report["orphan_annotations"],
+        "unresolved_relations": repair_report["unresolved_relations"],
         "source_refs": [page_source_ref(filename, canvas)],
     }
 
@@ -94,6 +111,7 @@ def compile_workflow_v3_payload(
                 "retrieval_scope": "document",
                 "workflow_v3": True,
                 "fidelity_report": fidelity_report,
+                "repair_report": repair_report,
             },
             "source_refs": graph["source_refs"],
         },
@@ -172,7 +190,8 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
             node_id = node_identifier(item, node_type, step_code, text)
             node_source_ref = source_ref(filename, page_number, item.get("bbox"))
             lane = str(item.get("lane") or item.get("swimlane") or item.get("actor") or "")
-            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            metadata, metadata_repairs = sanitize_canvas_node_metadata(item.get("metadata"))
+            conflicts.extend(metadata_repairs)
             raw_nodes.append(
                 {
                     "id": node_id,
@@ -222,17 +241,24 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
         if not existing.get("terminal_state") and node.get("terminal_state"):
             existing["terminal_state"] = node["terminal_state"]
     nodes = sorted(merged.values(), key=lambda item: (item.get("page") or 0, item.get("_order") or 0))
+    ensure_unique_node_ids(nodes, conflicts)
     lookup: dict[str, str] = {}
     for node in nodes:
-        lookup[node["id"]] = node["id"]
+        add_lookup_alias(lookup, node["id"], node["id"])
         if node.get("step_code"):
-            lookup[str(node["step_code"])] = node["id"]
-            lookup[f"step_{node['step_code']}"] = node["id"]
+            add_lookup_alias(lookup, str(node["step_code"]), node["id"])
+            add_lookup_alias(lookup, f"step_{node['step_code']}", node["id"])
         for source_id in node.get("source_ids", []):
-            if source_id:
-                lookup[source_id] = node["id"]
+            if not source_id or is_ambiguous_boundary_source_id(source_id):
+                continue
+            if not add_lookup_alias(lookup, source_id, node["id"]):
+                conflicts.append(f"duplicate_source_id_alias_ignored:{source_id}")
+            normalized_source_id = normalized_key(source_id)
+            if normalized_source_id and not add_lookup_alias(lookup, normalized_source_id, node["id"]):
+                conflicts.append(f"duplicate_source_id_alias_ignored:{normalized_source_id}")
         node.pop("_order", None)
         node.pop("source_ids", None)
+    add_boundary_aliases(lookup, nodes)
     return nodes, lookup, conflicts
 
 
@@ -270,6 +296,64 @@ def compile_canvas_annotations(filename: str, canvas: dict[str, Any], node_looku
                 }
             )
     return dedupe_annotations(annotations)
+
+
+def sanitize_canvas_node_metadata(metadata: Any) -> tuple[dict[str, Any], list[str]]:
+    if not isinstance(metadata, dict):
+        return {}, []
+    sanitized: dict[str, Any] = {}
+    repairs: list[str] = []
+    for key, value in metadata.items():
+        key_text = normalized_text(str(key))
+        value_text = normalized_text(str(value)) if isinstance(value, (str, int, float, bool)) else ""
+        if key_text in {"not_decision", "is_decision"} or "not decision" in value_text or "not a decision" in value_text:
+            repairs.append(f"invalid_review_metadata_removed:{key}")
+            continue
+        sanitized[key] = value
+    return sanitized, repairs
+
+
+def attach_orphan_annotations_to_nearest_node(annotations: list[dict[str, Any]], nodes: list[dict[str, Any]]) -> list[str]:
+    repairs: list[str] = []
+    workflow_nodes = [node for node in nodes if node.get("type") not in {"start", "end"}]
+    for annotation in annotations:
+        attached = [str(item) for item in annotation.get("attached_to_node_ids", []) if str(item)]
+        if attached:
+            continue
+        nearest_id = nearest_node_id_by_bbox(annotation.get("bbox"), workflow_nodes)
+        if nearest_id:
+            annotation["attached_to"] = nearest_id
+            annotation["attached_to_node_ids"] = [nearest_id]
+            repairs.append(f"orphan_annotation_attached:{annotation.get('id')}->{nearest_id}")
+        else:
+            annotation["orphan_annotation"] = True
+            repairs.append(f"orphan_annotation_flagged:{annotation.get('id')}")
+    return repairs
+
+
+def nearest_node_id_by_bbox(annotation_bbox: Any, nodes: list[dict[str, Any]]) -> str:
+    bbox = normalize_bbox(annotation_bbox)
+    if len(bbox) < 4:
+        return ""
+    best_id = ""
+    best_distance = float("inf")
+    for node in nodes:
+        node_bbox = normalize_bbox(node.get("bbox"))
+        if len(node_bbox) < 4:
+            continue
+        distance = bbox_center_distance(bbox, node_bbox)
+        if distance < best_distance:
+            best_distance = distance
+            best_id = str(node.get("id") or "")
+    return best_id
+
+
+def bbox_center_distance(a: list[float], b: list[float]) -> float:
+    ax = (a[0] + a[2]) / 2
+    ay = (a[1] + a[3]) / 2
+    bx = (b[0] + b[2]) / 2
+    by = (b[1] + b[3]) / 2
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
 
 
 def compile_canvas_relations(filename: str, canvas: dict[str, Any]) -> list[dict[str, Any]]:
@@ -315,8 +399,8 @@ def compile_canvas_edges(
                 continue
             from_key = str(item.get("from_step_code") or item.get("from_node") or item.get("from") or item.get("source") or "")
             to_key = str(item.get("to_step_code") or item.get("to_node") or item.get("to") or item.get("target") or "")
-            from_node = node_lookup.get(normalize_step_code(from_key), node_lookup.get(from_key, ""))
-            to_node = node_lookup.get(normalize_step_code(to_key), node_lookup.get(to_key, ""))
+            from_node = resolve_edge_endpoint(from_key, node_lookup, role="from")
+            to_node = resolve_edge_endpoint(to_key, node_lookup, role="to")
             condition = normalize_condition(item.get("condition") or item.get("label") or "")
             confidence = clamp_float(item.get("confidence"), 0.0, 1.0, 0.72)
             page_number = int_or_default(item.get("page"), page.get("page") or 1)
@@ -416,6 +500,7 @@ def ensure_boundary_nodes(
         conflicts.append("workflow_v3_end_node_synthesized")
     for node in nodes:
         node_lookup[str(node.get("id"))] = str(node.get("id"))
+    add_boundary_aliases(node_lookup, nodes)
     return conflicts
 
 
@@ -431,7 +516,7 @@ def ensure_boundary_and_terminal_edges(
     end_id = next((str(node.get("id")) for node in nodes if node.get("type") == "end"), "")
     edge_keys = {(str(edge.get("from_node")), str(edge.get("to_node")), normalize_condition(edge.get("condition"))) for edge in [*edges, *uncertain_edges]}
 
-    if start_id and not any(edge.get("from_node") == start_id for edge in [*edges, *uncertain_edges]):
+    if start_id and not has_resolved_outgoing_edge(start_id, edges, uncertain_edges):
         first_target = first_root_node_id(nodes, edges, uncertain_edges, start_id)
         if first_target and (start_id, first_target, "next") not in edge_keys:
             edges.append(synthetic_edge(filename, node_by_id[start_id], node_by_id[first_target], "next", "synthesized_start_edge"))
@@ -444,7 +529,7 @@ def ensure_boundary_and_terminal_edges(
         node_id = str(node.get("id") or "")
         if node.get("type") in {"start", "end", "decision"}:
             continue
-        if any(edge.get("from_node") == node_id for edge in [*edges, *uncertain_edges]):
+        if has_resolved_outgoing_edge(node_id, edges, uncertain_edges):
             continue
         if is_external_continuation_node(node):
             continue
@@ -476,6 +561,13 @@ def first_root_node_id(
     candidates.sort(key=lambda node: (0 if node.get("type") == "decision" else 1, step_sort_key(str(node.get("step_code") or "999")), str(node.get("id"))))
     target = str(candidates[0].get("id") or "")
     return "" if target == start_id else target
+
+
+def has_resolved_outgoing_edge(node_id: str, edges: list[dict[str, Any]], uncertain_edges: list[dict[str, Any]]) -> bool:
+    return any(
+        str(edge.get("from_node") or "") == node_id and bool(edge.get("to_node"))
+        for edge in [*edges, *uncertain_edges]
+    )
 
 
 def synthetic_edge(filename: str, from_node: dict[str, Any], to_node: dict[str, Any], condition: str, reason: str) -> dict[str, Any]:
@@ -520,6 +612,10 @@ def workflow_v3_fidelity_report(
         blockers.append("workflow_v3_summary_like_graph_too_few_nodes")
     if missing_expected_edges:
         blockers.append(f"workflow_v3_missing_visible_edges:{';'.join(missing_expected_edges[:8])}")
+    node_ids = [str(node.get("id") or "") for node in nodes]
+    duplicate_ids = sorted({node_id for node_id in node_ids if node_id and node_ids.count(node_id) > 1})
+    if duplicate_ids:
+        blockers.append(f"workflow_v3_duplicate_node_ids:{','.join(duplicate_ids[:8])}")
     node_by_id = {node["id"]: node for node in nodes}
     outgoing: dict[str, list[dict[str, Any]]] = {}
     uncertain_outgoing: dict[str, list[dict[str, Any]]] = {}
@@ -529,8 +625,9 @@ def workflow_v3_fidelity_report(
         outgoing.setdefault(str(edge.get("from_node")), []).append(edge)
         incoming.setdefault(str(edge.get("to_node")), []).append(edge)
     for edge in uncertain_edges:
-        uncertain_outgoing.setdefault(str(edge.get("from_node")), []).append(edge)
-        uncertain_incoming.setdefault(str(edge.get("to_node")), []).append(edge)
+        if edge.get("from_node") and edge.get("to_node"):
+            uncertain_outgoing.setdefault(str(edge.get("from_node")), []).append(edge)
+            uncertain_incoming.setdefault(str(edge.get("to_node")), []).append(edge)
     for node in nodes:
         node_id = str(node.get("id") or "")
         text = " ".join(str(node.get(key) or "") for key in ("title", "question", "content"))
@@ -586,6 +683,95 @@ def workflow_v3_fidelity_report(
         "blockers": list(dict.fromkeys(blockers)),
         "warnings": list(dict.fromkeys(warnings)),
         "fidelity_score": round(fidelity_score, 3),
+    }
+
+
+def workflow_graph_repair_report(
+    *,
+    nodes: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    relations: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    uncertain_edges: list[dict[str, Any]],
+    repair_events: list[str],
+    fidelity_report: dict[str, Any],
+) -> dict[str, Any]:
+    node_ids = {str(node.get("id") or "") for node in nodes}
+    edge_pairs = [(str(edge.get("from_node") or ""), str(edge.get("to_node") or "")) for edge in [*edges, *uncertain_edges]]
+    outgoing = {from_node for from_node, to_node in edge_pairs if from_node and to_node}
+    decision_edges_review_required = sum(
+        1
+        for edge in edges
+        if normalize_condition(edge.get("condition")) in {"yes", "no"}
+        and str(edge.get("review_status") or "") not in {"confirmed", "acknowledged"}
+    )
+    missing_terminal_edges = [
+        str(node.get("step_code") or node.get("id") or "")
+        for node in nodes
+        if node.get("type") not in {"start", "end", "decision"}
+        and str(node.get("id") or "") not in outgoing
+        and not is_external_continuation_node(node)
+    ]
+    orphan_annotations = [
+        str(annotation.get("id") or annotation.get("title") or "")
+        for annotation in annotations
+        if not annotation.get("attached_to_node_ids")
+    ]
+    unresolved_relations = [
+        {
+            "target_title": relation.get("target_title"),
+            "target_url": relation.get("target_url"),
+            "relation_type": relation.get("relation_type"),
+            "evidence_text": relation.get("evidence_text"),
+        }
+        for relation in relations
+        if relation.get("target_title") and not relation.get("target_id")
+    ]
+    source_ref_missing = [
+        str(node.get("step_code") or node.get("id") or "")
+        for node in nodes
+        if not node.get("source_refs")
+    ]
+    invalid_edge_endpoints = [
+        f"{from_node}->{to_node}"
+        for from_node, to_node in edge_pairs
+        if from_node not in node_ids or to_node not in node_ids
+    ]
+    repairable_events = [
+        event
+        for event in repair_events
+        if event.startswith(
+            (
+                "workflow_v3_start_node_synthesized",
+                "workflow_v3_end_node_synthesized",
+                "workflow_v3_start_edge_synthesized",
+                "workflow_v3_terminal_edge_synthesized",
+                "duplicate_node_merged",
+                "duplicate_node_id_renamed",
+                "duplicate_edge_merged",
+                "orphan_annotation_attached",
+                "invalid_review_metadata_removed",
+            )
+        )
+    ]
+    return {
+        "stage": "workflow_graph_repair",
+        "repair_applied": bool(repairable_events),
+        "repair_events": list(dict.fromkeys(repairable_events)),
+        "unrepairable_events": [
+            event
+            for event in repair_events
+            if event not in set(repairable_events)
+        ][:20],
+        "graph_fidelity_score": fidelity_report.get("fidelity_score"),
+        "decision_edges_review_required": decision_edges_review_required,
+        "missing_terminal_edges": missing_terminal_edges,
+        "orphan_annotations": orphan_annotations,
+        "unresolved_relations": unresolved_relations,
+        "source_ref_missing_nodes": source_ref_missing,
+        "invalid_edge_endpoints": invalid_edge_endpoints,
+        "blockers_after_repair": fidelity_report.get("blockers", []),
+        "warnings_after_repair": fidelity_report.get("warnings", []),
     }
 
 
@@ -806,12 +992,78 @@ def infer_node_type(item: dict[str, Any], text: str, step_code: str) -> str:
 def node_identifier(item: dict[str, Any], node_type: str, step_code: str, text: str) -> str:
     if step_code:
         return stable_node_id(step_code, prefix="node")
-    raw_id = normalized_key(str(item.get("id") or ""))
-    if node_type == "start" and raw_id in {"", "start", "begin", "bat_dau"}:
+    if node_type == "start":
         return "start"
-    if node_type == "end" and raw_id in {"", "end", "finish", "done", "ket_thuc"}:
+    if node_type == "end":
         return "end"
     return stable_node_id(item.get("id") or text, prefix="node")
+
+
+def ensure_unique_node_ids(nodes: list[dict[str, Any]], conflicts: list[str]) -> None:
+    seen: dict[str, int] = {}
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        if node_id not in seen:
+            seen[node_id] = 1
+            continue
+        seen[node_id] += 1
+        new_id = f"{node_id}_{seen[node_id]}"
+        conflicts.append(f"duplicate_node_id_renamed:{node_id}->{new_id}")
+        node["id"] = new_id
+
+
+def add_lookup_alias(lookup: dict[str, str], alias: Any, node_id: str) -> bool:
+    key = str(alias or "").strip()
+    if not key:
+        return True
+    existing = lookup.get(key)
+    if existing and existing != node_id:
+        return False
+    lookup[key] = node_id
+    return True
+
+
+def add_boundary_aliases(lookup: dict[str, str], nodes: list[dict[str, Any]]) -> None:
+    start = next((str(node.get("id")) for node in nodes if node.get("type") == "start"), "")
+    end = next((str(node.get("id")) for node in nodes if node.get("type") == "end"), "")
+    if start:
+        for alias in ("start", "START", "Start", "begin", "BEGIN", "bat_dau"):
+            add_lookup_alias(lookup, alias, start)
+    if end:
+        for alias in ("end", "END", "End", "finish", "FINISH", "done", "DONE", "ket_thuc"):
+            add_lookup_alias(lookup, alias, end)
+
+
+def resolve_edge_endpoint(raw_key: Any, node_lookup: dict[str, str], role: str) -> str:
+    key = str(raw_key or "").strip()
+    if not key:
+        return ""
+    boundary_alias = boundary_edge_alias(key, role)
+    if boundary_alias and node_lookup.get(boundary_alias):
+        return node_lookup[boundary_alias]
+    code = normalize_step_code(key)
+    if code and node_lookup.get(code):
+        return node_lookup[code]
+    return node_lookup.get(key, node_lookup.get(normalized_key(key), ""))
+
+
+def boundary_edge_alias(key: str, role: str) -> str:
+    normalized = normalized_key(key)
+    if normalized in {"start", "begin", "bat_dau"}:
+        return "start"
+    if normalized in {"end", "finish", "done", "ket_thuc"}:
+        return "end"
+    if normalized == "0":
+        return ""
+    if role == "from" and normalized in {"source_start", "workflow_start"}:
+        return "start"
+    if role == "to" and normalized in {"target_end", "workflow_end"}:
+        return "end"
+    return ""
+
+
+def is_ambiguous_boundary_source_id(source_id: Any) -> bool:
+    return normalized_key(str(source_id or "")) in {"0"}
 
 
 def node_title(text: str, step_code: str, node_type: str) -> str:

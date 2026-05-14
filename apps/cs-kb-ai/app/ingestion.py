@@ -267,7 +267,7 @@ def prepare_document_version(
         workflow_v3_artifacts = raw_context.get("workflow_v3_artifacts") if isinstance(raw_context.get("workflow_v3_artifacts"), dict) else {}
         if workflow_v3_artifacts:
             artifact_status = "failed" if ai_error and str(ai_error).startswith("ai_workflow_structuring_failed:workflow_v3") else "completed"
-            for artifact_type in ("workflow_canvas_transcription", "workflow_graph_draft", "workflow_fidelity_report"):
+            for artifact_type in ("workflow_canvas_transcription", "workflow_graph_draft", "workflow_fidelity_report", "workflow_graph_repair_report"):
                 payload = workflow_v3_artifacts.get(artifact_type)
                 if payload:
                     pipeline_artifacts.append(
@@ -467,6 +467,7 @@ def try_ai_structuring(
                 return [], warnings, "ai_workflow_structuring_failed:pdf_vision_render_required"
             semantic_refinement = raw_context.get("workflow_semantic_refinement") if isinstance(raw_context.get("workflow_semantic_refinement"), dict) else {}
             visual_context = compact_visual_context(visual_layout) if visual_layout else None
+            flow_candidates: list[dict[str, Any]] = []
 
             v3_units, v3_warnings, v3_artifacts = extract_workflow_units_v3(filename, raw_text, page_images=page_images, visual_context=visual_context)
             if v3_artifacts:
@@ -474,23 +475,23 @@ def try_ai_structuring(
             warnings.extend(v3_warnings)
             v3_chunks = workflow_units_to_chunks(v3_units, raw_text, filename) if v3_units else []
             if v3_chunks:
-                v3_quality_error = workflow_structuring_quality_error(v3_chunks, v3_warnings)
-                v3_fidelity_error = workflow_graph_fidelity_quality_error(v3_chunks, raw_text, visual_context)
-                if not v3_quality_error and not v3_fidelity_error:
+                flow_candidates.append(workflow_flow_candidate("workflow_v3_graph_primary", v3_chunks, v3_warnings, raw_text, visual_context))
+                if workflow_candidate_can_short_circuit(flow_candidates[-1]):
+                    selected_chunks = apply_workflow_selection_metadata(v3_chunks, flow_candidates[-1])
+                    warnings.extend(workflow_selection_warnings(flow_candidates, flow_candidates[-1]))
                     warnings.append("workflow_extraction_flow:v3_graph_primary")
-                    return mark_structured_chunks(v3_chunks), warnings, ""
-                warnings.append(f"workflow_v3_quality_rejected:{v3_quality_error or v3_fidelity_error}")
+                    return mark_structured_chunks(selected_chunks), warnings, ""
 
             v2_units, v2_warnings = extract_workflow_units_v2(filename, raw_text, page_images=page_images, visual_context=visual_context)
             warnings.extend(v2_warnings)
             v2_chunks = workflow_units_to_chunks(v2_units, raw_text, filename) if v2_units else []
             if v2_chunks:
-                v2_quality_error = workflow_structuring_quality_error(v2_chunks, v2_warnings)
-                v2_fidelity_error = workflow_graph_fidelity_quality_error(v2_chunks, raw_text, visual_context)
-                if not v2_quality_error and not v2_fidelity_error:
+                flow_candidates.append(workflow_flow_candidate("workflow_v2_vision_primary", v2_chunks, v2_warnings, raw_text, visual_context))
+                if workflow_candidate_can_short_circuit(flow_candidates[-1]):
+                    selected_chunks = apply_workflow_selection_metadata(v2_chunks, flow_candidates[-1])
+                    warnings.extend(workflow_selection_warnings(flow_candidates, flow_candidates[-1]))
                     warnings.append("workflow_extraction_flow:v2_vision_primary")
-                    return mark_structured_chunks(v2_chunks), warnings, ""
-                warnings.append(f"workflow_v2_quality_rejected:{v2_quality_error or v2_fidelity_error}")
+                    return mark_structured_chunks(selected_chunks), warnings, ""
 
             if visual_context:
                 warnings.append("visual_graph_context_supplied_to_llm")
@@ -502,16 +503,40 @@ def try_ai_structuring(
             if not chunks:
                 semantic_chunks = semantic_workflow_structured_chunks(filename, raw_text, classification, semantic_refinement)
                 if semantic_chunks:
+                    flow_candidates.append(workflow_flow_candidate("semantic_workflow_structuring", semantic_chunks, llm_warnings, raw_text, visual_context))
+                    selected = select_workflow_flow_candidate(flow_candidates)
+                    if selected:
+                        selected_chunks = apply_workflow_selection_metadata(selected["chunks"], selected)
+                        warnings.extend(workflow_selection_warnings(flow_candidates, selected))
+                        warnings.append(f"workflow_extraction_flow:{selected['flow']}")
+                        if selected["flow"] != "semantic_workflow_structuring":
+                            return mark_structured_chunks(selected_chunks), warnings, ""
                     warnings.append("semantic_workflow_structuring_used_after_ai_failure")
                     if llm_warnings:
                         warnings.append(f"ai_workflow_structuring_rejected:{','.join(llm_warnings[:3])}")
                     return mark_structured_chunks(semantic_chunks), warnings, ""
                 return [], warnings, f"ai_workflow_structuring_failed:{','.join(llm_warnings)}"
+            flow_candidates.append(workflow_flow_candidate("workflow_legacy", chunks, llm_warnings, raw_text, visual_context))
+            selected = select_workflow_flow_candidate(flow_candidates)
+            if selected:
+                selected_chunks = apply_workflow_selection_metadata(selected["chunks"], selected)
+                warnings.extend(workflow_selection_warnings(flow_candidates, selected))
+                warnings.append(f"workflow_extraction_flow:{selected['flow']}")
+                return mark_structured_chunks(selected_chunks), warnings, ""
+
             quality_error = workflow_structuring_quality_error(chunks, llm_warnings)
             fidelity_error = workflow_graph_fidelity_quality_error(chunks, raw_text, visual_context)
             if quality_error or fidelity_error:
                 semantic_chunks = semantic_workflow_structured_chunks(filename, raw_text, classification, semantic_refinement)
                 if semantic_chunks:
+                    semantic_candidate = workflow_flow_candidate("semantic_workflow_structuring", semantic_chunks, llm_warnings, raw_text, visual_context)
+                    flow_candidates.append(semantic_candidate)
+                    selected = select_workflow_flow_candidate(flow_candidates)
+                    if selected:
+                        selected_chunks = apply_workflow_selection_metadata(selected["chunks"], selected)
+                        warnings.extend(workflow_selection_warnings(flow_candidates, selected))
+                        warnings.append(f"workflow_extraction_flow:{selected['flow']}")
+                        return mark_structured_chunks(selected_chunks), warnings, ""
                     warnings.append("semantic_workflow_structuring_used_after_ai_quality_reject")
                     warnings.append(f"ai_workflow_structuring_rejected:{quality_error or fidelity_error}")
                     return mark_structured_chunks(semantic_chunks), warnings, ""
@@ -1645,6 +1670,271 @@ def workflow_graph_fidelity_quality_error(chunks: list[Any], raw_text: str, visu
     if missing_decision_codes:
         return f"workflow_graph_question_steps_not_decisions:{','.join(missing_decision_codes[:12])}"
     return ""
+
+
+def workflow_flow_candidate(
+    flow: str,
+    chunks: list[Any],
+    flow_warnings: list[str],
+    raw_text: str,
+    visual_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    quality_error = workflow_structuring_quality_error(chunks, flow_warnings)
+    fidelity_error = workflow_graph_fidelity_quality_error(chunks, raw_text, visual_context)
+    graph = workflow_graph_from_chunks(chunks)
+    visible_codes = workflow_candidate_visible_codes(graph, raw_text, visual_context)
+    covered_codes = sorted(workflow_graph_covered_step_codes(graph))
+    source_step_coverage = ratio(len([code for code in visible_codes if code in set(covered_codes)]), len(visible_codes)) if visible_codes else 1.0
+    decision_branch_coverage = workflow_decision_branch_coverage(graph)
+    terminal_edge_coverage = workflow_terminal_edge_coverage(graph)
+    annotation_coverage = workflow_annotation_coverage(graph)
+    source_ref_coverage = workflow_source_ref_coverage(chunks, graph)
+    graph_integrity_score = workflow_graph_integrity_score(graph, quality_error, fidelity_error)
+    graph_fidelity_score = workflow_graph_declared_fidelity(graph)
+    overall_fidelity_score = round(
+        source_step_coverage * 0.24
+        + decision_branch_coverage * 0.22
+        + terminal_edge_coverage * 0.16
+        + annotation_coverage * 0.1
+        + source_ref_coverage * 0.12
+        + graph_integrity_score * 0.16,
+        3,
+    )
+    if graph_fidelity_score is not None:
+        overall_fidelity_score = round((overall_fidelity_score * 0.72) + (graph_fidelity_score * 0.28), 3)
+    schema_valid = not quality_error
+    repair_report = graph.get("repair_report") if isinstance(graph.get("repair_report"), dict) else {}
+    validation_errors = graph.get("validation_errors") if isinstance(graph.get("validation_errors"), list) else []
+    repairable = bool(repair_report.get("repair_applied")) or all(workflow_validation_error_is_repairable(error) for error in validation_errors)
+    hard_fidelity_error = workflow_unrepairable_fidelity_error(fidelity_error)
+    if fidelity_error and not repair_report.get("repair_applied"):
+        hard_fidelity_error = fidelity_error
+    if repair_report.get("missing_terminal_edges"):
+        hard_fidelity_error = hard_fidelity_error or "workflow_graph_missing_terminal_edges_after_repair"
+    hard_error = quality_error or hard_fidelity_error
+    return {
+        "flow": flow,
+        "chunks": chunks,
+        "warnings": flow_warnings,
+        "schema_valid": schema_valid,
+        "repairable": repairable,
+        "quality_error": quality_error,
+        "fidelity_error": fidelity_error,
+        "source_step_coverage": round(source_step_coverage, 3),
+        "decision_branch_coverage": round(decision_branch_coverage, 3),
+        "terminal_edge_coverage": round(terminal_edge_coverage, 3),
+        "annotation_coverage": round(annotation_coverage, 3),
+        "source_ref_coverage": round(source_ref_coverage, 3),
+        "graph_integrity_score": round(graph_integrity_score, 3),
+        "overall_fidelity_score": overall_fidelity_score,
+        "graph_fidelity_score": graph_fidelity_score,
+        "repair_report": repair_report,
+        "graph_validation_errors": validation_errors,
+        "selectable": schema_valid and not hard_error,
+    }
+
+
+def workflow_candidate_can_short_circuit(candidate: dict[str, Any]) -> bool:
+    return bool(candidate.get("selectable")) and float(candidate.get("overall_fidelity_score") or 0) >= 0.82
+
+
+def select_workflow_flow_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    selectable = [candidate for candidate in candidates if candidate.get("selectable")]
+    if not selectable:
+        return None
+    flow_priority = {
+        "workflow_v3_graph_primary": 0.04,
+        "workflow_v2_vision_primary": 0.02,
+        "workflow_legacy": 0.0,
+        "semantic_workflow_structuring": -0.04,
+    }
+    return max(
+        selectable,
+        key=lambda candidate: (
+            float(candidate.get("overall_fidelity_score") or 0) + flow_priority.get(str(candidate.get("flow")), 0),
+            float(candidate.get("source_step_coverage") or 0),
+            float(candidate.get("decision_branch_coverage") or 0),
+        ),
+    )
+
+
+def workflow_selection_warnings(candidates: list[dict[str, Any]], selected: dict[str, Any]) -> list[str]:
+    compact_scores = [
+        {
+            "flow": candidate.get("flow"),
+            "schema_valid": candidate.get("schema_valid"),
+            "repairable": candidate.get("repairable"),
+            "selectable": candidate.get("selectable"),
+            "source_step_coverage": candidate.get("source_step_coverage"),
+            "decision_branch_coverage": candidate.get("decision_branch_coverage"),
+            "terminal_edge_coverage": candidate.get("terminal_edge_coverage"),
+            "annotation_coverage": candidate.get("annotation_coverage"),
+            "source_ref_coverage": candidate.get("source_ref_coverage"),
+            "graph_integrity_score": candidate.get("graph_integrity_score"),
+            "overall_fidelity_score": candidate.get("overall_fidelity_score"),
+            "quality_error": candidate.get("quality_error"),
+            "fidelity_error": candidate.get("fidelity_error"),
+        }
+        for candidate in candidates
+    ]
+    return [
+        f"workflow_flow_selection:{selected.get('flow')}:score={selected.get('overall_fidelity_score')}",
+        "workflow_flow_selection_matrix:" + json.dumps(compact_scores, ensure_ascii=False, separators=(",", ":"))[:1600],
+    ]
+
+
+def apply_workflow_selection_metadata(chunks: list[Any], selected: dict[str, Any]) -> list[Any]:
+    for chunk in chunks:
+        metadata = getattr(chunk, "metadata", None)
+        if not isinstance(metadata, dict):
+            continue
+        metadata["selected_flow"] = selected.get("flow")
+        metadata["overall_fidelity_score"] = selected.get("overall_fidelity_score")
+        metadata["source_step_coverage"] = selected.get("source_step_coverage")
+        metadata["decision_branch_coverage"] = selected.get("decision_branch_coverage")
+        metadata["terminal_edge_coverage"] = selected.get("terminal_edge_coverage")
+        metadata["annotation_coverage"] = selected.get("annotation_coverage")
+        metadata["source_ref_coverage"] = selected.get("source_ref_coverage")
+        metadata["graph_integrity_score"] = selected.get("graph_integrity_score")
+        graph = metadata.get("workflow_graph")
+        if isinstance(graph, dict):
+            graph["selected_flow"] = selected.get("flow")
+            graph["graph_fidelity_score"] = selected.get("graph_fidelity_score") or selected.get("overall_fidelity_score")
+            graph["repair_applied"] = bool(selected.get("repair_report", {}).get("repair_applied"))
+            graph["decision_edges_review_required"] = selected.get("repair_report", {}).get("decision_edges_review_required", 0)
+            graph["missing_terminal_edges"] = selected.get("repair_report", {}).get("missing_terminal_edges", [])
+            graph["orphan_annotations"] = selected.get("repair_report", {}).get("orphan_annotations", [])
+            graph["unresolved_relations"] = selected.get("repair_report", {}).get("unresolved_relations", [])
+            metadata["workflow_graph"] = graph
+            metadata["graph_fidelity_score"] = graph["graph_fidelity_score"]
+            metadata["repair_applied"] = graph["repair_applied"]
+            metadata["decision_edges_review_required"] = graph["decision_edges_review_required"]
+            metadata["missing_terminal_edges"] = graph["missing_terminal_edges"]
+            metadata["orphan_annotations"] = graph["orphan_annotations"]
+            metadata["unresolved_relations"] = graph["unresolved_relations"]
+    return chunks
+
+
+def workflow_candidate_visible_codes(graph: dict[str, Any], raw_text: str, visual_context: dict[str, Any] | None) -> list[str]:
+    visible = graph.get("visible_step_codes") if isinstance(graph.get("visible_step_codes"), list) else []
+    if visible:
+        return [str(code) for code in visible if str(code)]
+    return workflow_v3_visible_step_codes_from_sources(raw_text, {}, visual_context or {})
+
+
+def workflow_decision_branch_coverage(graph: dict[str, Any]) -> float:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    decision_ids = {str(node.get("id") or "") for node in nodes if isinstance(node, dict) and str(node.get("type") or "") == "decision"}
+    if not decision_ids:
+        return 1.0
+    by_from: dict[str, set[str]] = {node_id: set() for node_id in decision_ids}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        from_node = str(edge.get("from_node") or "")
+        if from_node in by_from:
+            by_from[from_node].add(str(edge.get("condition") or "").lower())
+    covered = sum(1 for conditions in by_from.values() if {"yes", "no"}.issubset(conditions))
+    return ratio(covered, len(decision_ids))
+
+
+def workflow_terminal_edge_coverage(graph: dict[str, Any]) -> float:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    action_ids = [
+        str(node.get("id") or "")
+        for node in nodes
+        if isinstance(node, dict) and str(node.get("type") or "") == "action"
+    ]
+    if not action_ids:
+        return 1.0
+    outgoing = {str(edge.get("from_node") or "") for edge in edges if isinstance(edge, dict) and edge.get("to_node")}
+    covered = 0
+    for node in nodes:
+        if not isinstance(node, dict) or str(node.get("type") or "") != "action":
+            continue
+        node_id = str(node.get("id") or "")
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        if node_id in outgoing or node.get("terminal_state") or metadata.get("continues_with_related_sop"):
+            covered += 1
+    return ratio(covered, len(action_ids))
+
+
+def workflow_annotation_coverage(graph: dict[str, Any]) -> float:
+    annotations = graph.get("annotations") if isinstance(graph.get("annotations"), list) else []
+    if not annotations:
+        return 1.0
+    attached = sum(1 for annotation in annotations if isinstance(annotation, dict) and (annotation.get("attached_to") or annotation.get("attached_to_node_ids")))
+    return ratio(attached, len(annotations))
+
+
+def workflow_source_ref_coverage(chunks: list[Any], graph: dict[str, Any]) -> float:
+    total = 0
+    covered = 0
+    for chunk in chunks:
+        total += 1
+        refs = getattr(chunk, "source_refs", None) or getattr(chunk, "metadata", {}).get("source_refs", [])
+        if refs:
+            covered += 1
+    for node in graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else []:
+        if isinstance(node, dict):
+            total += 1
+            if node.get("source_refs"):
+                covered += 1
+    return ratio(covered, total) if total else 1.0
+
+
+def workflow_graph_integrity_score(graph: dict[str, Any], quality_error: str, fidelity_error: str) -> float:
+    errors = graph.get("validation_errors") if isinstance(graph.get("validation_errors"), list) else []
+    hard_errors = [error for error in errors if not workflow_validation_error_is_repairable(str(error))]
+    penalty = min((len(hard_errors) * 0.18) + (0.25 if quality_error else 0) + (0.2 if workflow_unrepairable_fidelity_error(fidelity_error) else 0), 0.85)
+    return max(0.0, 1.0 - penalty)
+
+
+def workflow_graph_declared_fidelity(graph: dict[str, Any]) -> float | None:
+    for key in ("graph_fidelity_score", "fidelity_score", "graph_confidence"):
+        try:
+            if graph.get(key) is not None:
+                return max(0.0, min(float(graph.get(key)), 1.0))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def workflow_validation_error_is_repairable(error: str) -> bool:
+    return str(error).startswith(
+        (
+            "workflow_v3_start_node_synthesized",
+            "workflow_v3_end_node_synthesized",
+            "workflow_v3_start_edge_synthesized",
+            "workflow_v3_terminal_edge_synthesized",
+            "workflow_v3_action_missing_terminal_or_outgoing",
+            "workflow_v3_start_has_incoming",
+            "workflow_v3_end_has_outgoing",
+            "workflow_v3_duplicate_node_ids",
+        )
+    )
+
+
+def workflow_unrepairable_fidelity_error(error: str) -> str:
+    if not error:
+        return ""
+    repairable_tokens = (
+        "workflow_v3_start_has_incoming",
+        "workflow_v3_end_has_outgoing",
+        "workflow_v3_action_missing_terminal_or_outgoing",
+        "workflow_v3_duplicate_node_ids",
+    )
+    if all(any(token.startswith(prefix) for prefix in repairable_tokens) for token in str(error).split(",") if token):
+        return ""
+    return error
+
+
+def ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 1.0
+    return max(0.0, min(float(numerator) / float(denominator), 1.0))
 
 
 def workflow_graph_from_chunks(chunks: list[Any]) -> dict[str, Any]:
@@ -4233,18 +4523,42 @@ def ai_breakdown_payload(breakdowns: list[dict[str, Any]], warnings: list[str], 
     completed = [attempt for attempt in attempts if attempt.get("status") == "completed"]
     failed = [attempt for attempt in attempts if attempt.get("status") == "failed"]
     skipped = [attempt for attempt in attempts if attempt.get("status") == "skipped"]
+    selected_flow = workflow_selected_flow_from_warnings(warnings) or (str(completed[-1].get("flow") or "") if completed else "")
     return {
         "attempt_count": len(attempts),
         "completed_count": len(completed),
         "failed_count": len(failed),
         "skipped_count": len(skipped),
-        "selected_flow": str(completed[-1].get("flow") or "") if completed else "",
+        "selected_flow": selected_flow,
+        "selected_flow_reason": next((warning for warning in warnings if str(warning).startswith("workflow_flow_selection:")), ""),
+        "flow_selection_matrix": workflow_selection_matrix_from_warnings(warnings),
         "models": list(dict.fromkeys(str(attempt.get("model") or "") for attempt in attempts if attempt.get("model"))),
         "flows": [str(attempt.get("flow") or "") for attempt in attempts if attempt.get("flow")],
         "warnings": warnings[:60],
         "error": ai_error,
         "attempts": attempts,
     }
+
+
+def workflow_selected_flow_from_warnings(warnings: list[str]) -> str:
+    for warning in warnings:
+        text = str(warning)
+        if text.startswith("workflow_extraction_flow:"):
+            return text.split(":", 1)[1]
+    return ""
+
+
+def workflow_selection_matrix_from_warnings(warnings: list[str]) -> list[dict[str, Any]]:
+    for warning in warnings:
+        text = str(warning)
+        if not text.startswith("workflow_flow_selection_matrix:"):
+            continue
+        try:
+            parsed = json.loads(text.split(":", 1)[1])
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
 
 
 def draft_units_payload(source_chunks: list[Any]) -> dict[str, Any]:

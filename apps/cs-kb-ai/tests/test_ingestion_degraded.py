@@ -770,7 +770,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         )
 
         self.assertEqual(payload.workflow_graph.nodes[0].content, "")
-        self.assertEqual(payload.workflow_graph.nodes[0].question, "")
+        self.assertEqual(payload.workflow_graph.nodes[0].question, "KH có gửi hình ảnh?")
 
     def test_workflow_ai_structuring_receives_visual_context(self) -> None:
         captured: dict[str, object] = {}
