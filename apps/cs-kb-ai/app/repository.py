@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import uuid
@@ -123,6 +124,24 @@ DEFAULT_KB_COLLECTIONS = (
 
 def pg_text(value: Any) -> str:
     return str(value or "").replace("\x00", "")
+
+
+def jsonb_text(value: Any) -> str:
+    return pg_text(json.dumps(json_safe(value), ensure_ascii=False, allow_nan=False))
+
+
+def json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if hasattr(value, "model_dump"):
+        return json_safe(value.model_dump(mode="json"))
+    return str(value)
 
 
 def metadata_storage_json(metadata: DocumentMetadata) -> str:
@@ -4893,7 +4912,7 @@ def create_chat_session(title: str = "", model_route: str = "simple", filters: d
             INSERT INTO ai_chat_sessions (id, title, model_route, filters)
             VALUES (%s, %s, %s, %s::jsonb)
             """,
-            (session_id, clean_title[:120], pg_text(model_route or "simple"), pg_text(json.dumps(filters or {}))),
+            (session_id, clean_title[:120], pg_text(model_route or "simple"), jsonb_text(filters or {})),
         )
     return chat_session_by_id(session_id)
 
@@ -4922,7 +4941,7 @@ def update_chat_session(
                 updated_at = now()
             WHERE id = %s
             """,
-            (next_title, next_status, next_model_route, pg_text(json.dumps(next_filters or {})), session_id),
+            (next_title, next_status, next_model_route, jsonb_text(next_filters or {}), session_id),
         )
     return chat_session_by_id(session_id)
 
@@ -5042,9 +5061,9 @@ def insert_chat_message(
                 session_id,
                 pg_text(role),
                 pg_text(content),
-                pg_text(json.dumps(response_payload or {}, ensure_ascii=False)),
-                pg_text(json.dumps(source_chunk_ids or [], ensure_ascii=False)),
-                pg_text(json.dumps(token_context_metadata or {}, ensure_ascii=False)),
+                jsonb_text(response_payload or {}),
+                jsonb_text(source_chunk_ids or []),
+                jsonb_text(token_context_metadata or {}),
             ),
         ).fetchone()
         conn.execute(
@@ -5083,7 +5102,7 @@ def update_chat_session_after_assistant(
                 pg_text((title or "")[:120]),
                 pg_text(summary[:700]),
                 pg_text(model_route or "simple"),
-                pg_text(json.dumps(filters or {})),
+                jsonb_text(filters or {}),
                 session_id,
             ),
         )

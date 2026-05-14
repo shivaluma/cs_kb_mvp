@@ -405,6 +405,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
 
 
 def grounded_chat_session_message(session_id: str, payload: ChatSessionMessageRequest) -> dict[str, object]:
+    started_at = time.perf_counter()
     session = repository.chat_session_by_id(session_id)
     if session["status"] != "active":
         raise ValueError("chat_session_archived")
@@ -444,7 +445,10 @@ def grounded_chat_session_message(session_id: str, payload: ChatSessionMessageRe
         conversation=[],
         model_route=payload.model_route,
     )
-    response = grounded_chat(request)
+    try:
+        response = grounded_chat(request)
+    except Exception as exc:
+        response = chat_session_failure_response(payload, request, exc, started_at)
     title = ""
     if int(session.get("message_count") or 0) == 0 or str(session.get("title") or "") in {"", "New chat"}:
         title, title_warnings = generate_chat_session_title(payload.question)
@@ -477,6 +481,47 @@ def grounded_chat_session_message(session_id: str, payload: ChatSessionMessageRe
         "assistant_message": assistant_message,
         "response": response,
     }
+
+
+def chat_session_failure_response(
+    payload: ChatSessionMessageRequest,
+    request: GroundedChatRequest,
+    exc: Exception,
+    started_at: float,
+) -> GroundedChatResponse:
+    retrieval = RetrievalResponse(
+        query=request.retrieval_query.strip() or payload.question,
+        normalized_query="",
+        query_expansion={},
+        mode="hybrid",
+        results=[],
+        citations=[],
+        warnings=["chat_session_generation_exception"],
+        latency_ms=elapsed_ms(started_at),
+    )
+    return GroundedChatResponse(
+        question=payload.question,
+        answer="Không thể tạo câu trả lời từ phiên chat lúc này do lỗi xử lý nội bộ. Tin nhắn đã được lưu; vui lòng thử lại hoặc mở SOP Lookup để tra nguồn trực tiếp.",
+        steps=[],
+        warnings=[
+            "chat_session_generation_failed",
+            f"chat_session_generation_failed:{exc.__class__.__name__}",
+        ],
+        citations=[],
+        sources=[],
+        confidence=0,
+        retrieval=retrieval,
+        source_groups=[],
+        retrieval_trace={
+            "strategy": "chat_session_exception_fallback",
+            "error_type": exc.__class__.__name__,
+            "retrieval_query_used": request.retrieval_query != payload.question,
+        },
+        latency_ms=elapsed_ms(started_at),
+        model_route=payload.model_route,
+        model_used="",
+        model_reason="session_exception_fallback",
+    )
 
 
 def contextual_retrieval_query(

@@ -10,6 +10,7 @@ from app.chat import (
     contextual_retrieval_query,
     evidence_confidence,
     grounded_chat,
+    grounded_chat_session_message,
     has_policy_source,
     retrieve_for_chat,
     should_use_recent_context,
@@ -28,6 +29,51 @@ from app.schemas import (
 
 
 class ChatRetrievalTest(unittest.TestCase):
+    def test_session_message_returns_fallback_when_generation_raises(self) -> None:
+        session = {
+            "id": "session-1",
+            "title": "Existing chat",
+            "summary": "",
+            "status": "active",
+            "message_count": 2,
+            "model_route": "simple",
+            "filters": {},
+        }
+        inserted_messages: list[dict[str, object]] = []
+
+        def fake_insert_message(session_id: str, role: str, content: str, **kwargs: object) -> dict[str, object]:
+            message = {
+                "id": f"{role}-{len(inserted_messages)}",
+                "session_id": session_id,
+                "role": role,
+                "content": content,
+                "response_payload": kwargs.get("response_payload") or {},
+                "source_chunk_ids": kwargs.get("source_chunk_ids") or [],
+                "token_context_metadata": kwargs.get("token_context_metadata") or {},
+                "created_at": "2026-05-14T00:00:00Z",
+            }
+            inserted_messages.append(message)
+            return message
+
+        with (
+            patch("app.chat.repository.chat_session_by_id", return_value=session),
+            patch("app.chat.repository.recent_chat_user_messages", return_value=["previous question"]),
+            patch("app.chat.repository.recent_chat_assistant_messages", return_value=[]),
+            patch("app.chat.repository.insert_chat_message", side_effect=fake_insert_message),
+            patch("app.chat.repository.update_chat_session_after_assistant", return_value={**session, "message_count": 4}),
+            patch("app.chat.grounded_chat", side_effect=RuntimeError("boom")),
+        ):
+            result = grounded_chat_session_message(
+                "session-1",
+                ChatSessionMessageRequest(question="tiếp theo xử lý sao?"),
+            )
+
+        self.assertEqual(result["response"].confidence, 0)
+        self.assertIn("chat_session_generation_failed:RuntimeError", result["response"].warnings)
+        self.assertEqual(inserted_messages[0]["role"], "user")
+        self.assertEqual(inserted_messages[1]["role"], "assistant")
+        self.assertIn("Không thể tạo câu trả lời", inserted_messages[1]["content"])
+
     def test_issue_router_match_expands_approved_target_sop(self) -> None:
         router = retrieval_result("router-chunk", "issue_router_unit", score=0.7)
         related_row = retrieval_row("target-chunk", "policy_rule", score=0.005, relation_type="requires")
