@@ -109,12 +109,13 @@ export function CaseAssistWorkspace({
   setRiskLevel: (value: string) => void;
   tools: ToolLinkSummary[];
 }) {
+  const normalizedQuery = textFrom(query);
   const candidates = useMemo(() => buildCandidates(routerResults, results), [results, routerResults]);
   const [selectedKey, setSelectedKey] = useState("");
   const selected = candidates.find((candidate) => candidate.chunkId === selectedKey) ?? candidates[0] ?? null;
   const actionCard = selected ? buildActionCard(selected) : null;
   const relatedTools = selected ? selectTools(selected, tools, actionTemplates) : [];
-  const relatedTemplates = selected ? selectActionTemplates(selected, actionTemplates, query) : [];
+  const relatedTemplates = selected ? selectActionTemplates(selected, actionTemplates, normalizedQuery) : [];
   const grouped = useMemo(() => groupCandidates(candidates), [candidates]);
 
   useEffect(() => {
@@ -152,7 +153,7 @@ export function CaseAssistWorkspace({
                 value={query}
               />
             </div>
-            <Button className="h-10 px-4" disabled={!query.trim() || loading} onClick={onRunSearch} type="button">
+            <Button className="h-10 px-4" disabled={!normalizedQuery || loading} onClick={onRunSearch} type="button">
               <Search data-icon="inline-start" className="size-4" />
               Search issue
             </Button>
@@ -195,7 +196,7 @@ export function CaseAssistWorkspace({
           </CardHeader>
           <CardContent className="pt-3">
             <ScrollArea className="h-[39rem] pr-3">
-              {!query.trim() ? (
+              {!normalizedQuery ? (
                 <EmptyPanel compact icon={Route} text="Type the issue in plain language. Case Assist will compose quick answer, checklist, tools, and related SOPs from approved content." title="Start with the issue" />
               ) : loading ? (
                 <div className="rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">Searching approved operational index...</div>
@@ -240,7 +241,7 @@ export function CaseAssistWorkspace({
               onCopyChecklist={() => onCopyChecklist(selected, actionCard.steps)}
               onCopyQuickAnswer={() => onCopyQuickAnswer(selected)}
               onOpenFullSop={() => onOpenFullSop(selected)}
-              query={query}
+              query={normalizedQuery}
               relatedTemplates={relatedTemplates}
               relatedTools={relatedTools}
               searchEventId={searchEventId}
@@ -449,7 +450,7 @@ function CaseAssistDetail({
             document_id: candidate.documentId,
             version_id: candidate.versionId,
           }}
-          sampleQuery={query}
+          sampleQuery={textFrom(query)}
           sourceTitle={candidate.parentTitle}
           targetTitle={candidate.title}
         />
@@ -480,53 +481,60 @@ function ActionFact({ icon: Icon, label, values }: { icon: typeof FileText; labe
 function buildCandidates(routerResults: IssueRouterItem[], retrievalResults: RetrievalResult[]) {
   const byId = new Map<string, CaseAssistCandidate>();
   for (const item of routerResults) {
-    byId.set(item.chunk_id, {
-      audience: item.audience,
-      caseType: item.case_type,
-      chunkId: item.chunk_id,
-      collection: item.collection,
-      content: item.content,
-      documentId: item.document_id,
-      heading: item.title,
-      metadata: item.metadata,
-      parentTitle: item.target_sop_title || item.collection,
-      relationStatus: item.relation_status,
-      riskLevel: item.risk_level,
-      score: Math.max(item.score, 0.72),
+    const metadata = metadataFrom(item.metadata);
+    const chunkId = textFrom(item.chunk_id);
+    if (!chunkId) {
+      continue;
+    }
+    byId.set(chunkId, {
+      audience: asList(item.audience),
+      caseType: asList(item.case_type),
+      chunkId,
+      collection: textFrom(item.collection),
+      content: textFrom(item.content),
+      documentId: textFrom(item.document_id),
+      heading: textFrom(item.title),
+      metadata,
+      parentTitle: textFrom(item.target_sop_title) || textFrom(item.collection),
+      relationStatus: textFrom(item.relation_status),
+      riskLevel: textFrom(item.risk_level),
+      score: Math.max(numberFrom(item.score), 0.72),
       sourceRole: "issue_router",
-      taskType: item.task_type,
-      title: item.title || item.issue_text,
-      toolIds: item.tool_ids,
-      unitType: String(item.metadata.unit_type ?? "issue_router_unit"),
-      versionId: item.version_id,
-      vertical: item.vertical,
+      taskType: asList(item.task_type),
+      title: textFrom(item.title) || textFrom(item.issue_text),
+      toolIds: asList(item.tool_ids),
+      unitType: textFrom(metadata.unit_type) || "issue_router_unit",
+      versionId: textFrom(item.version_id),
+      vertical: asList(item.vertical),
     });
   }
   for (const result of retrievalResults) {
-    if (byId.has(result.chunk_id)) {
+    const chunkId = textFrom(result.chunk_id);
+    if (!chunkId || byId.has(chunkId)) {
       continue;
     }
-    const unitType = String(result.metadata.unit_type ?? result.section);
-    byId.set(result.chunk_id, {
-      audience: asList(result.metadata.audience),
-      caseType: asList(result.metadata.case_type),
-      chunkId: result.chunk_id,
-      collection: textFrom(result.metadata.collection_name) || textFrom(result.metadata.collection_slug),
-      content: result.content,
-      documentId: result.document_id,
-      heading: result.heading,
-      metadata: result.metadata,
-      parentTitle: result.title,
-      relationStatus: textFrom(result.metadata.relation_status),
-      riskLevel: textFrom(result.metadata.risk_level),
-      score: Math.max(result.score, 0.01),
+    const metadata = metadataFrom(result.metadata);
+    const unitType = textFrom(metadata.unit_type) || textFrom(result.section);
+    byId.set(chunkId, {
+      audience: asList(metadata.audience),
+      caseType: asList(metadata.case_type),
+      chunkId,
+      collection: textFrom(metadata.collection_name) || textFrom(metadata.collection_slug),
+      content: textFrom(result.content),
+      documentId: textFrom(result.document_id),
+      heading: textFrom(result.heading),
+      metadata,
+      parentTitle: textFrom(result.title),
+      relationStatus: textFrom(metadata.relation_status),
+      riskLevel: textFrom(metadata.risk_level),
+      score: Math.max(numberFrom(result.score), 0.01),
       sourceRole: sourceRoleFor(result),
-      taskType: asList(result.metadata.task_type),
-      title: result.heading || result.title,
-      toolIds: asList(result.metadata.tool_ids),
+      taskType: asList(metadata.task_type),
+      title: textFrom(result.heading) || textFrom(result.title),
+      toolIds: asList(metadata.tool_ids),
       unitType,
-      versionId: result.version_id,
-      vertical: asList(result.metadata.vertical),
+      versionId: textFrom(result.version_id),
+      vertical: asList(metadata.vertical),
     });
   }
   return Array.from(byId.values()).sort((left, right) => {
@@ -539,8 +547,9 @@ function buildCandidates(routerResults: IssueRouterItem[], retrievalResults: Ret
 }
 
 function sourceRoleFor(result: RetrievalResult): CaseAssistCandidate["sourceRole"] {
-  const unitType = String(result.metadata.unit_type ?? result.section);
-  const scope = String(result.metadata.retrieval_scope ?? "unit");
+  const metadata = metadataFrom(result.metadata);
+  const unitType = textFrom(metadata.unit_type) || textFrom(result.section);
+  const scope = textFrom(metadata.retrieval_scope) || "unit";
   if (unitType === "tool_link") {
     return "tool_link";
   }
@@ -553,7 +562,7 @@ function sourceRoleFor(result: RetrievalResult): CaseAssistCandidate["sourceRole
   if (scope === "document" || unitType === "full_sop") {
     return "parent_sop";
   }
-  if (result.rank_source.includes("relation")) {
+  if (asList(result.rank_source).includes("relation")) {
     return "related_sop";
   }
   return "direct_sop";
@@ -577,15 +586,15 @@ function groupCandidates(candidates: CaseAssistCandidate[]) {
 }
 
 function buildActionCard(candidate: CaseAssistCandidate): ActionCard {
-  const metadata = candidate.metadata;
+  const metadata = metadataFrom(candidate.metadata);
   const steps = firstList(metadata, ["checklist", "steps", "workflow_steps", "actions"]);
   const fallbackSteps = splitOperationalSteps(candidate.content);
   const conditions = [
     textFrom(metadata.condition),
     ...asList(metadata.conditions),
-    ...candidate.caseType,
-    ...candidate.audience.map((item) => `Audience: ${item}`),
-    ...candidate.vertical.map((item) => `Vertical: ${item}`),
+    ...asList(candidate.caseType),
+    ...asList(candidate.audience).map((item) => `Audience: ${item}`),
+    ...asList(candidate.vertical).map((item) => `Vertical: ${item}`),
   ].filter(Boolean);
   const warnings = [
     ...asList(metadata.warnings),
@@ -608,14 +617,15 @@ function buildActionCard(candidate: CaseAssistCandidate): ActionCard {
 }
 
 function splitOperationalSteps(content: string) {
-  const bulletLines = content
+  const safeContent = textFrom(content);
+  const bulletLines = safeContent
     .split(/\n+/)
     .map((line) => line.replace(/^[-*•\d.()\s]+/, "").trim())
     .filter((line) => line.length > 4);
   if (bulletLines.length >= 2) {
     return bulletLines;
   }
-  return content
+  return safeContent
     .split(/(?<=[.!?])\s+|;\s+|,\s(?=(CS|KH|TX|Nếu|Trường hợp|Bước)\b)/)
     .map((line) => line.trim())
     .filter((line) => line.length > 8)
@@ -626,7 +636,7 @@ function selectTools(candidate: CaseAssistCandidate, tools: ToolLinkSummary[], t
   const ids = new Set(candidate.toolIds);
   for (const template of templates) {
     if (template.source_unit_id === candidate.chunkId || matchesCollection(template.metadata, candidate)) {
-      template.related_tool_ids.forEach((id) => ids.add(id));
+      asList(template.related_tool_ids).forEach((id) => ids.add(id));
     }
   }
   const exact = tools.filter((tool) => ids.has(tool.id));
@@ -654,27 +664,30 @@ function actionTemplateScore(candidate: CaseAssistCandidate, template: ActionTem
   if (matchesCollection(template.metadata, candidate)) {
     score += 2;
   }
-  const text = `${template.name} ${template.description} ${template.copy_template}`.toLowerCase();
+  const text = `${textFrom(template.name)} ${textFrom(template.description)} ${textFrom(template.copy_template)}`.toLowerCase();
   for (const token of queryTokens) {
     if (text.includes(token)) {
       score += 1;
     }
   }
-  if (candidate.toolIds.some((id) => template.related_tool_ids.includes(id))) {
+  const relatedToolIds = asList(template.related_tool_ids);
+  if (candidate.toolIds.some((id) => relatedToolIds.includes(id))) {
     score += 2;
   }
   return score;
 }
 
 function matchesCollection(metadata: Record<string, unknown>, candidate: CaseAssistCandidate) {
-  const collectionSlug = textFrom(metadata.collection_slug);
-  const collectionName = textFrom(metadata.collection_name);
+  const safeMetadata = metadataFrom(metadata);
+  const collectionSlug = textFrom(safeMetadata.collection_slug);
+  const collectionName = textFrom(safeMetadata.collection_name);
   return Boolean(candidate.collection && (candidate.collection === collectionSlug || candidate.collection === collectionName));
 }
 
 function firstList(metadata: Record<string, unknown>, keys: string[]) {
+  const safeMetadata = metadataFrom(metadata);
   for (const key of keys) {
-    const value = metadata[key];
+    const value = safeMetadata[key];
     const list = asList(value);
     if (list.length) {
       return list;
@@ -709,13 +722,23 @@ function textFrom(value: unknown): string {
   return "";
 }
 
+function metadataFrom(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function numberFrom(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function unique(values: string[]) {
-  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  return Array.from(new Set(values.map(textFrom).filter(Boolean)));
 }
 
 function tokenSet(value: string) {
+  const safeValue = textFrom(value);
   return new Set(
-    value
+    safeValue
       .toLowerCase()
       .split(/\W+/)
       .map((token) => token.trim())
