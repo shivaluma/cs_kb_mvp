@@ -13,9 +13,12 @@ const CaseAssistWorkspace = lazy(() =>
   import("@/workspaces/case-assist-workspace").then((module) => ({ default: module.CaseAssistWorkspace })),
 );
 
+const CASE_ASSIST_DEBOUNCE_MS = 900;
+
 export function CaseAssistPage() {
   const { reportError, reportNotice } = useFeedback();
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [filters, setFilters] = useState<FilterState>({
     collection: defaultFilters.collection,
     audience: defaultFilters.audience,
@@ -26,16 +29,19 @@ export function CaseAssistPage() {
   });
   const [riskLevel, setRiskLevel] = useState("all");
   const searchEventRef = useRef("");
+  const lastSearchKeyRef = useRef("");
   const trimmedQuery = query.trim();
+  const activeQuery = debouncedQuery.trim();
   const collectionFilter = filters.collection === "all" ? "" : filters.collection;
   const audienceFilter = filters.audience === "all" ? "" : filters.audience;
   const verticalFilter = filters.vertical === "all" ? "" : filters.vertical;
   const taskTypeFilter = filters.taskType === "all" ? "" : filters.taskType;
   const riskFilter = riskLevel === "all" ? "" : riskLevel;
   const routerQuery = useIssueRouter({
-    query: trimmedQuery,
+    query: activeQuery,
     collection: collectionFilter,
     audience: audienceFilter,
+    enabled: Boolean(activeQuery),
     vertical: verticalFilter,
     taskType: taskTypeFilter,
     riskLevel: riskFilter,
@@ -66,32 +72,51 @@ export function CaseAssistPage() {
 
   useEffect(() => {
     if (!trimmedQuery) {
+      setDebouncedQuery("");
+      searchMutation.reset();
       return;
     }
     const handle = window.setTimeout(() => {
-      runAssistSearch();
-    }, 450);
+      setDebouncedQuery(trimmedQuery);
+    }, CASE_ASSIST_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
-  }, [filters, riskLevel, trimmedQuery]);
+  }, [trimmedQuery]);
+
+  useEffect(() => {
+    if (!activeQuery) {
+      return;
+    }
+    runAssistSearch(activeQuery);
+  }, [activeQuery, filters, riskLevel]);
 
   function updateFilter(key: keyof FilterState, value: string) {
     setFilters((current) => ({ ...current, [key]: value }));
   }
 
-  function runAssistSearch() {
-    if (!trimmedQuery) {
+  function runAssistSearch(nextQuery = trimmedQuery, force = false) {
+    const normalizedQuery = nextQuery.trim();
+    if (!normalizedQuery) {
       searchMutation.reset();
       return;
     }
+    const compacted = compactFilters(filters);
+    const searchKey = JSON.stringify({
+      filters: compacted,
+      query: normalizedQuery,
+      risk_level: riskFilter,
+    });
+    if (!force && lastSearchKeyRef.current === searchKey) {
+      return;
+    }
+    lastSearchKeyRef.current = searchKey;
     const searchEventId = crypto.randomUUID();
     searchEventRef.current = searchEventId;
-    const compacted = compactFilters(filters);
     eventMutation.mutate({
       action: "sop_search",
       entity_type: "search",
       metadata: {
         search_event_id: searchEventId,
-        query: trimmedQuery,
+        query: normalizedQuery,
         surface: "case_assist",
         filters: { ...compacted, risk_level: riskFilter },
       },
@@ -101,14 +126,14 @@ export function CaseAssistPage() {
       entity_type: "issue_router",
       metadata: {
         search_event_id: searchEventId,
-        query: trimmedQuery,
+        query: normalizedQuery,
         surface: "case_assist",
         filters: { collection: collectionFilter, audience: audienceFilter, vertical: verticalFilter, task_type: taskTypeFilter, risk_level: riskFilter },
       },
     });
     searchMutation.mutate(
       {
-        query: trimmedQuery,
+        query: normalizedQuery,
         include_semantic: true,
         filters: compacted,
       },
@@ -125,7 +150,7 @@ export function CaseAssistPage() {
       entity_id: candidate.chunkId,
       metadata: {
         search_event_id: searchEventRef.current,
-        query: trimmedQuery,
+        query: activeQuery || trimmedQuery,
         surface: "case_assist",
         rank,
         source_role: candidate.sourceRole,
@@ -144,7 +169,7 @@ export function CaseAssistPage() {
         entity_type: "case_assist",
         metadata: {
           search_event_id: searchEventRef.current,
-          query: trimmedQuery,
+          query: activeQuery || trimmedQuery,
           surface: "case_assist",
           ...metadata,
         },
@@ -207,13 +232,19 @@ export function CaseAssistPage() {
         onOpenFullSop={(candidate) => recordCandidateEvent(candidate, "full_sop_open")}
         onOpenQuickAnswer={(candidate) => recordCandidateEvent(candidate, "quick_answer_open")}
         onOpenTool={openTool}
-        onRunSearch={runAssistSearch}
+        onRunSearch={() => {
+          if (!trimmedQuery) {
+            return;
+          }
+          setDebouncedQuery(trimmedQuery);
+          runAssistSearch(trimmedQuery, true);
+        }}
         onSelectCandidate={(candidate, rank) => recordCandidateEvent(candidate, candidate.sourceRole === "issue_router" ? "issue_router_result_click" : "search_result_click", rank)}
         onUpdateFilter={updateFilter}
         query={query}
-        results={trimmedQuery ? (searchMutation.data?.semantic_results ?? []) : []}
+        results={activeQuery ? (searchMutation.data?.semantic_results ?? []) : []}
         riskLevel={riskLevel}
-        routerResults={trimmedQuery ? (routerQuery.data ?? []) : []}
+        routerResults={activeQuery ? (routerQuery.data ?? []) : []}
         searchEventId={searchEventRef.current}
         setQuery={setQuery}
         setRiskLevel={setRiskLevel}

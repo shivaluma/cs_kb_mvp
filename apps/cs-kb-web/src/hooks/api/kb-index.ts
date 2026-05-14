@@ -31,6 +31,7 @@ export function useCollection(collectionId?: string) {
 export function useIssueRouter(params: {
   query?: string;
   audience?: string;
+  enabled?: boolean;
   vertical?: string;
   collection?: string;
   taskType?: string;
@@ -51,6 +52,7 @@ export function useIssueRouter(params: {
     }
   }
   return useQuery({
+    enabled: params.enabled ?? true,
     queryKey: queryKeys.issueRouter(normalized),
     queryFn: () => {
       const suffix = search.toString();
