@@ -2,12 +2,12 @@ import { createRootRoute, createRoute, createRouter, Navigate } from "@tanstack/
 
 import { App } from "@/App";
 import { workspacePaths } from "@/constants";
+import { CaseAssistPage } from "@/pages/case-assist-page";
 import { ChatPage } from "@/pages/chat-page";
 import { CollectionsPage } from "@/pages/collections-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { DocumentsPage } from "@/pages/documents-page";
 import { FeedbackPage } from "@/pages/feedback-page";
-import { IssueRouterPage } from "@/pages/issue-router-page";
 import { LookupPage } from "@/pages/lookup-page";
 import { RelationsPage } from "@/pages/relations-page";
 import { RetrievalPage } from "@/pages/retrieval-page";
@@ -43,10 +43,16 @@ const chatSessionRoute = createRoute({
   component: ChatPage,
 });
 
+const caseAssistRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.caseAssist,
+  component: CaseAssistPage,
+});
+
 const issueRouterRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: workspacePaths.issueRouter,
-  component: IssueRouterPage,
+  component: () => <Navigate replace to={workspacePaths.caseAssist} />,
 });
 
 const toolsRoute = createRoute({
@@ -96,6 +102,7 @@ const routeTree = rootRoute.addChildren([
   lookupRoute,
   chatRoute,
   chatSessionRoute,
+  caseAssistRoute,
   issueRouterRoute,
   toolsRoute,
   collectionsRoute,

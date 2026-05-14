@@ -18,6 +18,7 @@ export const workspacePaths = {
   dashboard: "/",
   lookup: "/lookup",
   chat: "/chat",
+  caseAssist: "/case-assist",
   issueRouter: "/issue-router",
   tools: "/tools",
   collections: "/collections",
@@ -114,11 +115,11 @@ export const navItems = [
     description: "Grounded assistant that answers only from published curated SOP units.",
   },
   {
-    id: "issueRouter",
-    path: workspacePaths.issueRouter,
-    label: "Issue Router",
+    id: "caseAssist",
+    path: workspacePaths.caseAssist,
+    label: "Case Assist",
     icon: Route,
-    description: "Find the right SOP, quick action, and tools for an operational issue.",
+    description: "Start from an issue and get the approved rule, checklist, tools, and action templates.",
   },
   {
     id: "tools",
@@ -174,7 +175,7 @@ export const navItems = [
 export const navGroups = [
   {
     label: "Agent surfaces",
-    items: navItems.filter((item) => ["dashboard", "lookup", "chat", "issueRouter", "tools", "collections"].includes(item.id)),
+    items: navItems.filter((item) => ["dashboard", "lookup", "chat", "caseAssist", "tools", "collections"].includes(item.id)),
   },
   {
     label: "Review operations",
