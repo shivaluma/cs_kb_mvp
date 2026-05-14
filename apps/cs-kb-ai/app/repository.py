@@ -27,7 +27,7 @@ EFFECTIVE_HEADING_SQL = """
 CASE
   WHEN COALESCE(c.heading, '') ~ '^[[:space:]]*([Bb][uư][oơ]?c[[:space:]]*)?[0-9]{1,3}(\\.[0-9]{1,3})*\\.?[[:space:]]*$' THEN ''
   WHEN length(trim(COALESCE(c.heading, ''))) > 7
-       AND immutable_unaccent(lower(COALESCE(c.content, ''))) LIKE immutable_unaccent(lower(trim(COALESCE(c.heading, '')))) || '%' THEN ''
+       AND immutable_unaccent(lower(COALESCE(c.content, ''))) LIKE immutable_unaccent(lower(trim(COALESCE(c.heading, '')))) || '%%' THEN ''
   WHEN immutable_unaccent(lower(trim(COALESCE(c.heading, '')))) IN ('yes', 'no', 'start', 'end', 'row', 'dong', 'link') THEN ''
   ELSE COALESCE(c.heading, '')
 END

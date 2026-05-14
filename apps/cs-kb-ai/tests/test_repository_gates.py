@@ -36,6 +36,10 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertIn(["structured", "manually_curated"], params)
         self.assertIn("COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'", where_sql)
 
+    def test_effective_heading_sql_escapes_literal_percent_for_psycopg3(self) -> None:
+        self.assertIn("|| '%%'", repository.EFFECTIVE_HEADING_SQL)
+        self.assertNotIn("|| '%'", repository.EFFECTIVE_HEADING_SQL)
+
     def test_force_approve_promotes_candidate_unit_types(self) -> None:
         self.assertEqual(repository.promoted_unit_type("candidate_rule", "policy_rule"), "policy_rule")
         self.assertEqual(repository.promoted_unit_type("candidate_table_row", "policy_table"), "policy_rule")
