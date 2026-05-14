@@ -13,12 +13,14 @@ export function CollectionsWorkspace({
   collections,
   detail,
   loading,
+  onCopyActionTemplate,
   onSelectCollection,
   selectedCollection,
 }: {
   collections: KBCollectionSummary[];
   detail: KBCollectionDetail | null;
   loading: boolean;
+  onCopyActionTemplate: (templateId: string, name: string, copyTemplate: string) => void;
   onSelectCollection: (collectionId: string) => void;
   selectedCollection: string;
 }) {
@@ -73,6 +75,29 @@ export function CollectionsWorkspace({
                     </div>
                   ))}
                 </div>
+                {detail.action_templates.length ? (
+                  <div className="space-y-2">
+                    <div className="font-medium">Action templates</div>
+                    {detail.action_templates.slice(0, 4).map((item) => (
+                      <div className="flex items-start justify-between gap-3 rounded-md border p-3" key={item.id}>
+                        <div className="min-w-0">
+                          <div className="truncate font-medium">{item.name}</div>
+                          <div className="mt-1 line-clamp-2 text-muted-foreground">{item.description || item.action_type}</div>
+                        </div>
+                        <Button
+                          className="h-8 rounded-full px-3"
+                          disabled={!item.copy_template && !item.name}
+                          onClick={() => onCopyActionTemplate(item.id, item.name, item.copy_template)}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          Copy
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 font-medium"><GitBranch className="size-4" /> Relations</div>
                   <p className="text-muted-foreground">{detail.unresolved_relation_count} unresolved or suggested relations need review.</p>

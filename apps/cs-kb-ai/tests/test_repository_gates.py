@@ -61,6 +61,18 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertIn("|| '%%'", repository.EFFECTIVE_HEADING_SQL)
         self.assertNotIn("|| '%'", repository.EFFECTIVE_HEADING_SQL)
 
+    def test_feedback_triage_helpers_prioritize_operational_risk(self) -> None:
+        self.assertTrue(repository.is_uuid_text("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+        self.assertFalse(repository.is_uuid_text("legacy-sop-code"))
+        self.assertEqual(repository.feedback_severity("wrong"), "high")
+        self.assertEqual(repository.feedback_severity("outdated"), "high")
+        self.assertEqual(repository.feedback_severity("missing_step"), "high")
+        self.assertEqual(repository.feedback_severity("need_macro"), "medium")
+        self.assertIn("draft version", repository.suggested_feedback_action("outdated"))
+        self.assertIn("retrieval", repository.suggested_feedback_action("search_result_wrong"))
+        self.assertEqual(repository.median_from_sorted([1000, 3000, 9000]), 3000)
+        self.assertEqual(repository.median_from_sorted([1000, 5000]), 3000)
+
     def test_force_approve_promotes_candidate_unit_types(self) -> None:
         self.assertEqual(repository.promoted_unit_type("candidate_rule", "policy_rule"), "policy_rule")
         self.assertEqual(repository.promoted_unit_type("candidate_table_row", "policy_table"), "policy_rule")

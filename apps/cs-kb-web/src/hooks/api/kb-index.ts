@@ -1,11 +1,13 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiGet, apiPost } from "@/lib/api";
 import type {
   ActionTemplateSummary,
+  FeedbackQueueItem,
   IssueRouterItem,
   KBCollectionDetail,
   KBCollectionSummary,
+  OpsAnalyticsResponse,
   ToolLinkSummary,
 } from "@/types";
 
@@ -86,6 +88,7 @@ export function useActionTemplates(collection = "") {
 }
 
 export function useRecordKBEvent() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: {
       action: string;
@@ -101,5 +104,23 @@ export function useRecordKBEvent() {
         actor: payload.actor ?? "cs-ops-ui",
         metadata: payload.metadata ?? {},
       }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.feedbackQueue });
+      void queryClient.invalidateQueries({ queryKey: ["ops-analytics"] });
+    },
+  });
+}
+
+export function useFeedbackQueue() {
+  return useQuery({
+    queryKey: queryKeys.feedbackQueue,
+    queryFn: () => apiGet<FeedbackQueueItem[]>("/api/v1/ai/feedback/queue"),
+  });
+}
+
+export function useOpsAnalytics(windowDays = 7) {
+  return useQuery({
+    queryKey: queryKeys.opsAnalytics(windowDays),
+    queryFn: () => apiGet<OpsAnalyticsResponse>(`/api/v1/ai/analytics/ops?window_days=${windowDays}`),
   });
 }

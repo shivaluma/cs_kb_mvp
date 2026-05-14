@@ -28,6 +28,7 @@ import {
   SectionTitle,
   TextBlock,
 } from "@/components/common";
+import { OperationalFeedbackButtons } from "@/components/operational-feedback";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { AISuggestion, FilterOption, FilterState, Macro, RetrievalResult, SearchResult, SOP } from "@/types";
@@ -54,6 +55,7 @@ export function LookupWorkspace({
   selectedDocumentMatch,
   selectedVersion,
   semanticResults,
+  searchEventId,
   setQuery,
 }: {
   aiSuggestion: AISuggestion | null;
@@ -77,6 +79,7 @@ export function LookupWorkspace({
   selectedDocumentMatch: RetrievalResult | null;
   selectedVersion: SOP["current_version"] | undefined;
   semanticResults: RetrievalResult[];
+  searchEventId: string;
   setQuery: (query: string) => void;
 }) {
   const canSearch = query.trim().length > 0;
@@ -304,7 +307,7 @@ export function LookupWorkspace({
 
       <article className="min-w-0">
         {selectedDocumentMatch ? (
-          <DocumentMatchDetail match={selectedDocumentMatch} />
+          <DocumentMatchDetail match={selectedDocumentMatch} query={query} searchEventId={searchEventId} />
         ) : selected && selectedVersion ? (
           <SOPDetail
             aiSuggestion={aiSuggestion}
@@ -313,6 +316,8 @@ export function LookupWorkspace({
             feedbackRate={feedbackRate}
             onAskAI={onAskAI}
             onCopyMacro={onCopyMacro}
+            query={query}
+            searchEventId={searchEventId}
             selected={selected}
             selectedVersion={selectedVersion}
           />
@@ -512,7 +517,7 @@ function isExactRuleMatch(match: RetrievalResult) {
   ].includes(unitType) || match.rank_source.includes("lexical");
 }
 
-function DocumentMatchDetail({ match }: { match: RetrievalResult }) {
+function DocumentMatchDetail({ match, query, searchEventId }: { match: RetrievalResult; query: string; searchEventId: string }) {
   const scope = String(match.metadata.retrieval_scope ?? "unit");
   const unitType = String(match.metadata.unit_type ?? match.section);
   const isDocumentLayer = scope === "document" || unitType === "full_sop";
@@ -565,6 +570,20 @@ function DocumentMatchDetail({ match }: { match: RetrievalResult }) {
           <GovernanceItem label="Chunk ID" value={match.chunk_id} />
           <GovernanceItem label="Source file" value={match.source_filename} />
         </section>
+        <OperationalFeedbackButtons
+          className="rounded-xl border bg-muted/15 p-3"
+          entityId={match.chunk_id}
+          entityType="chunk"
+          metadata={{
+            search_event_id: searchEventId,
+            unit_type: unitType,
+            version_id: match.version_id,
+            document_id: match.document_id,
+          }}
+          sampleQuery={query}
+          sourceTitle={match.title}
+          targetTitle={match.heading || match.title}
+        />
       </CardContent>
     </Card>
   );
@@ -611,6 +630,8 @@ function SOPDetail({
   feedbackRate,
   onAskAI,
   onCopyMacro,
+  query,
+  searchEventId,
   selected,
   selectedVersion,
 }: {
@@ -620,6 +641,8 @@ function SOPDetail({
   feedbackRate: number;
   onAskAI: () => void;
   onCopyMacro: (macro: Macro) => void;
+  query: string;
+  searchEventId: string;
   selected: SOP;
   selectedVersion: SOP["current_version"];
 }) {
@@ -695,6 +718,18 @@ function SOPDetail({
         </Tabs>
         {aiSuggestion ? <AISuggestionPanel suggestion={aiSuggestion} /> : null}
         <Separator />
+        <OperationalFeedbackButtons
+          className="rounded-xl border bg-muted/15 p-3"
+          entityId={selected.current_version_id}
+          entityType="sop_version"
+          metadata={{
+            search_event_id: searchEventId,
+            sop_id: selected.id,
+          }}
+          sampleQuery={query}
+          sourceTitle={selected.title}
+          targetTitle={selected.title}
+        />
         <div className="rounded-xl border bg-muted/20 px-3 py-2">
           <p className="text-sm text-muted-foreground">Agent script: <span className="text-foreground">{selectedVersion.sections.agent_script}</span></p>
         </div>

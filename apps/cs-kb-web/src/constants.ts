@@ -5,6 +5,7 @@ import {
   IconGitBranch as GitBranch,
   IconLayoutDashboard as LayoutDashboard,
   IconMessage as MessageSquareText,
+  IconMessageReport as MessageReport,
   IconRoute as Route,
   IconSearch as Search,
   IconWand as WandSparkles,
@@ -21,6 +22,7 @@ export const workspacePaths = {
   tools: "/tools",
   collections: "/collections",
   documents: "/documents",
+  feedback: "/feedback",
   relations: "/relations",
   synonyms: "/synonyms",
   retrieval: "/retrieval",
@@ -140,6 +142,13 @@ export const navItems = [
     description: "Upload, extract, review, publish, and archive source files.",
   },
   {
+    id: "feedback",
+    path: workspacePaths.feedback,
+    label: "Feedback",
+    icon: MessageReport,
+    description: "Triage wrong, outdated, missing-step, macro, and search-quality reports.",
+  },
+  {
     id: "relations",
     path: workspacePaths.relations,
     label: "Relations",
@@ -169,7 +178,7 @@ export const navGroups = [
   },
   {
     label: "Review operations",
-    items: navItems.filter((item) => ["documents", "relations"].includes(item.id)),
+    items: navItems.filter((item) => ["documents", "feedback", "relations"].includes(item.id)),
   },
   {
     label: "Admin and debug",

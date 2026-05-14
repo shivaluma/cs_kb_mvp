@@ -38,6 +38,7 @@ from app.schemas import (
     ExtractionUnit,
     ExtractionUnitCreateRequest,
     ExtractionUnitUpdateRequest,
+    FeedbackQueueItem,
     GroundedChatRequest,
     GroundedChatResponse,
     ArchiveRelationRequest,
@@ -48,6 +49,7 @@ from app.schemas import (
     KBCollectionDetail,
     KBCollectionSummary,
     KBEventRequest,
+    OpsAnalyticsResponse,
     PublishVersionRequest,
     RejectRelationRequest,
     RetrievalFilters,
@@ -797,6 +799,16 @@ def list_action_templates(status: str = "approved", collection: str = "") -> lis
 @app.post("/ai/v1/kb-events")
 def record_kb_event(payload: KBEventRequest) -> dict[str, str]:
     return repository.record_kb_event(payload.action, payload.entity_type, payload.entity_id, payload.actor, payload.metadata)
+
+
+@app.get("/ai/v1/feedback/queue", response_model=list[FeedbackQueueItem])
+def list_feedback_queue(limit: int = 500) -> list[FeedbackQueueItem]:
+    return [FeedbackQueueItem(**row) for row in repository.list_feedback_queue(limit=limit)]
+
+
+@app.get("/ai/v1/analytics/ops", response_model=OpsAnalyticsResponse)
+def ops_analytics(window_days: int = 7) -> OpsAnalyticsResponse:
+    return OpsAnalyticsResponse(**repository.ops_analytics(window_days=window_days))
 
 
 def split_query_values(value: str) -> list[str]:

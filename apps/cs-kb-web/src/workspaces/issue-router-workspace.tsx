@@ -5,6 +5,8 @@ import {
 } from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
+import { OperationalFeedbackButtons } from "@/components/operational-feedback";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -16,6 +18,7 @@ export function IssueRouterWorkspace({
   collection,
   collections,
   loading,
+  onSelectResult,
   query,
   riskLevel,
   results,
@@ -36,6 +39,7 @@ export function IssueRouterWorkspace({
   collection: string;
   collections: KBCollectionSummary[];
   loading: boolean;
+  onSelectResult: (item: IssueRouterItem, rank: number) => void;
   query: string;
   riskLevel: string;
   results: IssueRouterItem[];
@@ -134,7 +138,7 @@ export function IssueRouterWorkspace({
             </CardContent>
           </Card>
         ) : null}
-        {results.map((item) => {
+        {results.map((item, index) => {
           const relatedTools = tools.filter((tool) => item.tool_ids.includes(tool.id));
           return (
             <Card key={item.chunk_id} className="overflow-hidden">
@@ -172,6 +176,25 @@ export function IssueRouterWorkspace({
                     </div>
                   </div>
                 </div>
+                <div className="flex flex-wrap items-center gap-2 border-t pt-3">
+                  <Button className="h-8 rounded-full px-3" onClick={() => onSelectResult(item, index + 1)} size="sm" type="button" variant="outline">
+                    Mark as useful
+                  </Button>
+                  <span className="text-xs text-muted-foreground">Records router click for search quality metrics.</span>
+                </div>
+                <OperationalFeedbackButtons
+                  className="border-t pt-3"
+                  entityId={item.chunk_id}
+                  entityType="chunk"
+                  metadata={{
+                    source: "issue_router",
+                    target_sop_title: item.target_sop_title,
+                    relation_status: item.relation_status,
+                  }}
+                  sampleQuery={query}
+                  sourceTitle={item.collection}
+                  targetTitle={item.title}
+                />
               </CardContent>
             </Card>
           );

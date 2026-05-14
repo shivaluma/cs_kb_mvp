@@ -27,4 +27,6 @@ export const queryKeys = {
   issueRouter: (params: Record<string, string>) => ["issue-router", params] as const,
   tools: (collection: string) => ["tool-links", collection] as const,
   actionTemplates: (collection: string) => ["action-templates", collection] as const,
+  feedbackQueue: ["feedback-queue"] as const,
+  opsAnalytics: (windowDays: number) => ["ops-analytics", windowDays] as const,
 };

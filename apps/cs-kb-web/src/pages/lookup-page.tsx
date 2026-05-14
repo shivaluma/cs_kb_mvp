@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { RouteLoading } from "@/components/route-loading";
 import { defaultFilters } from "@/constants";
 import { useHomepage } from "@/hooks/api/homepage";
-import { useCollections } from "@/hooks/api/kb-index";
+import { useCollections, useRecordKBEvent } from "@/hooks/api/kb-index";
 import { useAISuggest, useSearch, useSearchFilterOptions, useSOP } from "@/hooks/api/search";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { compactFilters, optionizeFilterValues, toSearchResult } from "@/lib/format";
@@ -40,6 +40,8 @@ export function LookupPage() {
   const searchMutation = useSearch();
   const sopMutation = useSOP();
   const aiSuggestMutation = useAISuggest();
+  const eventMutation = useRecordKBEvent();
+  const [searchEventId, setSearchEventId] = useState("");
   const homepage = homepageQuery.data;
   const searchResults = hasSearchQuery ? (searchMutation.data?.results ?? []) : [];
   const semanticResults = hasSearchQuery ? (searchMutation.data?.semantic_results ?? []) : [];
@@ -133,6 +135,17 @@ export function LookupPage() {
       setParams({ chunk: "" });
       return;
     }
+    const nextSearchEventId = crypto.randomUUID();
+    setSearchEventId(nextSearchEventId);
+    eventMutation.mutate({
+      action: "sop_search",
+      entity_type: "search",
+      metadata: {
+        search_event_id: nextSearchEventId,
+        query: trimmedQuery,
+        filters: compactFilters(nextFilters),
+      },
+    });
     searchMutation.mutate(
       {
         query: trimmedQuery,
@@ -155,6 +168,17 @@ export function LookupPage() {
   function openSOP(id: string) {
     sopMutation.mutate(id, {
       onSuccess: (sop) => {
+        eventMutation.mutate({
+          action: "full_sop_open",
+          entity_type: "sop_version",
+          entity_id: sop.current_version_id,
+          metadata: {
+            search_event_id: searchEventId,
+            query,
+            sop_id: sop.id,
+            title: sop.title,
+          },
+        });
         setSelected(sop);
         setSelectedDocumentMatch(null);
         setParams({ chunk: "" });
@@ -174,6 +198,35 @@ export function LookupPage() {
   }
 
   function selectDocumentMatch(match: RetrievalResult) {
+    const rank = semanticResults.findIndex((result) => result.chunk_id === match.chunk_id) + 1;
+    const unitType = String(match.metadata.unit_type ?? match.section);
+    const scope = String(match.metadata.retrieval_scope ?? "unit");
+    const isFullSop = scope === "document" || unitType === "full_sop";
+    eventMutation.mutate({
+      action: "search_result_click",
+      entity_type: "chunk",
+      entity_id: match.chunk_id,
+      metadata: {
+        search_event_id: searchEventId,
+        query,
+        rank: rank > 0 ? rank : undefined,
+        target_title: match.heading || match.title,
+        document_title: match.title,
+        unit_type: unitType,
+      },
+    });
+    eventMutation.mutate({
+      action: isFullSop ? "full_sop_open" : "quick_answer_open",
+      entity_type: "chunk",
+      entity_id: match.chunk_id,
+      metadata: {
+        search_event_id: searchEventId,
+        query,
+        rank: rank > 0 ? rank : undefined,
+        target_title: match.heading || match.title,
+        document_title: match.title,
+      },
+    });
     setSelectedDocumentMatch(match);
     setSelected(null);
     sessionStorage.setItem("kb:selected-quick-source", JSON.stringify(match));
@@ -185,6 +238,15 @@ export function LookupPage() {
     setCopyError("");
     try {
       await navigator.clipboard.writeText(macro.content);
+      eventMutation.mutate({
+        action: "macro_copy",
+        entity_type: "macro",
+        metadata: {
+          search_event_id: searchEventId,
+          query,
+          target_title: macro.title,
+        },
+      });
       setCopied(macro.title);
       window.setTimeout(() => setCopied(""), 1800);
       reportNotice(`Copied macro: ${macro.title}.`);
@@ -218,6 +280,7 @@ export function LookupPage() {
         selectedDocumentMatch={selectedDocumentMatch}
         selectedVersion={selected?.current_version}
         semanticResults={semanticResults}
+        searchEventId={searchEventId}
         setQuery={setQuery}
       />
     </Suspense>

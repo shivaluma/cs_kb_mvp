@@ -1227,6 +1227,39 @@ class KBEventRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class FeedbackQueueItem(BaseModel):
+    key: str
+    entity_type: str
+    entity_id: str
+    target_title: str = ""
+    source_title: str = ""
+    feedback_type: str
+    feedback_label: str
+    count: int
+    last_seen: datetime
+    sample_query: str = ""
+    sample_comment: str = ""
+    suggested_action: str = ""
+    severity: str = "medium"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OpsAnalyticsMetric(BaseModel):
+    key: str
+    label: str
+    value: str
+    target: str = ""
+    detail: str = ""
+    tone: str = "default"
+
+
+class OpsAnalyticsResponse(BaseModel):
+    window_days: int
+    generated_at: datetime
+    events: dict[str, int] = Field(default_factory=dict)
+    metrics: list[OpsAnalyticsMetric] = Field(default_factory=list)
+
+
 class RetrievalRequest(BaseModel):
     query: str
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)

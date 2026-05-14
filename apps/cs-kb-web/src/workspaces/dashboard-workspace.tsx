@@ -9,6 +9,7 @@ import {
   IconGitPullRequest as GitPullRequest,
   IconDeviceDesktop as HardDrive,
   IconLayersIntersect as Layers3,
+  IconMessageReport as MessageReport,
   IconRefresh as RefreshCw,
   IconSearch as Search,
   IconServer as Server,
@@ -25,12 +26,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatDate } from "@/lib/format";
-import type { DocumentSummary, ServiceHealth, SystemHealth } from "@/types";
+import type { DocumentSummary, FeedbackQueueItem, OpsAnalyticsResponse, ServiceHealth, SystemHealth } from "@/types";
 import type { Workspace } from "@/constants";
 
 export function DashboardWorkspace({
   documents,
+  feedbackItems,
   isSystemHealthLoading,
+  opsAnalytics,
   onRunSearch,
   onWorkspaceChange,
   query,
@@ -39,7 +42,9 @@ export function DashboardWorkspace({
   systemHealth,
 }: {
   documents: DocumentSummary[];
+  feedbackItems: FeedbackQueueItem[];
   isSystemHealthLoading: boolean;
+  opsAnalytics?: OpsAnalyticsResponse;
   onRunSearch: () => void;
   onWorkspaceChange: (workspace: Workspace) => void;
   query: string;
@@ -109,14 +114,15 @@ export function DashboardWorkspace({
             <KpiCard icon={GitPullRequest} label="Review queue" tone={reviewDocuments.length ? "warning" : "default"} value={reviewDocuments.length} />
             <KpiCard icon={ShieldCheck} label="Published ready" value={publishedReadyDocuments.length} />
             <KpiCard icon={AlertTriangle} label="High-risk docs" tone={highRiskDocuments.length ? "warning" : "default"} value={highRiskDocuments.length} />
-            <KpiCard icon={FileClock} label="Indexing issues" tone={indexingIssueDocuments.length ? "warning" : "default"} value={indexingIssueDocuments.length} />
+            <KpiCard icon={MessageReport} label="Feedback groups" tone={feedbackItems.length ? "warning" : "default"} value={feedbackItems.length} />
           </div>
         </CardContent>
       </Card>
 
       <Tabs className="space-y-4" defaultValue="review">
-        <TabsList className="grid h-auto grid-cols-2 gap-1 md:inline-grid md:grid-cols-3">
+        <TabsList className="grid h-auto grid-cols-2 gap-1 md:inline-grid md:grid-cols-4">
           <TabsTrigger value="review">Review Queue</TabsTrigger>
+          <TabsTrigger value="usage">Usage Signals</TabsTrigger>
           <TabsTrigger value="health">Content Health</TabsTrigger>
           <TabsTrigger value="system">System Health</TabsTrigger>
         </TabsList>
@@ -128,6 +134,15 @@ export function DashboardWorkspace({
             highRiskDocuments={highRiskDocuments}
             onWorkspaceChange={onWorkspaceChange}
             reviewDocuments={reviewDocuments}
+          />
+        </TabsContent>
+
+        <TabsContent value="usage">
+          <UsageSignals
+            feedbackItems={feedbackItems}
+            indexingIssueDocuments={indexingIssueDocuments}
+            onWorkspaceChange={onWorkspaceChange}
+            opsAnalytics={opsAnalytics}
           />
         </TabsContent>
 
@@ -149,6 +164,89 @@ export function DashboardWorkspace({
           />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function UsageSignals({
+  feedbackItems,
+  indexingIssueDocuments,
+  onWorkspaceChange,
+  opsAnalytics,
+}: {
+  feedbackItems: FeedbackQueueItem[];
+  indexingIssueDocuments: DocumentSummary[];
+  onWorkspaceChange: (workspace: Workspace) => void;
+  opsAnalytics?: OpsAnalyticsResponse;
+}) {
+  const metrics = opsAnalytics?.metrics ?? [];
+  const eventCount = (key: string) => opsAnalytics?.events?.[key] ?? 0;
+  const highFeedback = feedbackItems.filter((item) => item.severity === "high");
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(22rem,0.85fr)]">
+      <section className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-4">
+          <KpiCard icon={Search} label="SOP searches" value={eventCount("sop_search")} />
+          <KpiCard icon={Sparkles} label="Chat messages" value={eventCount("chat_message_sent")} />
+          <KpiCard icon={MessageReport} label="Feedback reports" tone={feedbackItems.length ? "warning" : "default"} value={feedbackItems.reduce((sum, item) => sum + item.count, 0)} />
+          <KpiCard icon={FileClock} label="Indexing issues" tone={indexingIssueDocuments.length ? "warning" : "default"} value={indexingIssueDocuments.length} />
+        </div>
+
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>Adoption and retrieval quality</CardTitle>
+            <CardDescription>Practical signals for whether agents are replacing Excel/email with approved SOP lookup.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 pt-4 md:grid-cols-2">
+            {metrics.map((metric) => (
+              <div className="rounded-xl border bg-card p-3" key={metric.key}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold">{metric.label}</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{metric.detail}</p>
+                  </div>
+                  <Badge variant={metric.tone === "warning" ? "outline" : "secondary"}>{metric.value}</Badge>
+                </div>
+                {metric.target ? <p className="mt-2 text-[11px] text-muted-foreground">Target: {metric.target}</p> : null}
+              </div>
+            ))}
+            {!metrics.length ? (
+              <EmptyPanel icon={Search} title="No usage telemetry yet" text="Lookup, chat, feedback, macro, and tool events will populate this panel." compact />
+            ) : null}
+          </CardContent>
+        </Card>
+      </section>
+
+      <aside className="space-y-4">
+        <Card className="rounded-xl">
+          <CardHeader className="border-b pb-4">
+            <CardTitle>Feedback pressure</CardTitle>
+            <CardDescription>Highest-risk report groups from CS users.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-4">
+            {highFeedback.slice(0, 4).map((item) => (
+              <div className="rounded-xl border bg-card p-3" key={item.key}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold">{item.target_title || item.entity_id}</div>
+                    <p className="mt-1 text-xs text-muted-foreground">{item.feedback_label}, {item.count} report{item.count === 1 ? "" : "s"}</p>
+                  </div>
+                  <Badge variant="destructive">High</Badge>
+                </div>
+                <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{item.suggested_action}</p>
+              </div>
+            ))}
+            {highFeedback.length === 0 ? (
+              <EmptyPanel icon={MessageReport} title="No high-risk feedback" text="Wrong, outdated, missing-step, and bad-search reports will appear here." compact />
+            ) : null}
+            <Button className="w-full" onClick={() => onWorkspaceChange("feedback")} type="button" variant="outline">
+              Open feedback queue
+              <ArrowRight data-icon="inline-end" className="size-4" />
+            </Button>
+          </CardContent>
+        </Card>
+      </aside>
     </div>
   );
 }

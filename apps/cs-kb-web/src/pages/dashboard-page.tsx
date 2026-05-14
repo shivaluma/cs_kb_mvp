@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { RouteLoading } from "@/components/route-loading";
 import { workspacePaths, type Workspace } from "@/constants";
 import { useDocuments } from "@/hooks/api/documents";
+import { useFeedbackQueue, useOpsAnalytics } from "@/hooks/api/kb-index";
 import { useSystemHealth } from "@/hooks/api/system";
 import { useUrlSearch } from "@/hooks/use-url-search";
 
@@ -17,6 +18,8 @@ export function DashboardPage() {
   const query = getParam("q", "");
   const documentsQuery = useDocuments();
   const systemHealthQuery = useSystemHealth();
+  const feedbackQuery = useFeedbackQueue();
+  const analyticsQuery = useOpsAnalytics(7);
   const documents = [...(documentsQuery.data ?? [])].sort((left, right) => {
     if (left.status !== right.status) {
       return left.status === "active" ? -1 : 1;
@@ -44,6 +47,8 @@ export function DashboardPage() {
     <Suspense fallback={<RouteLoading label="Loading dashboard" />}>
       <DashboardWorkspace
         documents={documents}
+        feedbackItems={feedbackQuery.data ?? []}
+        opsAnalytics={analyticsQuery.data}
         isSystemHealthLoading={systemHealthQuery.isLoading}
         onRunSearch={runLookup}
         onWorkspaceChange={navigateWorkspace}

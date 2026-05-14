@@ -25,6 +25,7 @@ import {
 } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { OperationalFeedbackButtons } from "@/components/operational-feedback";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -668,6 +669,7 @@ function ChatBubble({
                               key={`${group.role}-${source.chunk_id}`}
                               onOpenDocument={onOpenDocument}
                               onOpenQuickSource={onOpenQuickSource}
+                              sampleQuery={response.question}
                               source={source}
                             />
                           ))}
@@ -773,10 +775,12 @@ function Warnings({ warnings }: { warnings: string[] }) {
 function SourceCard({
   onOpenDocument,
   onOpenQuickSource,
+  sampleQuery,
   source,
 }: {
   onOpenDocument: (source: RetrievalResult) => void;
   onOpenQuickSource: (source: RetrievalResult) => void;
+  sampleQuery: string;
   source: RetrievalResult;
 }) {
   const unitType = String(source.metadata.unit_type ?? source.section);
@@ -811,6 +815,21 @@ function SourceCard({
           Source
         </Button>
       </div>
+      <OperationalFeedbackButtons
+        className="mt-3 border-t pt-2"
+        entityId={source.chunk_id}
+        entityType="chunk"
+        metadata={{
+          source: "chat_source",
+          unit_type: unitType,
+          version_id: source.version_id,
+          document_id: source.document_id,
+          chat_source_role: role,
+        }}
+        sampleQuery={sampleQuery}
+        sourceTitle={source.title}
+        targetTitle={source.heading || source.title}
+      />
     </div>
   );
 }

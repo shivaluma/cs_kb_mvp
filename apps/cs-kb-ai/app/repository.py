@@ -2546,6 +2546,14 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str, force
         entity_id=version_id,
         metadata={"document_id": str(published["document_id"]), "version_number": published["version_number"], "publish_state": "published_indexing_pending"},
     )
+    audit_tx(
+        conn,
+        actor=actor,
+        action="publish_version",
+        entity_type="ai_document_version",
+        entity_id=version_id,
+        metadata={"document_id": str(published["document_id"]), "version_number": published["version_number"], "publish_state": "published_indexing_pending"},
+    )
     return dict(published)
 
 
@@ -2654,6 +2662,14 @@ def mark_version_indexing_result(
                     conn,
                     actor=actor,
                     action="publish_indexing_failed",
+                    entity_type="ai_document_version",
+                    entity_id=version_id,
+                    metadata={"document_id": str(row["document_id"]), "error": reason, "chunk_count": chunk_count},
+                )
+                audit_tx(
+                    conn,
+                    actor=actor,
+                    action="index_sync_failed",
                     entity_type="ai_document_version",
                     entity_id=version_id,
                     metadata={"document_id": str(row["document_id"]), "error": reason, "chunk_count": chunk_count},
@@ -3494,16 +3510,275 @@ def list_action_templates(status: str = "approved", collection: str = "") -> lis
 
 def record_kb_event(action: str, entity_type: str, entity_id: str | None, actor: str, metadata: dict[str, Any] | None = None) -> dict[str, str]:
     event_id = str(uuid.uuid4())
+    event_metadata = dict(metadata or {})
+    event_entity_id = entity_id if is_uuid_text(entity_id) else event_id
+    if entity_id and event_entity_id == event_id:
+        event_metadata["supplied_entity_id"] = entity_id
     with connection() as conn:
         audit_tx(
             conn,
             actor=actor or "system",
             action=action,
             entity_type=entity_type or "kb_index",
-            entity_id=entity_id or event_id,
-            metadata=metadata or {},
+            entity_id=event_entity_id,
+            metadata=event_metadata,
         )
     return {"id": event_id, "status": "recorded"}
+
+
+def is_uuid_text(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+FEEDBACK_LABELS = {
+    "outdated": "Outdated",
+    "wrong": "Wrong",
+    "missing_step": "Missing step",
+    "need_macro": "Need macro",
+    "hard_to_understand": "Hard to understand",
+    "search_result_wrong": "Search result wrong",
+}
+
+
+def list_feedback_queue(limit: int = 100) -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT id::text AS id,
+                   actor,
+                   entity_type,
+                   entity_id::text AS entity_id,
+                   metadata,
+                   created_at
+            FROM ai_audit_events
+            WHERE action = 'feedback_submitted'
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (max(1, min(int(limit or 100), 500)),),
+        ).fetchall()
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        feedback_type = str(metadata.get("feedback_type") or "wrong")
+        key = f"{row['entity_type']}:{row['entity_id']}:{feedback_type}"
+        item = grouped.get(key)
+        created_at = row["created_at"]
+        if not item:
+            item = {
+                "key": key,
+                "entity_type": str(row["entity_type"] or ""),
+                "entity_id": str(row["entity_id"] or ""),
+                "target_title": str(metadata.get("target_title") or metadata.get("title") or ""),
+                "source_title": str(metadata.get("source_title") or metadata.get("document_title") or ""),
+                "feedback_type": feedback_type,
+                "feedback_label": FEEDBACK_LABELS.get(feedback_type, feedback_type.replace("_", " ").title()),
+                "count": 0,
+                "last_seen": created_at,
+                "sample_query": "",
+                "sample_comment": "",
+                "suggested_action": suggested_feedback_action(feedback_type),
+                "severity": feedback_severity(feedback_type),
+                "metadata": {},
+            }
+            grouped[key] = item
+        item["count"] += 1
+        if created_at > item["last_seen"]:
+            item["last_seen"] = created_at
+        if not item["target_title"]:
+            item["target_title"] = str(metadata.get("target_title") or metadata.get("title") or "")
+        if not item["source_title"]:
+            item["source_title"] = str(metadata.get("source_title") or metadata.get("document_title") or "")
+        if not item["sample_query"]:
+            item["sample_query"] = str(metadata.get("sample_query") or metadata.get("query") or "")
+        if not item["sample_comment"]:
+            item["sample_comment"] = str(metadata.get("comment") or metadata.get("reason") or "")
+        item["metadata"] = {
+            "last_event_id": row["id"],
+            "last_actor": row["actor"],
+            "last_metadata": metadata,
+        }
+    severity_rank = {"high": 0, "medium": 1, "low": 2}
+    return sorted(
+        grouped.values(),
+        key=lambda item: (
+            severity_rank.get(str(item["severity"]), 3),
+            -int(item["count"]),
+            -item["last_seen"].timestamp(),
+        ),
+    )
+
+
+def ops_analytics(window_days: int = 7) -> dict[str, Any]:
+    window = max(1, min(int(window_days or 7), 90))
+    with connection() as conn:
+        conn.row_factory = dict_row
+        audit_rows = conn.execute(
+            """
+            SELECT actor,
+                   action,
+                   entity_type,
+                   entity_id::text AS entity_id,
+                   metadata,
+                   created_at
+            FROM ai_audit_events
+            WHERE created_at >= now() - (%s::text || ' days')::interval
+            ORDER BY created_at ASC
+            """,
+            (str(window),),
+        ).fetchall()
+        retrieval_rows = conn.execute(
+            """
+            SELECT query, filters, mode, result_count, latency_ms, created_at
+            FROM ai_retrieval_events
+            WHERE created_at >= now() - (%s::text || ' days')::interval
+            ORDER BY created_at ASC
+            """,
+            (str(window),),
+        ).fetchall()
+    action_counts: dict[str, int] = {}
+    actor_set = set()
+    clicked_ranks: list[float] = []
+    search_events: dict[str, datetime] = {}
+    useful_deltas_ms: list[float] = []
+    feedback_counts: dict[str, int] = {}
+    useful_actions = {"quick_answer_open", "action_template_copy", "macro_copy"}
+    click_actions = {"search_result_click", "quick_answer_open", "full_sop_open", "action_template_copy", "macro_copy"}
+    for row in audit_rows:
+        action = str(row["action"] or "")
+        metadata = row.get("metadata") or {}
+        action_counts[action] = action_counts.get(action, 0) + 1
+        actor = str(row["actor"] or "").strip()
+        if actor:
+            actor_set.add(actor)
+        if action == "sop_search":
+            event_id = str(metadata.get("search_event_id") or "")
+            if event_id:
+                search_events[event_id] = row["created_at"]
+        if action in click_actions:
+            rank = metadata.get("rank")
+            if isinstance(rank, (int, float)) and rank > 0:
+                clicked_ranks.append(float(rank))
+            event_id = str(metadata.get("search_event_id") or "")
+            started_at = search_events.get(event_id)
+            if started_at:
+                useful_deltas_ms.append(max(0, (row["created_at"] - started_at).total_seconds() * 1000))
+        if action == "feedback_submitted":
+            feedback_type = str(metadata.get("feedback_type") or "wrong")
+            feedback_counts[feedback_type] = feedback_counts.get(feedback_type, 0) + 1
+    retrieval_total = len(retrieval_rows)
+    retrieval_success = sum(1 for row in retrieval_rows if int(row.get("result_count") or 0) > 0)
+    zero_rate = round(((retrieval_total - retrieval_success) / retrieval_total) * 100) if retrieval_total else 0
+    success_rate = round((retrieval_success / retrieval_total) * 100) if retrieval_total else 0
+    avg_rank = sum(clicked_ranks) / len(clicked_ranks) if clicked_ranks else None
+    useful_sorted = sorted(useful_deltas_ms)
+    median_time_ms = median_from_sorted(useful_sorted)
+    quick_action_count = sum(action_counts.get(action, 0) for action in useful_actions)
+    wrong_outdated = feedback_counts.get("wrong", 0) + feedback_counts.get("outdated", 0) + feedback_counts.get("search_result_wrong", 0)
+    events = {
+        **action_counts,
+        "retrieval_total": retrieval_total,
+        "retrieval_success": retrieval_success,
+        "weekly_active_actors": len(actor_set),
+    }
+    return {
+        "window_days": window,
+        "generated_at": datetime.now(timezone.utc),
+        "events": events,
+        "metrics": [
+            {
+                "key": "median_time_to_useful_sop",
+                "label": "Median time to useful SOP",
+                "value": f"{median_time_ms / 1000:.1f}s" if median_time_ms is not None else "Not enough clicks",
+                "target": "<15s",
+                "detail": "Measured from SOP search to first quick answer, full SOP, macro, or action-template use when the UI can connect both events.",
+                "tone": "warning" if median_time_ms is not None and median_time_ms > 15000 else "default",
+            },
+            {
+                "key": "search_success_rate",
+                "label": "Search success rate",
+                "value": f"{success_rate}%",
+                "target": ">=85%",
+                "detail": f"{retrieval_success}/{retrieval_total} retrieval calls returned at least one approved result.",
+                "tone": "warning" if retrieval_total and success_rate < 85 else "default",
+            },
+            {
+                "key": "zero_result_rate",
+                "label": "Zero-result rate",
+                "value": f"{zero_rate}%",
+                "target": "<5-8%",
+                "detail": "Share of retrieval calls with no approved result.",
+                "tone": "warning" if retrieval_total and zero_rate > 8 else "default",
+            },
+            {
+                "key": "avg_clicked_rank",
+                "label": "Avg clicked rank",
+                "value": f"{avg_rank:.1f}" if avg_rank is not None else "No clicks yet",
+                "target": "<=3",
+                "detail": f"{len(clicked_ranks)} ranked click events recorded.",
+                "tone": "warning" if avg_rank is not None and avg_rank > 3 else "default",
+            },
+            {
+                "key": "weekly_active_cs",
+                "label": "Tracked active CS",
+                "value": str(len(actor_set)),
+                "target": ">=85% with auth",
+                "detail": "MVP has no real auth, so this is distinct event actors, not real headcount.",
+                "tone": "default",
+            },
+            {
+                "key": "quick_answer_action_usage",
+                "label": "Quick answer/action usage",
+                "value": str(quick_action_count),
+                "target": "Up week over week",
+                "detail": "Proxy north star: quick_answer_open + action_template_copy + macro_copy.",
+                "tone": "default",
+            },
+            {
+                "key": "wrong_outdated_reports",
+                "label": "Wrong/outdated reports",
+                "value": str(wrong_outdated),
+                "target": "Down month over month",
+                "detail": "Feedback that directly indicates policy trust or ranking problems.",
+                "tone": "warning" if wrong_outdated else "default",
+            },
+        ],
+    }
+
+
+def suggested_feedback_action(feedback_type: str) -> str:
+    return {
+        "outdated": "Create a draft version from the source SOP and verify owner/date before republish.",
+        "wrong": "Review the cited unit against the source file, then fix the unit or relation before agents rely on it.",
+        "missing_step": "Add the missing operational step to a draft version or attach the correct source evidence.",
+        "need_macro": "Create or link an approved macro/action template for this rule.",
+        "hard_to_understand": "Rewrite the unit into clearer CS handling language without changing policy meaning.",
+        "search_result_wrong": "Inspect query, clicked rank, collection metadata, synonyms, and retrieval title/content labels.",
+    }.get(feedback_type, "Review the source evidence and decide whether to draft an SOP update.")
+
+
+def feedback_severity(feedback_type: str) -> str:
+    if feedback_type in {"wrong", "outdated", "missing_step", "search_result_wrong"}:
+        return "high"
+    if feedback_type == "need_macro":
+        return "medium"
+    return "low"
+
+
+def median_from_sorted(values: list[float]) -> float | None:
+    if not values:
+        return None
+    midpoint = len(values) // 2
+    if len(values) % 2:
+        return values[midpoint]
+    return (values[midpoint - 1] + values[midpoint]) / 2
 
 
 def list_document_relations(status: str = "unresolved") -> list[dict[str, Any]]:
@@ -3687,6 +3962,15 @@ def create_document_relation(
                 entity_id=relation_id,
                 metadata={"status": status, "relation_type": relation_type, "source_document_id": source_document_id},
             )
+            if status == "unresolved":
+                audit_tx(
+                    conn,
+                    actor=pg_text(actor),
+                    action="unresolved_relation_created",
+                    entity_type="ai_document_relation",
+                    entity_id=relation_id,
+                    metadata={"relation_type": relation_type, "source_document_id": source_document_id, "target_title": target_title},
+                )
     return relation_by_id(relation_id)
 
 
@@ -3761,6 +4045,14 @@ def assign_document_relation(relation_id: str, target_document_id: str, actor: s
                 entity_id=relation_id,
                 metadata=dict(row),
             )
+            audit_tx(
+                conn,
+                actor=pg_text(actor),
+                action="relation_approved",
+                entity_type="ai_document_relation",
+                entity_id=relation_id,
+                metadata=dict(row),
+            )
     return relation_by_id(relation_id)
 
 
@@ -3790,6 +4082,14 @@ def reject_document_relation(relation_id: str, actor: str, rejection_reason: str
                 conn,
                 actor=pg_text(actor),
                 action="document_relation_reject",
+                entity_type="ai_document_relation",
+                entity_id=relation_id,
+                metadata=dict(row),
+            )
+            audit_tx(
+                conn,
+                actor=pg_text(actor),
+                action="relation_rejected",
                 entity_type="ai_document_relation",
                 entity_id=relation_id,
                 metadata=dict(row),

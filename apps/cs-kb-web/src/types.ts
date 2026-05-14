@@ -202,6 +202,39 @@ export type ChatSessionMessageResponse = {
   response: GroundedChatResponse;
 };
 
+export type FeedbackQueueItem = {
+  key: string;
+  entity_type: string;
+  entity_id: string;
+  target_title: string;
+  source_title: string;
+  feedback_type: string;
+  feedback_label: string;
+  count: number;
+  last_seen: string;
+  sample_query: string;
+  sample_comment: string;
+  suggested_action: string;
+  severity: "high" | "medium" | "low" | string;
+  metadata: Record<string, unknown>;
+};
+
+export type OpsAnalyticsMetric = {
+  key: string;
+  label: string;
+  value: string;
+  target: string;
+  detail: string;
+  tone: "default" | "warning" | string;
+};
+
+export type OpsAnalyticsResponse = {
+  window_days: number;
+  generated_at: string;
+  events: Record<string, number>;
+  metrics: OpsAnalyticsMetric[];
+};
+
 export type RetrievalResult = {
   document_id: string;
   version_id: string;

@@ -3,7 +3,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 
 import { RouteLoading } from "@/components/route-loading";
 import { defaultFilters, workspacePaths } from "@/constants";
-import { useCollections } from "@/hooks/api/kb-index";
+import { useCollections, useRecordKBEvent } from "@/hooks/api/kb-index";
 import {
   useChatModelRoutes,
   useChatSessionMessages,
@@ -45,6 +45,7 @@ export function ChatPage() {
   const createChatSessionMutation = useCreateChatSession();
   const updateChatSessionMutation = useUpdateChatSession();
   const createChatSessionMessageMutation = useCreateChatSessionMessage();
+  const eventMutation = useRecordKBEvent();
   const [activeSessionId, setActiveSessionId] = useState("");
   const chatSessionMessagesQuery = useChatSessionMessages(activeSessionId);
   const [messages, setMessages] = useState<ChatThreadMessage[]>([]);
@@ -152,6 +153,18 @@ export function ChatPage() {
       pending: true,
     };
     setMessages((current) => [...current, userMessage, pendingMessage]);
+    const chatEventId = crypto.randomUUID();
+    eventMutation.mutate({
+      action: "chat_message_sent",
+      entity_type: "chat_session",
+      entity_id: activeSessionId || undefined,
+      metadata: {
+        chat_event_id: chatEventId,
+        question: trimmed,
+        model_route: modelRoute,
+        filters: scopeFilters,
+      },
+    });
     try {
       const sessionId = await ensureSession();
       const chatResponse = await createChatSessionMessageMutation.mutateAsync({
@@ -163,6 +176,18 @@ export function ChatPage() {
       });
       setActiveSessionId(chatResponse.session.id);
       navigateToChatSession(navigate, chatResponse.session.id);
+      eventMutation.mutate({
+        action: "chat_answer_cited",
+        entity_type: "chat_session",
+        entity_id: chatResponse.session.id,
+        metadata: {
+          chat_event_id: chatEventId,
+          citation_count: chatResponse.response.citations.length,
+          source_chunk_ids: chatResponse.response.citations.map((citation) => citation.chunk_id),
+          confidence: chatResponse.response.confidence,
+          model_route: chatResponse.response.model_route,
+        },
+      });
       setMessages((current) =>
         current.map((message) =>
           message.id === pendingId
@@ -257,6 +282,17 @@ export function ChatPage() {
   }
 
   function openQuickSource(source: RetrievalResult) {
+    eventMutation.mutate({
+      action: "quick_answer_open",
+      entity_type: "chunk",
+      entity_id: source.chunk_id,
+      metadata: {
+        target_title: source.heading || source.title,
+        document_title: source.title,
+        unit_type: source.metadata.unit_type ?? source.section,
+        source: "chat_source",
+      },
+    });
     sessionStorage.setItem("kb:selected-quick-source", JSON.stringify(source));
     void navigate({
       to: workspacePaths.lookup,
@@ -265,6 +301,16 @@ export function ChatPage() {
   }
 
   function openDocumentSource(source: RetrievalResult) {
+    eventMutation.mutate({
+      action: "full_sop_open",
+      entity_type: "document_version",
+      entity_id: source.version_id,
+      metadata: {
+        target_title: source.title,
+        chunk_id: source.chunk_id,
+        source: "chat_source",
+      },
+    });
     void navigate({
       to: workspacePaths.documents,
       search: {
