@@ -31,10 +31,31 @@ class RepositoryGateTest(unittest.TestCase):
     def test_production_retrieval_requires_published_approved_structured_chunks(self) -> None:
         where_sql, params = repository.filter_sql(RetrievalFilters(status=["published"]))
         self.assertIn("d.current_version_id = v.id", where_sql)
+        self.assertIn("v.publish_state = 'published_ready'", where_sql)
         self.assertIn("COALESCE(c.metadata->>'review_status', '') = 'approved'", where_sql)
         self.assertIn("COALESCE(c.metadata->>'extraction_status', '') = ANY", where_sql)
         self.assertIn(["structured", "manually_curated"], params)
         self.assertIn("COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'", where_sql)
+
+    def test_policy_table_requires_structured_table_or_sheet_refs(self) -> None:
+        self.assertFalse(
+            repository.has_required_source_ref(
+                "policy_table",
+                {"source_refs": [{"source_type": "text", "line_start": 1, "line_end": 2}]},
+            )
+        )
+        self.assertTrue(
+            repository.has_required_source_ref(
+                "policy_table",
+                {"source_refs": [{"source_type": "docx_table", "table_index": 0, "row_index": 1, "column_names": ["Case", "Action"]}]},
+            )
+        )
+        self.assertTrue(
+            repository.has_required_source_ref(
+                "policy_table",
+                {"source_refs": [{"source_type": "excel", "sheet": "Rules", "row_start": 2, "row_end": 2}]},
+            )
+        )
 
     def test_effective_heading_sql_escapes_literal_percent_for_psycopg3(self) -> None:
         self.assertIn("|| '%%'", repository.EFFECTIVE_HEADING_SQL)

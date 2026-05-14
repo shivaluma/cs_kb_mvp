@@ -53,6 +53,7 @@ type aiChunkDocument struct {
 	Title         string         `json:"title"`
 	VersionNumber int            `json:"version_number"`
 	Status        string         `json:"status"`
+	PublishState  string         `json:"publish_state"`
 	DocumentType  string         `json:"document_type"`
 	ReviewStatus  string         `json:"review_status"`
 	ChunkIndex    int            `json:"chunk_index"`
@@ -556,7 +557,7 @@ func (s *Store) IndexAIDocument(ctx context.Context, payload map[string]any) err
 	if err := s.DeleteAIChunksFromMeili(ctx, documentID); err != nil {
 		s.logger.WarnContext(ctx, "delete existing AI chunks from meili failed", "document_id", documentID, "error", err)
 	}
-	if err := s.ensureMeiliIndex(ctx, "ai_documents", []string{"status", "vertical", "category", "tags", "case_reasons"}); err != nil {
+	if err := s.ensureMeiliIndex(ctx, "ai_documents", []string{"status", "publish_state", "vertical", "category", "tags", "case_reasons"}); err != nil {
 		return err
 	}
 	metadata, _ := payload["metadata"].(map[string]any)
@@ -567,6 +568,7 @@ func (s *Store) IndexAIDocument(ctx context.Context, payload map[string]any) err
 		"title":          payload["title"],
 		"version_number": payload["version_number"],
 		"status":         payload["status"],
+		"publish_state":  payload["publish_state"],
 		"document_type":  payload["document_type"],
 		"review_status":  payload["review_status"],
 		"chunk_count":    payload["chunk_count"],
@@ -598,7 +600,7 @@ func (s *Store) DeleteAIChunksFromMeili(ctx context.Context, documentID string) 
 	if documentID == "" {
 		return nil
 	}
-	_ = s.ensureMeiliIndex(ctx, "ai_chunks", []string{"document_id", "version_id", "status", "vertical", "category", "tags", "case_reasons"})
+	_ = s.ensureMeiliIndex(ctx, "ai_chunks", []string{"document_id", "version_id", "status", "publish_state", "vertical", "category", "tags", "case_reasons"})
 	payload := map[string]string{"filter": `document_id = "` + documentID + `"`}
 	return s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents/delete", payload, nil)
 }
@@ -651,6 +653,7 @@ func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metad
 			Title:         fmt.Sprint(payload["title"]),
 			VersionNumber: intFromAny(payload["version_number"]),
 			Status:        fmt.Sprint(payload["status"]),
+			PublishState:  fmt.Sprint(payload["publish_state"]),
 			DocumentType:  fmt.Sprint(payload["document_type"]),
 			ReviewStatus:  fmt.Sprint(payload["review_status"]),
 			Metadata:      chunkMetadata,
@@ -670,7 +673,7 @@ func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metad
 		s.logger.WarnContext(ctx, "AI chunks fetch returned no chunks", "document_id", documentID, "version_id", versionID)
 		return nil
 	}
-	if err := s.ensureMeiliIndex(ctx, "ai_chunks", []string{"document_id", "version_id", "status", "vertical", "category", "tags", "case_reasons"}); err != nil {
+	if err := s.ensureMeiliIndex(ctx, "ai_chunks", []string{"document_id", "version_id", "status", "publish_state", "vertical", "category", "tags", "case_reasons"}); err != nil {
 		return err
 	}
 	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents?primaryKey=chunk_id", docs, nil); err != nil {

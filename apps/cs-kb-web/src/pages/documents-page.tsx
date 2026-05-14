@@ -15,6 +15,7 @@ import {
   useExtractionUnits,
   usePublishReadiness,
   usePublishVersion,
+  useRetryVersionIndexing,
   useUpdateExtractionUnit,
   useUploadDocument,
   useUploadDocumentAsync,
@@ -67,6 +68,7 @@ export function DocumentsPage() {
   const uploadAsyncMutation = useUploadDocumentAsync();
   const metadataPreviewMutation = useDocumentMetadataPreview();
   const publishMutation = usePublishVersion();
+  const retryIndexingMutation = useRetryVersionIndexing();
   const bulkReviewMutation = useBulkReviewVersion();
   const createExtractionUnitMutation = useCreateExtractionUnit();
   const updateExtractionUnitMutation = useUpdateExtractionUnit();
@@ -284,8 +286,8 @@ export function DocumentsPage() {
           setParams({ version: versionId });
           reportNotice(
             force
-              ? "Version force published for MVP testing. Previous published version was archived and Meilisearch was updated."
-              : "Version published. Previous published version was archived and Meilisearch was updated.",
+              ? "Version force published for MVP testing. Indexing is being verified before agent visibility."
+              : "Version published. Indexing is being verified before agent visibility.",
           );
         },
         onError: () =>
@@ -294,6 +296,16 @@ export function DocumentsPage() {
               ? "Force publish failed. Confirm this is an editable draft version and retry."
               : "Publish blocked. Finish readiness checks first: full SOP, reviewed units, source refs, workflow graph, owner, effective date, and high-risk review SLA.",
           ),
+      },
+    );
+  }
+
+  function retryVersionIndexing(versionId: string) {
+    retryIndexingMutation.mutate(
+      { versionId, actor: "cs-ops-ui" },
+      {
+        onSuccess: () => reportNotice("Indexing retry started. Lookup and Chat will use this version after it reaches published_ready."),
+        onError: () => reportError("Indexing retry failed. Check AI service, Meilisearch, and chunk availability."),
       },
     );
   }
@@ -420,6 +432,7 @@ export function DocumentsPage() {
     uploadAsyncMutation.isPending ? "upload" :
     archiveDocumentMutation.isPending ? "archive-document" :
     publishMutation.isPending ? "publishing" :
+    retryIndexingMutation.isPending ? "indexing" :
     bulkReviewMutation.isPending ? "bulk-review" :
     createExtractionUnitMutation.isPending ? "create-unit" :
     "";
@@ -446,6 +459,7 @@ export function DocumentsPage() {
         onInspectVersion={(versionId) => setParams({ version: versionId })}
         onPublishVersion={publishVersion}
         onRefreshDocuments={() => void documentsQuery.refetch()}
+        onRetryIndexing={retryVersionIndexing}
         onSelectDocument={selectDocument}
         onUpdateExtractionUnit={updateExtractionUnit}
         onUpload={handleUpload}

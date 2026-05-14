@@ -26,7 +26,7 @@ export function RelationsPage() {
   const archiveRelationMutation = useArchiveRelation();
   const sourceDocuments = (documentsQuery.data ?? []).filter((document) => document.status === "active");
   const publishedDocuments = (documentsQuery.data ?? []).filter(
-    (document) => document.status === "active" && document.latest_version_status === "published",
+    (document) => document.status === "active" && document.latest_version_status === "published" && (document.latest_publish_state ?? "published_ready") === "published_ready",
   );
 
   function assignRelation(relation: DocumentRelation, targetDocumentId: string) {

@@ -241,6 +241,7 @@ export type DocumentSummary = {
   latest_version_id?: string;
   latest_version_number?: number;
   latest_version_status?: string;
+  latest_publish_state?: string;
   latest_document_type?: string;
   latest_review_status?: string;
   latest_extraction_confidence?: number;
@@ -330,6 +331,7 @@ export type VersionSummary = {
   document_id: string;
   version_number: number;
   status: string;
+  publish_state?: string;
   checksum: string;
   chunk_count: number;
   document_type?: string;
@@ -337,6 +339,9 @@ export type VersionSummary = {
   extraction_confidence?: number;
   change_summary: string;
   published_at?: string;
+  indexed_at?: string;
+  indexing_error?: string;
+  published_ready_at?: string;
   archived_at?: string;
   created_at: string;
 };
@@ -345,6 +350,10 @@ export type PublishReadiness = {
   ready: boolean;
   failure_count: number;
   failures: string[];
+  publish_state?: string;
+  index_visibility_ready?: boolean;
+  retryable_indexing_failure?: boolean;
+  indexing_error?: string;
 };
 
 export type ExtractionUnit = {

@@ -54,8 +54,12 @@ export function DashboardWorkspace({
       document.latest_version_status !== "published",
   );
   const publishedDocuments = activeDocuments.filter((document) => document.latest_version_status === "published");
+  const publishedReadyDocuments = publishedDocuments.filter((document) => (document.latest_publish_state ?? "published_ready") === "published_ready");
+  const indexingIssueDocuments = publishedDocuments.filter((document) =>
+    ["published_indexing_failed", "published_indexing_pending", "publishing"].includes(document.latest_publish_state ?? ""),
+  );
   const highRiskDocuments = activeDocuments.filter(isHighRiskDocument);
-  const overdueReviewDocuments = publishedDocuments.filter(isReviewOverdueDocument);
+  const overdueReviewDocuments = publishedReadyDocuments.filter(isReviewOverdueDocument);
   const staleDocuments = activeDocuments.filter(isStaleDocument);
   const aiReviewDocuments = activeDocuments.filter((document) => document.latest_review_status !== "approved");
 
@@ -103,9 +107,9 @@ export function DashboardWorkspace({
         <CardContent className="pt-4">
           <div className="grid gap-3 md:grid-cols-4">
             <KpiCard icon={GitPullRequest} label="Review queue" tone={reviewDocuments.length ? "warning" : "default"} value={reviewDocuments.length} />
-            <KpiCard icon={ShieldCheck} label="Published docs" value={publishedDocuments.length} />
+            <KpiCard icon={ShieldCheck} label="Published ready" value={publishedReadyDocuments.length} />
             <KpiCard icon={AlertTriangle} label="High-risk docs" tone={highRiskDocuments.length ? "warning" : "default"} value={highRiskDocuments.length} />
-            <KpiCard icon={FileClock} label="Stale docs" tone={staleDocuments.length ? "warning" : "default"} value={staleDocuments.length} />
+            <KpiCard icon={FileClock} label="Indexing issues" tone={indexingIssueDocuments.length ? "warning" : "default"} value={indexingIssueDocuments.length} />
           </div>
         </CardContent>
       </Card>

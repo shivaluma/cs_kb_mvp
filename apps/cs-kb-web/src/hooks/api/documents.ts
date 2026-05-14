@@ -145,6 +145,21 @@ export function usePublishVersion() {
   });
 }
 
+export function useRetryVersionIndexing() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { versionId: string; actor: string }) =>
+      apiPost(`/api/v1/ai/versions/${payload.versionId}/retry-indexing`, {
+        actor: payload.actor,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.documents });
+      queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
+      queryClient.invalidateQueries({ queryKey: ["ai-publish-readiness"] });
+    },
+  });
+}
+
 export function useBulkReviewVersion() {
   const queryClient = useQueryClient();
   return useMutation({

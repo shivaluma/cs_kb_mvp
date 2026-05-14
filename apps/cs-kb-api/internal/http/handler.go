@@ -75,6 +75,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ai/extraction-units/{id}", h.proxyAIExtractionUnitUpdate)
 	mux.HandleFunc("POST /api/v1/ai/documents/{id}/archive", h.proxyAIDocumentArchive)
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/publish", h.proxyAIVersionPublish)
+	mux.HandleFunc("POST /api/v1/ai/versions/{id}/retry-indexing", h.proxyAIVersionRetryIndexing)
 	mux.HandleFunc("GET /api/v1/ai/versions/{id}/publish-readiness", h.proxyAIVersionPublishReadiness)
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/bulk-review", h.proxyAIVersionBulkReview)
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/extraction-units", h.proxyAIVersionExtractionUnitCreate)
@@ -425,7 +426,8 @@ func (h *Handler) proxyAIDocumentUpload(w http.ResponseWriter, r *http.Request) 
 		var payload map[string]any
 		if json.Unmarshal(body, &payload) == nil {
 			if payload["status"] == "published" {
-				_ = h.store.IndexAIDocument(ctx, payload)
+				versionID, _ := payload["version_id"].(string)
+				h.syncAIVersionIndexing(ctx, versionID, payload)
 			}
 		}
 	})(w, r)
@@ -456,13 +458,84 @@ func (h *Handler) proxyAIVersionPublish(w http.ResponseWriter, r *http.Request) 
 		}
 		var payload map[string]any
 		if json.Unmarshal(body, &payload) == nil {
-			_ = h.store.IndexAIDocument(ctx, payload)
+			h.syncAIVersionIndexing(ctx, r.PathValue("id"), payload)
+		}
+	})(w, r)
+}
+
+func (h *Handler) proxyAIVersionRetryIndexing(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithBody("/ai/v1/versions/"+r.PathValue("id")+"/retry-indexing", 45*time.Second, func(ctx context.Context, status int, body []byte) {
+		if status < 200 || status >= 300 {
+			return
+		}
+		var payload map[string]any
+		if json.Unmarshal(body, &payload) == nil {
+			h.syncAIVersionIndexing(ctx, r.PathValue("id"), payload)
 		}
 	})(w, r)
 }
 
 func (h *Handler) proxyAIVersionPublishReadiness(w http.ResponseWriter, r *http.Request) {
 	h.proxyAI("/ai/v1/versions/"+r.PathValue("id")+"/publish-readiness")(w, r)
+}
+
+func (h *Handler) syncAIVersionIndexing(ctx context.Context, versionID string, payload map[string]any) {
+	if versionID == "" {
+		h.logger.WarnContext(ctx, "AI version indexing skipped: missing version id")
+		return
+	}
+	indexPayload := make(map[string]any, len(payload)+1)
+	for key, value := range payload {
+		indexPayload[key] = value
+	}
+	indexPayload["publish_state"] = "published_ready"
+	err := h.store.IndexAIDocument(ctx, indexPayload)
+	result := map[string]any{
+		"actor":                 "api-gateway",
+		"success":               err == nil,
+		"lexical_index_synced":  err == nil,
+		"vector_index_verified": err == nil,
+		"error":                 "",
+	}
+	if err != nil {
+		result["error"] = err.Error()
+		h.logger.ErrorContext(ctx, "AI version indexing failed", "version_id", versionID, "error", err)
+	}
+	if markErr := h.postAIIndexingResult(ctx, versionID, result); markErr != nil {
+		h.logger.ErrorContext(ctx, "AI indexing result update failed", "version_id", versionID, "error", markErr)
+	}
+}
+
+func (h *Handler) postAIIndexingResult(ctx context.Context, versionID string, payload map[string]any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	target := strings.TrimRight(h.cfg.AIBaseURL, "/") + "/ai/v1/versions/" + versionID + "/indexing-result"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return &proxyStatusError{status: resp.StatusCode, body: string(data)}
+	}
+	return nil
+}
+
+type proxyStatusError struct {
+	status int
+	body   string
+}
+
+func (e *proxyStatusError) Error() string {
+	return strings.TrimSpace(e.body)
 }
 
 func (h *Handler) proxyAIVersionBulkReview(w http.ResponseWriter, r *http.Request) {

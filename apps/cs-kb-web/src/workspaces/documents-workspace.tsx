@@ -122,6 +122,7 @@ export function DocumentsWorkspace({
   onFileSelected,
   onPublishVersion,
   onRefreshDocuments,
+  onRetryIndexing,
   onSelectDocument,
   onUpdateExtractionUnit,
   onUpload,
@@ -156,6 +157,7 @@ export function DocumentsWorkspace({
   onFileSelected: (file: File | null) => void;
   onPublishVersion: (versionId: string, force?: boolean) => void;
   onRefreshDocuments: () => void;
+  onRetryIndexing: (versionId: string) => void;
   onSelectDocument: (documentId: string) => void;
   onUpload: () => void;
   metadataPreview: DocumentMetadataPreview | null;
@@ -1405,6 +1407,10 @@ export function DocumentsWorkspace({
                   {versions.map((version) => {
                     const isInspectedVersion = selectedChunkVersionId === version.version_id;
                     const versionArchived = version.status === "archived";
+                    const publishState = version.publish_state ?? (version.status === "published" ? "published_ready" : version.status);
+                    const indexingFailed = publishState === "published_indexing_failed";
+                    const indexingPending = publishState === "publishing" || publishState === "published_indexing_pending";
+                    const publishedReady = publishState === "published_ready";
                     const backendPublishChecking = isInspectedVersion && publishReadinessLoading;
                     const backendPublishBlocked = isInspectedVersion && publishReadiness?.ready === false;
                     const publishBlocked = selectedIsArchived || versionArchived || !isInspectedVersion || !readinessPassed || backendPublishChecking || backendPublishBlocked;
@@ -1429,6 +1435,7 @@ export function DocumentsWorkspace({
                           <div className="flex flex-wrap items-center gap-2">
                             <Badge variant="secondary">v{version.version_number}</Badge>
                             <StatusBadge status={version.status} />
+                            <Badge variant={indexingFailed ? "destructive" : publishedReady ? "secondary" : "outline"}>{publishState}</Badge>
                             <Badge variant="outline">{version.review_status ?? "needs_review"}</Badge>
                           </div>
                           <p className="mt-2 text-sm font-medium">{version.change_summary || "No change summary"}</p>
@@ -1496,8 +1503,21 @@ export function DocumentsWorkspace({
                                     : "Force publish"}
                             </Button>
                           </div>
+                        ) : indexingFailed ? (
+                          <Button
+                            data-testid={`version-${version.version_id}-retry-indexing`}
+                            disabled={busyKey === "indexing"}
+                            onClick={() => onRetryIndexing(version.version_id)}
+                            size="sm"
+                            type="button"
+                            variant="outline"
+                          >
+                            Retry indexing
+                          </Button>
+                        ) : indexingPending ? (
+                          <Badge variant="outline">indexing</Badge>
                         ) : (
-                          <Badge variant="secondary">indexed</Badge>
+                          <Badge variant="secondary">published_ready</Badge>
                         )}
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2">
@@ -1509,7 +1529,7 @@ export function DocumentsWorkspace({
                         >
                           Inspect version
                         </Button>
-                        {version.status === "published" ? (
+                        {version.status === "published" && publishedReady ? (
                           <>
                             <Button asChild size="sm" type="button" variant="outline">
                               <a href={`${workspacePaths.lookup}?q=${encodeURIComponent(selectedDocumentTitle)}`}>
@@ -1526,9 +1546,20 @@ export function DocumentsWorkspace({
                           </>
                         ) : null}
                       </div>
-                      {version.status === "published" ? (
+                      {version.status === "published" && publishedReady ? (
                         <p className="mt-2 text-xs leading-5 text-muted-foreground">
                           This version is live. Test it from the same Lookup and SOP Chat surfaces agents will use.
+                        </p>
+                      ) : version.status === "published" && indexingFailed ? (
+                        <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                          <p className="text-xs leading-5 text-destructive">
+                            Indexing failed, so Lookup and SOP Chat will not use this version yet. Retry after checking Meilisearch and AI chunk availability.
+                          </p>
+                          {version.indexing_error ? <p className="mt-1 text-xs leading-5 text-muted-foreground">{version.indexing_error}</p> : null}
+                        </div>
+                      ) : version.status === "published" && indexingPending ? (
+                        <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                          This version is published in DB but still waiting for search/vector visibility confirmation.
                         </p>
                       ) : publishBlocked ? (
                         <div className="mt-3 rounded-lg border bg-muted/15 p-3">

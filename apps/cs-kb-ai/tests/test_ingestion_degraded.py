@@ -297,6 +297,8 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertIn("Call In App, Non-voice In App", targets)
         self.assertIn("Xác minh tài khoản kênh hotline.xlsx", targets)
         self.assertTrue(all(relation.get("source_url", "").startswith("https://") for chunk in related_rows for relation in chunk["metadata"]["related_documents"]))
+        self.assertTrue(any(chunk["metadata"].get("hyperlinks") for chunk in related_rows))
+        self.assertTrue(all("cell_text" in link for chunk in related_rows for link in chunk["metadata"].get("hyperlinks", [])))
 
     def test_successful_ai_spreadsheet_structuring_keeps_related_document_units(self) -> None:
         def fake_rule_extractor(_filename: str, _raw_text: str):
@@ -433,6 +435,8 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         befood_rule = next(chunk for chunk in chunks if chunk["heading"] == "beFood - Bồi hoàn liên quan món ăn")
         self.assertEqual(befood_rule["metadata"]["source_ref_quality"], "table_row")
         self.assertEqual(befood_rule["metadata"]["source_refs"][0]["source_type"], "docx_table")
+        self.assertIn("cell_text", befood_rule["metadata"]["source_refs"][0])
+        self.assertIn("source_cell_text", befood_rule["metadata"])
         self.assertEqual(befood_rule["metadata"]["rounding_threshold"], 500)
         self.assertEqual(len(befood_rule["metadata"]["examples"]), 3)
         self.assertIn("10,450đ -> 10,000đ", befood_rule["content"])

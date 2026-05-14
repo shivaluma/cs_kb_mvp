@@ -43,6 +43,7 @@ from app.schemas import (
     ArchiveRelationRequest,
     ActionTemplateSummary,
     IssueRouterItem,
+    IndexingResultRequest,
     IndexSOPVersionRequest,
     KBCollectionDetail,
     KBCollectionSummary,
@@ -905,6 +906,34 @@ def publish_version(version_id: str, payload: PublishVersionRequest | None = Non
     try:
         data = payload or PublishVersionRequest()
         return repository.publish_version(version_id, data.actor, data.force)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/versions/{version_id}/retry-indexing")
+def retry_version_indexing(version_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        actor = str((payload or {}).get("actor") or "api-gateway")
+        return repository.prepare_version_indexing_retry(version_id, actor)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/versions/{version_id}/indexing-result")
+def mark_version_indexing_result(version_id: str, payload: IndexingResultRequest) -> dict[str, Any]:
+    try:
+        return repository.mark_version_indexing_result(
+            version_id,
+            actor=payload.actor,
+            success=payload.success,
+            lexical_index_synced=payload.lexical_index_synced,
+            vector_index_verified=payload.vector_index_verified,
+            error=payload.error,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

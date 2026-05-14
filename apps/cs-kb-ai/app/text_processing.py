@@ -286,21 +286,23 @@ def extract_docx_structure(data: bytes) -> tuple[str, list[dict[str, Any]], list
             row_payload = {
                 "row_index": row_index,
                 "cells": cells,
+                "cell_text": row_text,
                 "values": values,
                 "text": row_text,
             }
             rows.append(row_payload)
             blocks.append(
-                {
-                    "type": "docx_table_row",
-                    "index": len(blocks),
-                    "table_index": table_index,
-                    "row_index": row_index,
-                    "columns": columns,
-                    "cells": cells,
-                    "values": values,
-                    "text": row_text,
-                }
+                    {
+                        "type": "docx_table_row",
+                        "index": len(blocks),
+                        "table_index": table_index,
+                        "row_index": row_index,
+                        "columns": columns,
+                        "cells": cells,
+                        "cell_text": row_text,
+                        "values": values,
+                        "text": row_text,
+                    }
             )
             raw_lines.append(row_text)
         if columns:
@@ -523,6 +525,7 @@ def spreadsheet_chunk(
     resolved_heading = heading or (context[-1] if context else f"{sheet_name} dòng {row_number}")
     rule_id = f"{slugify(sheet_name) or 'sheet'}_row_{row_number}"
     related_documents = spreadsheet_related_documents_from_row(values or [], headers or [], resolved_heading)
+    hyperlinks = spreadsheet_hyperlinks_from_row(values or [], headers or [])
     related_metadata = {"related_documents": related_documents} if related_documents else {}
     return Chunk(
         chunk_index=index,
@@ -535,6 +538,7 @@ def spreadsheet_chunk(
             "row_number": row_number,
             "headers": headers or [],
             "row_values": values or [],
+            "hyperlinks": hyperlinks,
             "source_type": "spreadsheet",
             "unit_type": "table_row",
             "rule_id": rule_id,
@@ -650,6 +654,27 @@ def spreadsheet_related_documents_from_row(values: list[str], headers: list[str]
                     "source_header": header,
                     "source_value": value[:500],
                     "relation_source": "spreadsheet_hyperlink",
+                }
+            )
+    return output
+
+
+def spreadsheet_hyperlinks_from_row(values: list[str], headers: list[str]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values):
+        for url in URL_RE.findall(value or ""):
+            if url in seen:
+                continue
+            seen.add(url)
+            header = headers[index] if index < len(headers) and headers[index] else f"Column {index + 1}"
+            label = link_label_from_value(value) or header
+            output.append(
+                {
+                    "url": url,
+                    "label": label[:300],
+                    "column_name": header,
+                    "cell_text": value[:1000],
                 }
             )
     return output

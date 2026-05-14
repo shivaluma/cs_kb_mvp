@@ -32,6 +32,7 @@ from app.text_processing import (
     is_docx_file,
     is_spreadsheet_file,
     render_pdf_pages_as_data_urls,
+    spreadsheet_hyperlinks_from_row,
     spreadsheet_related_documents_from_row,
     spreadsheet_rows,
     tokenize,
@@ -656,7 +657,8 @@ def docx_policy_row_chunk(
     raw_notes, parsed_examples = extract_note_and_examples(note_text)
     examples = [] if no_apply else parsed_examples
     unit_type = "exception_rule" if no_apply else "policy_rule"
-    source_ref = docx_table_source_ref(filename, table_index, row_index, columns)
+    cell_text = str(row.get("cell_text") or row.get("text") or "")
+    source_ref = docx_table_source_ref(filename, table_index, row_index, columns, cell_text=cell_text)
     title = " - ".join(part for part in [service, case_name] if part).strip() or f"Dòng {row_index}"
     content = policy_row_content(
         service=service,
@@ -692,6 +694,7 @@ def docx_policy_row_chunk(
         "source_table_index": table_index,
         "source_row_index": row_index,
         "source_columns": columns,
+        "source_cell_text": cell_text,
         "source_refs": [source_ref],
         "source_ref_quality": "table_row",
         "source_ref_acknowledged": True,
@@ -751,6 +754,7 @@ def spreadsheet_related_document_chunks(filename: str, raw_context: dict[str, An
                         "target_title": target_title,
                         "relation_type": str(relation.get("relation_type") or "references"),
                         "related_documents": [relation],
+                        "hyperlinks": metadata.get("hyperlinks", []),
                         "source_url": source_url,
                         "source_type": "spreadsheet",
                         "source_filename": filename,
@@ -1553,13 +1557,14 @@ def value_by_header(values: dict[str, Any], columns: list[str], candidates: list
     return ""
 
 
-def docx_table_source_ref(filename: str, table_index: int, row_index: int, columns: list[str]) -> dict[str, Any]:
+def docx_table_source_ref(filename: str, table_index: int, row_index: int, columns: list[str], cell_text: str = "") -> dict[str, Any]:
     return {
         "source_type": "docx_table",
         "source_file": filename,
         "table_index": table_index,
         "row_index": row_index,
         "column_names": columns,
+        **({"cell_text": cell_text[:1000]} if cell_text else {}),
     }
 
 
@@ -2366,6 +2371,7 @@ def build_degraded_spreadsheet_draft(filename: str, raw_text: str, blocks: list[
             if not content:
                 continue
             related_documents = spreadsheet_related_documents_from_row(values, headers, sheet_name)
+            hyperlinks = spreadsheet_hyperlinks_from_row(values, headers)
             chunks.append(
                 degraded_chunk(
                     len(chunks),
@@ -2384,6 +2390,7 @@ def build_degraded_spreadsheet_draft(filename: str, raw_text: str, blocks: list[
                         "source_ref_quality": "sheet_row",
                         "source_ref_acknowledged": True,
                         **({"related_documents": related_documents} if related_documents else {}),
+                        **({"hyperlinks": hyperlinks} if hyperlinks else {}),
                         "source_refs": [{"source_type": "excel", "source_file": filename, "sheet": sheet_name, "row_start": row_number, "row_end": row_number, "column_names": headers}],
                     },
                     classification,

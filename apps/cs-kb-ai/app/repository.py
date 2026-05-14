@@ -236,6 +236,38 @@ def ensure_schema() -> None:
         conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS document_type text NOT NULL DEFAULT 'unknown'")
         conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS review_status text NOT NULL DEFAULT 'needs_review'")
         conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS extraction_confidence numeric NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS publish_state text NOT NULL DEFAULT 'draft'")
+        conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS indexed_at timestamptz")
+        conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS indexing_error text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE ai_document_versions ADD COLUMN IF NOT EXISTS published_ready_at timestamptz")
+        conn.execute(
+            """
+            UPDATE ai_document_versions
+            SET publish_state = CASE
+              WHEN status = 'archived' THEN 'archived'
+              WHEN status = 'published' AND publish_state IN ('draft', '') THEN 'published_ready'
+              WHEN status = 'draft' AND publish_state IN ('published_ready', 'published_indexing_pending', 'published_indexing_failed', 'publishing') THEN 'draft'
+              ELSE publish_state
+            END,
+                indexed_at = CASE
+                  WHEN status = 'published' AND publish_state = 'published_ready' THEN COALESCE(indexed_at, published_at, now())
+                  ELSE indexed_at
+                END,
+                published_ready_at = CASE
+                  WHEN status = 'published' AND publish_state = 'published_ready' THEN COALESCE(published_ready_at, published_at, now())
+                  ELSE published_ready_at
+                END
+            """
+        )
+        conn.execute(
+            """
+            UPDATE ai_document_versions
+            SET indexed_at = COALESCE(indexed_at, published_at, now()),
+                published_ready_at = COALESCE(published_ready_at, published_at, now()),
+                indexing_error = ''
+            WHERE status = 'published' AND publish_state = 'published_ready'
+            """
+        )
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS ai_chunks (
@@ -726,9 +758,9 @@ def create_document_version(
                 INSERT INTO ai_document_versions (
                   id, document_id, version_number, status, checksum, change_summary, raw_text,
                   chunk_count, document_type, review_status, extraction_confidence,
-                  created_by, approved_by, effective_from, published_at
+                  created_by, approved_by, effective_from, published_at, publish_state
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), CASE WHEN %s = 'published' THEN now() ELSE NULL END)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), CASE WHEN %s = 'published' THEN now() ELSE NULL END, %s)
                 """,
                 (
                     version_id,
@@ -745,6 +777,7 @@ def create_document_version(
                     clean_created_by,
                     clean_created_by if status == "published" else None,
                     status,
+                    "published_indexing_pending" if status == "published" else "draft",
                 ),
             )
 
@@ -807,12 +840,16 @@ def create_document_version(
         "title": clean_title,
         "version_number": int(next_version),
         "status": status,
+        "publish_state": "published_indexing_pending" if status == "published" else "draft",
         "chunk_count": len(chunks),
         "checksum": checksum,
         "document_type": clean_document_type,
         "review_status": "approved" if status == "published" else clean_review_status,
         "extraction_confidence": extraction_confidence,
         "metadata": metadata.model_dump(),
+        "indexed_at": None,
+        "indexing_error": "",
+        "published_ready_at": None,
     }
 
 
@@ -1054,6 +1091,7 @@ def exact_relation_target_tx(conn: Connection[Any], normalized_target_title: str
         JOIN ai_document_versions v ON v.id = d.current_version_id
         WHERE d.status = 'active'
           AND v.status = 'published'
+          AND v.publish_state = 'published_ready'
           AND d.id::text <> %s
         """,
         (source_document_id,),
@@ -1595,6 +1633,19 @@ def publish_version(version_id: str, actor: str, force: bool = False) -> dict[st
 
 def publish_readiness(version_id: str) -> dict[str, Any]:
     with connection() as conn:
+        conn.row_factory = dict_row
+        version_row = conn.execute(
+            """
+            SELECT status,
+                   publish_state,
+                   COALESCE(indexing_error, '') AS indexing_error
+            FROM ai_document_versions
+            WHERE id = %s
+            """,
+            (version_id,),
+        ).fetchone()
+        if not version_row:
+            raise LookupError("version_not_found")
         try:
             validate_publish_readiness_tx(conn, version_id)
         except ValueError as exc:
@@ -1610,11 +1661,19 @@ def publish_readiness(version_id: str) -> dict[str, Any]:
                 "ready": False,
                 "failure_count": len(failures),
                 "failures": failures,
+                "publish_state": version_row["publish_state"],
+                "index_visibility_ready": version_row["status"] == "published" and version_row["publish_state"] == "published_ready",
+                "retryable_indexing_failure": version_row["publish_state"] == "published_indexing_failed",
+                "indexing_error": version_row["indexing_error"],
             }
         return {
             "ready": True,
             "failure_count": 0,
             "failures": [],
+            "publish_state": version_row["publish_state"],
+            "index_visibility_ready": version_row["status"] == "published" and version_row["publish_state"] == "published_ready",
+            "retryable_indexing_failure": version_row["publish_state"] == "published_indexing_failed",
+            "indexing_error": version_row["indexing_error"],
         }
 
 
@@ -1623,7 +1682,15 @@ def has_required_source_ref(document_type: str, metadata: dict[str, Any]) -> boo
     if not isinstance(refs, list):
         refs = []
     if document_type == "policy_table":
-        return bool(metadata.get("source_sheet")) or any(isinstance(ref, dict) and ref.get("sheet") for ref in refs)
+        return bool(metadata.get("source_sheet")) or any(
+            isinstance(ref, dict)
+            and (
+                ref.get("sheet")
+                or (ref.get("source_type") == "docx_table" and ref.get("table_index") is not None and ref.get("row_index") is not None)
+                or (ref.get("table_index") is not None and ref.get("row_index") is not None)
+            )
+            for ref in refs
+        )
     if document_type == "kb_index_workbook":
         return any(isinstance(ref, dict) and ref.get("sheet") and (ref.get("row_start") or ref.get("row_end")) for ref in refs)
     if document_type == "workflow_diagram":
@@ -2328,18 +2395,59 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str, force
     conn.execute(
         """
         UPDATE ai_document_versions
-        SET status = 'archived', archived_at = now()
+        SET publish_state = 'publishing',
+            indexing_error = ''
+        WHERE id = %s
+        """,
+        (version_id,),
+    )
+    audit_tx(
+        conn,
+        actor=actor,
+        action="version_publishing_started",
+        entity_type="ai_document_version",
+        entity_id=version_id,
+        metadata={"document_id": str(row["document_id"]), "force": force, "version_number": row["version_number"]},
+    )
+
+    previous_versions = conn.execute(
+        """
+        SELECT id::text AS version_id, version_number
+        FROM ai_document_versions
+        WHERE document_id = %s AND status = 'published' AND id <> %s
+        """,
+        (row["document_id"], version_id),
+    ).fetchall()
+    conn.execute(
+        """
+        UPDATE ai_document_versions
+        SET status = 'archived',
+            publish_state = 'archived',
+            archived_at = now()
         WHERE document_id = %s AND status = 'published' AND id <> %s
         """,
         (row["document_id"], version_id),
     )
+    for previous in previous_versions:
+        audit_tx(
+            conn,
+            actor=actor,
+            action="previous_version_archived",
+            entity_type="ai_document_version",
+            entity_id=str(previous["version_id"]),
+            metadata={"document_id": str(row["document_id"]), "published_version_id": version_id, "version_number": previous["version_number"]},
+        )
     conn.execute(
         """
         UPDATE ai_document_versions
         SET status = 'published',
+            publish_state = 'published_indexing_pending',
             review_status = 'approved',
             approved_by = %s,
             published_at = COALESCE(published_at, now()),
+            indexed_at = NULL,
+            indexing_error = '',
+            published_ready_at = NULL,
             archived_at = NULL
         WHERE id = %s
         """,
@@ -2357,11 +2465,15 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str, force
                d.title,
                v.version_number,
                v.status,
+               v.publish_state,
                v.checksum,
                v.chunk_count,
                v.document_type,
                v.review_status,
                v.extraction_confidence::float AS extraction_confidence,
+               v.indexed_at,
+               COALESCE(v.indexing_error, '') AS indexing_error,
+               v.published_ready_at,
                d.metadata
         FROM ai_document_versions v
         JOIN ai_documents d ON d.id = v.document_id
@@ -2426,7 +2538,160 @@ def publish_version_tx(conn: Connection[Any], version_id: str, actor: str, force
         materialize_kb_index_version_tx(conn, str(published["document_id"]), version_id, actor)
     else:
         materialize_collection_items_for_version_tx(conn, str(published["document_id"]), version_id, actor, source="manual")
+    audit_tx(
+        conn,
+        actor=actor,
+        action="version_published",
+        entity_type="ai_document_version",
+        entity_id=version_id,
+        metadata={"document_id": str(published["document_id"]), "version_number": published["version_number"], "publish_state": "published_indexing_pending"},
+    )
     return dict(published)
+
+
+def prepare_version_indexing_retry(version_id: str, actor: str = "api-gateway") -> dict[str, Any]:
+    with connection() as conn:
+        with conn.transaction():
+            conn.row_factory = dict_row
+            row = publish_payload_for_version_tx(conn, version_id, for_update=True)
+            if not row:
+                raise LookupError("version_not_found")
+            if row["status"] != "published":
+                raise ValueError("version_not_published")
+            conn.execute(
+                """
+                UPDATE ai_document_versions
+                SET publish_state = 'published_indexing_pending',
+                    indexing_error = '',
+                    indexed_at = NULL,
+                    published_ready_at = NULL
+                WHERE id = %s
+                """,
+                (version_id,),
+            )
+            audit_tx(
+                conn,
+                actor=actor,
+                action="version_indexing_retry_started",
+                entity_type="ai_document_version",
+                entity_id=version_id,
+                metadata={"document_id": str(row["document_id"])},
+            )
+            return publish_payload_for_version_tx(conn, version_id) or dict(row)
+
+
+def mark_version_indexing_result(
+    version_id: str,
+    *,
+    actor: str = "api-gateway",
+    success: bool,
+    lexical_index_synced: bool = False,
+    vector_index_verified: bool = False,
+    error: str = "",
+) -> dict[str, Any]:
+    with connection() as conn:
+        with conn.transaction():
+            conn.row_factory = dict_row
+            row = publish_payload_for_version_tx(conn, version_id, for_update=True)
+            if not row:
+                raise LookupError("version_not_found")
+            if row["status"] != "published":
+                raise ValueError("version_not_published")
+
+            chunk_count = conn.execute(
+                "SELECT COUNT(*)::int AS chunk_count FROM ai_chunks WHERE version_id = %s",
+                (version_id,),
+            ).fetchone()["chunk_count"]
+            vector_ready = vector_index_verified and chunk_count > 0
+            if success and lexical_index_synced and vector_ready:
+                conn.execute(
+                    """
+                    UPDATE ai_document_versions
+                    SET publish_state = 'published_ready',
+                        indexed_at = now(),
+                        published_ready_at = now(),
+                        indexing_error = ''
+                    WHERE id = %s
+                    """,
+                    (version_id,),
+                )
+                audit_tx(
+                    conn,
+                    actor=actor,
+                    action="lexical_index_synced",
+                    entity_type="ai_document_version",
+                    entity_id=version_id,
+                    metadata={"document_id": str(row["document_id"])},
+                )
+                audit_tx(
+                    conn,
+                    actor=actor,
+                    action="vector_index_verified",
+                    entity_type="ai_document_version",
+                    entity_id=version_id,
+                    metadata={"document_id": str(row["document_id"]), "chunk_count": chunk_count},
+                )
+                audit_tx(
+                    conn,
+                    actor=actor,
+                    action="version_published_ready",
+                    entity_type="ai_document_version",
+                    entity_id=version_id,
+                    metadata={"document_id": str(row["document_id"])},
+                )
+            else:
+                reason = error or ("vector_index_missing_chunks" if chunk_count <= 0 else "indexing_not_confirmed")
+                conn.execute(
+                    """
+                    UPDATE ai_document_versions
+                    SET publish_state = 'published_indexing_failed',
+                        indexing_error = %s
+                    WHERE id = %s
+                    """,
+                    (pg_text(reason)[:2000], version_id),
+                )
+                audit_tx(
+                    conn,
+                    actor=actor,
+                    action="publish_indexing_failed",
+                    entity_type="ai_document_version",
+                    entity_id=version_id,
+                    metadata={"document_id": str(row["document_id"]), "error": reason, "chunk_count": chunk_count},
+                )
+            updated = publish_payload_for_version_tx(conn, version_id)
+            if not updated:
+                raise LookupError("version_not_found")
+            return updated
+
+
+def publish_payload_for_version_tx(conn: Connection[Any], version_id: str, for_update: bool = False) -> dict[str, Any] | None:
+    lock = "FOR UPDATE" if for_update else ""
+    row = conn.execute(
+        f"""
+        SELECT v.id::text AS version_id,
+               v.document_id::text AS document_id,
+               d.external_id,
+               d.title,
+               v.version_number,
+               v.status,
+               v.publish_state,
+               v.checksum,
+               v.chunk_count,
+               v.document_type,
+               v.review_status,
+               v.extraction_confidence::float AS extraction_confidence,
+               v.indexed_at,
+               COALESCE(v.indexing_error, '') AS indexing_error,
+               v.published_ready_at,
+               d.metadata
+        FROM ai_document_versions v
+        JOIN ai_documents d ON d.id = v.document_id
+        WHERE v.id = %s
+        {lock}
+        """,
+        (version_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def archive_document_collection_items_tx(conn: Connection[Any], document_id: str) -> None:
@@ -2776,7 +3041,7 @@ def archive_document(document_id: str, actor: str) -> None:
             if not updated:
                 raise LookupError("document_not_found")
             conn.execute(
-                "UPDATE ai_document_versions SET status = 'archived', archived_at = now() WHERE document_id = %s",
+                "UPDATE ai_document_versions SET status = 'archived', publish_state = 'archived', archived_at = now() WHERE document_id = %s",
                 (document_id,),
             )
             archive_document_collection_items_tx(conn, document_id)
@@ -2804,6 +3069,7 @@ def list_documents() -> list[dict[str, Any]]:
                    v.id::text AS latest_version_id,
                    v.version_number AS latest_version_number,
                    v.status AS latest_version_status,
+                   v.publish_state AS latest_publish_state,
                    v.document_type AS latest_document_type,
                    v.review_status AS latest_review_status,
                    v.extraction_confidence::float AS latest_extraction_confidence,
@@ -2888,6 +3154,7 @@ def list_search_filter_options() -> dict[str, list[str]]:
             JOIN ai_document_versions v ON v.id = c.version_id
             WHERE d.status = 'active'
               AND v.status = 'published'
+              AND v.publish_state = 'published_ready'
               AND d.current_version_id = v.id
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
@@ -3039,6 +3306,7 @@ def list_issue_router(
     clauses = [
         "d.status = 'active'",
         "v.status = 'published'",
+        "v.publish_state = 'published_ready'",
         "d.current_version_id = v.id",
         "COALESCE(c.metadata->>'review_status', '') = 'approved'",
         "COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)",
@@ -3133,7 +3401,10 @@ def issue_router_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_tool_links(status: str = "active", collection: str = "") -> list[dict[str, Any]]:
-    clauses = ["t.status = %s"]
+    clauses = [
+        "t.status = %s",
+        "(t.source_version_id IS NULL OR EXISTS (SELECT 1 FROM ai_document_versions v WHERE v.id = t.source_version_id AND v.status = 'published' AND v.publish_state = 'published_ready'))",
+    ]
     params: list[Any] = [status]
     if collection:
         clauses.append("t.metadata->>'collection_slug' = %s")
@@ -3188,7 +3459,10 @@ def tool_used_by_tx(conn: Connection[Any], tool_id: str) -> list[dict[str, Any]]
 
 
 def list_action_templates(status: str = "approved", collection: str = "") -> list[dict[str, Any]]:
-    clauses = ["status = %s"]
+    clauses = [
+        "status = %s",
+        "(source_unit_id IS NULL OR EXISTS (SELECT 1 FROM ai_chunks ch JOIN ai_document_versions v ON v.id = ch.version_id WHERE ch.id = source_unit_id AND v.status = 'published' AND v.publish_state = 'published_ready'))",
+    ]
     params: list[Any] = [status]
     if collection:
         clauses.append("metadata->>'collection_slug' = %s")
@@ -3631,6 +3905,7 @@ def list_versions(document_id: str) -> list[dict[str, Any]]:
                    document_id::text AS document_id,
                    version_number,
                    status,
+                   publish_state,
                    checksum,
                    chunk_count,
                    document_type,
@@ -3638,6 +3913,9 @@ def list_versions(document_id: str) -> list[dict[str, Any]]:
                    extraction_confidence::float AS extraction_confidence,
                    change_summary,
                    published_at,
+                   indexed_at,
+                   COALESCE(indexing_error, '') AS indexing_error,
+                   published_ready_at,
                    archived_at,
                    created_at
             FROM ai_document_versions
@@ -4627,6 +4905,7 @@ def approved_relation_target_rows(source_document_ids: list[str], exclude_chunk_
               AND target.status = 'active'
               AND target.current_version_id = v.id
               AND v.status = 'published'
+              AND v.publish_state = 'published_ready'
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
@@ -4689,6 +4968,7 @@ def approved_relation_target_rows_for_chunks(source_chunk_ids: list[str], exclud
               AND target.status = 'active'
               AND target.current_version_id = v.id
               AND v.status = 'published'
+              AND v.publish_state = 'published_ready'
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
@@ -4732,6 +5012,7 @@ def published_chunk_rows_by_ids(chunk_ids: list[str], exclude_chunk_ids: list[st
               AND d.status = 'active'
               AND d.current_version_id = v.id
               AND v.status = 'published'
+              AND v.publish_state = 'published_ready'
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
@@ -4781,6 +5062,7 @@ def parent_sop_context_rows(chunk_ids: list[str], exclude_chunk_ids: list[str], 
             WHERE d.status = 'active'
               AND d.current_version_id = v.id
               AND v.status = 'published'
+              AND v.publish_state = 'published_ready'
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
@@ -4805,6 +5087,7 @@ def filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
     # Default retrieval is strict latest-published only.
     if statuses == ["published"]:
         clauses.append("d.current_version_id = v.id")
+        clauses.append("v.publish_state = 'published_ready'")
         clauses.append("COALESCE(c.metadata->>'review_status', '') = 'approved'")
         clauses.append("COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)")
         params.append(["structured", "manually_curated"])

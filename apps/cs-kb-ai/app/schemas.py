@@ -10,6 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 DocumentStatus = Literal["active", "archived"]
 VersionStatus = Literal["draft", "published", "archived"]
+PublishState = Literal[
+    "draft",
+    "publishing",
+    "published_indexing_pending",
+    "published_indexing_failed",
+    "published_ready",
+    "archived",
+]
 RetrievalMode = Literal["lexical", "vector", "hybrid"]
 DocumentType = Literal[
     "text_sop",
@@ -173,6 +181,7 @@ class SourceRef(BaseModel):
     paragraph_index: int | None = Field(default=None, ge=0)
     table_index: int | None = Field(default=None, ge=0)
     row_index: int | None = Field(default=None, ge=0)
+    cell_text: str = ""
     heading_path: list[str] = Field(default_factory=list)
     line_start: int | None = Field(default=None, ge=1)
     line_end: int | None = Field(default=None, ge=1)
@@ -856,12 +865,16 @@ class DocumentVersionResponse(BaseModel):
     title: str
     version_number: int
     status: VersionStatus
+    publish_state: PublishState = "draft"
     chunk_count: int
     checksum: str
     document_type: DocumentType = "unknown"
     review_status: ReviewStatus = "needs_review"
     extraction_confidence: float = 0.0
     metadata: dict[str, Any] = Field(default_factory=dict)
+    indexed_at: Optional[datetime] = None
+    indexing_error: str = ""
+    published_ready_at: Optional[datetime] = None
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -897,6 +910,7 @@ class DocumentSummary(BaseModel):
     latest_version_id: Optional[str] = None
     latest_version_number: Optional[int] = None
     latest_version_status: Optional[VersionStatus] = None
+    latest_publish_state: Optional[PublishState] = None
     latest_document_type: Optional[DocumentType] = None
     latest_review_status: Optional[ReviewStatus] = None
     latest_extraction_confidence: Optional[float] = None
@@ -909,6 +923,7 @@ class VersionSummary(BaseModel):
     document_id: str
     version_number: int
     status: VersionStatus
+    publish_state: PublishState = "draft"
     checksum: str
     chunk_count: int
     document_type: DocumentType = "unknown"
@@ -916,8 +931,19 @@ class VersionSummary(BaseModel):
     extraction_confidence: float = 0.0
     change_summary: str
     published_at: Optional[datetime] = None
+    indexed_at: Optional[datetime] = None
+    indexing_error: str = ""
+    published_ready_at: Optional[datetime] = None
     archived_at: Optional[datetime] = None
     created_at: datetime
+
+
+class IndexingResultRequest(BaseModel):
+    actor: str = "api-gateway"
+    success: bool = False
+    lexical_index_synced: bool = False
+    vector_index_verified: bool = False
+    error: str = ""
 
 
 class DocumentChunkSummary(BaseModel):
