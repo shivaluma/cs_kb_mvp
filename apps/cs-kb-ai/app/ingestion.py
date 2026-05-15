@@ -486,6 +486,25 @@ def prepare_document_version(
             error="source_grounding_validation_failed" if grounding_report["blocked_unit_count"] else "",
         )
     )
+    vocabulary_report = discover_vocabulary_candidates(
+        source_evidence=source_evidence,
+        chunks=source_chunks,
+        document_type=classification.document_type,
+        raw_context=raw_context,
+    )
+    if vocabulary_report["total_candidate_count"]:
+        warnings.append("vocabulary_candidates_need_review")
+    if vocabulary_report["blocking_candidate_count"]:
+        warnings.append("risk_vocabulary_candidates_block_publish")
+        source_chunks = apply_vocabulary_publish_blocks(source_chunks, vocabulary_report)
+    pipeline_artifacts.append(
+        stage_artifact(
+            "vocabulary_discovery",
+            "vocabulary_candidates",
+            vocabulary_report,
+            status="completed",
+        )
+    )
     pipeline_artifacts.append(
         stage_artifact(
             "refine",
@@ -4400,6 +4419,325 @@ def semantic_refine_units(chunks: list[Any], document_type: str) -> tuple[list[A
         "deterministic_pass": "semantic_refine",
     }
     return output, report, []
+
+
+def discover_vocabulary_candidates(
+    *,
+    source_evidence: list[SourceEvidenceBlock],
+    chunks: list[Any],
+    document_type: str,
+    raw_context: dict[str, Any],
+) -> dict[str, Any]:
+    known_terms = known_vocabulary_terms()
+    known_signals = known_extraction_signal_terms()
+    term_candidates: list[dict[str, Any]] = []
+    relation_candidates: list[dict[str, Any]] = []
+    risk_candidates: list[dict[str, Any]] = []
+    collection_candidates: list[dict[str, Any]] = []
+
+    for block in source_evidence[:800]:
+        text = str(block.text or "").strip()
+        if not text:
+            continue
+        term_candidates.extend(detect_unknown_taxonomy_terms(text, block, known_terms))
+        relation_candidates.extend(detect_unknown_relation_phrase_candidates(text, block))
+        risk_candidates.extend(detect_unknown_risk_signal_candidates(text, block, known_signals))
+        if document_type == "kb_index_workbook":
+            collection_candidates.extend(detect_unknown_collection_candidates(block))
+
+    for chunk in chunks:
+        metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+        for relation in metadata.get("relation_candidates") or []:
+            if not isinstance(relation, dict):
+                continue
+            target_title = str(relation.get("target_title") or relation.get("title") or "").strip()
+            normalized = normalize_for_signal(target_title)
+            if target_title and normalized and normalized not in known_terms:
+                term_candidates.append(
+                    vocabulary_candidate(
+                        term=target_title,
+                        term_type="relation_target",
+                        candidate_kind="taxonomy_term",
+                        confidence=0.62,
+                        evidence_text=str(chunk.content or "")[:500],
+                        source_ref=first_source_ref(metadata),
+                        metadata={"relation_type": relation.get("relation_type"), "source": "semantic_relation_candidate"},
+                    )
+                )
+
+    term_candidates = dedupe_vocabulary_candidates(term_candidates)
+    relation_candidates = dedupe_vocabulary_candidates(relation_candidates)
+    risk_candidates = dedupe_vocabulary_candidates(risk_candidates)
+    collection_candidates = dedupe_vocabulary_candidates(collection_candidates)
+    blocking_count = sum(1 for item in risk_candidates if item.get("blocking_publish_candidate"))
+    return {
+        "status": "completed",
+        "candidate_lifecycle": ["detected", "suggested", "in_review", "active", "archived", "rejected"],
+        "production_behavior": "candidates_do_not_affect_extraction_search_or_chat_until_activated",
+        "document_type": document_type,
+        "total_candidate_count": len(term_candidates) + len(relation_candidates) + len(risk_candidates) + len(collection_candidates),
+        "blocking_candidate_count": blocking_count,
+        "new_term_candidates": term_candidates[:120],
+        "new_relation_pattern_candidates": relation_candidates[:80],
+        "new_risk_signal_candidates": risk_candidates[:80],
+        "new_collection_candidates": collection_candidates[:40],
+        "existing_vocabulary_counts": {
+            "known_terms": len(known_terms),
+            "known_signals": len(known_signals),
+        },
+        "warnings": ["candidate_review_required"] if term_candidates or relation_candidates or risk_candidates or collection_candidates else [],
+    }
+
+
+def known_vocabulary_terms() -> set[str]:
+    output: set[str] = set()
+    for term in repository.active_taxonomy_terms():
+        output.add(normalize_for_signal(term.get("term_key")))
+        output.add(normalize_for_signal(term.get("display_name")))
+        output.add(normalize_for_signal(term.get("canonical_label")))
+        for alias in term.get("aliases") or []:
+            output.add(normalize_for_signal(alias))
+        for alias in term.get("normalized_aliases") or []:
+            output.add(normalize_for_signal(alias))
+    return {term for term in output if term}
+
+
+def known_extraction_signal_terms() -> set[str]:
+    output: set[str] = set()
+    for signal in repository.active_extraction_signals():
+        output.add(normalize_for_signal(signal.get("phrase")))
+        output.add(normalize_for_signal(signal.get("normalized_phrase")))
+    return {term for term in output if term}
+
+
+def detect_unknown_taxonomy_terms(text: str, block: SourceEvidenceBlock, known_terms: set[str]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    evidence_text = text[:500]
+    source_ref = block.source_ref.model_dump(mode="json")
+    for phrase in quoted_phrases(text):
+        normalized = normalize_for_signal(phrase)
+        if vocabulary_candidate_term_allowed(normalized, known_terms):
+            candidates.append(
+                vocabulary_candidate(
+                    term=phrase,
+                    term_type="quoted_business_phrase",
+                    candidate_kind="taxonomy_term",
+                    confidence=0.58,
+                    evidence_text=evidence_text,
+                    source_ref=source_ref,
+                )
+            )
+    for phrase in channel_context_phrases(text):
+        normalized = normalize_for_signal(phrase)
+        if vocabulary_candidate_term_allowed(normalized, known_terms):
+            candidates.append(
+                vocabulary_candidate(
+                    term=phrase,
+                    term_type="channel_alias",
+                    candidate_kind="taxonomy_term",
+                    suggested_canonical_key=guess_channel_canonical_key(normalized),
+                    confidence=0.76,
+                    evidence_text=evidence_text,
+                    source_ref=source_ref,
+                )
+            )
+    for acronym in acronym_terms(text):
+        normalized = normalize_for_signal(acronym)
+        if vocabulary_candidate_term_allowed(normalized, known_terms):
+            candidates.append(
+                vocabulary_candidate(
+                    term=acronym,
+                    term_type="business_entity",
+                    candidate_kind="taxonomy_term",
+                    confidence=0.54,
+                    evidence_text=evidence_text,
+                    source_ref=source_ref,
+                )
+            )
+    return candidates
+
+
+def detect_unknown_relation_phrase_candidates(text: str, block: SourceEvidenceBlock) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for match in re.finditer(r"\b(?P<phrase>dựa\s+trên|dua\s+tren|căn\s+cứ|can\s+cu|phụ\s+thuộc|phu\s+thuoc)\s+(?P<title>[A-Za-zÀ-ỹ0-9 _./-]{3,140})", text, re.IGNORECASE):
+        phrase = match.group("phrase")
+        normalized = normalize_for_signal(phrase)
+        escaped = re.escape(phrase).replace(r"\ ", r"\s+")
+        candidates.append(
+            vocabulary_candidate(
+                term=phrase,
+                term_type="relation_phrase",
+                candidate_kind="relation_pattern",
+                confidence=0.7,
+                evidence_text=match.group(0)[:500],
+                source_ref=block.source_ref.model_dump(mode="json"),
+                metadata={
+                    "relation_type": "references",
+                    "relation_source": "candidate_relation_phrase",
+                    "suggested_pattern": rf"(?:{escaped})\s+(?P<title>[A-Za-zÀ-ỹ0-9 _./-]{{3,180}})",
+                    "normalized_phrase": normalized,
+                },
+            )
+        )
+    return candidates
+
+
+def detect_unknown_risk_signal_candidates(text: str, block: SourceEvidenceBlock, known_signals: set[str]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for match in re.finditer(r"\b(?:tuyệt\s+đối|tuyet\s+doi|không|khong|cấm|cam)\s+(?P<phrase>[A-Za-zÀ-ỹ0-9 _-]{3,80})", text, re.IGNORECASE):
+        phrase = match.group(0).strip(" .;:")
+        normalized = normalize_for_signal(phrase)
+        if not vocabulary_candidate_term_allowed(normalized, known_signals, min_len=5):
+            continue
+        candidates.append(
+            vocabulary_candidate(
+                term=phrase,
+                term_type="risk_signal",
+                candidate_kind="extraction_signal",
+                confidence=0.74,
+                evidence_text=text[:500],
+                source_ref=block.source_ref.model_dump(mode="json"),
+                metadata={"signal_type": "risk_signal", "risk_level": "critical", "unit_type_hint": "compliance_rule"},
+                blocking_publish_candidate=True,
+            )
+        )
+    return candidates
+
+
+def detect_unknown_collection_candidates(block: SourceEvidenceBlock) -> list[dict[str, Any]]:
+    metadata = block.metadata if isinstance(block.metadata, dict) else {}
+    sheet_name = str(metadata.get("sheet_name") or block.source_ref.sheet or "").strip()
+    if not sheet_name:
+        return []
+    mapping = sheet_mapping_for_name(sheet_name)
+    if mapping.get("rule_key") != "fallback_default":
+        return []
+    return [
+        vocabulary_candidate(
+            term=sheet_name,
+            term_type="collection_or_sheet",
+            candidate_kind="collection",
+            confidence=0.66,
+            evidence_text=block.text[:500],
+            source_ref=block.source_ref.model_dump(mode="json"),
+            metadata={"source": "unknown_sheet_mapping"},
+        )
+    ]
+
+
+def vocabulary_candidate(
+    *,
+    term: str,
+    term_type: str,
+    candidate_kind: str,
+    confidence: float,
+    evidence_text: str,
+    source_ref: dict[str, Any],
+    suggested_canonical_key: str = "",
+    metadata: dict[str, Any] | None = None,
+    blocking_publish_candidate: bool = False,
+) -> dict[str, Any]:
+    normalized = normalize_for_signal(term)
+    return {
+        "term": term.strip()[:240],
+        "normalized_term": normalized[:240],
+        "term_type": term_type,
+        "candidate_kind": candidate_kind,
+        "suggested_canonical_key": suggested_canonical_key,
+        "confidence": round(max(0.0, min(float(confidence), 0.98)), 2),
+        "evidence_text": evidence_text[:1000],
+        "source_ref": source_ref,
+        "status": "suggested",
+        "blocking_publish_candidate": blocking_publish_candidate,
+        "metadata": metadata or {},
+    }
+
+
+def dedupe_vocabulary_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for candidate in candidates:
+        key = (
+            str(candidate.get("candidate_kind") or ""),
+            str(candidate.get("term_type") or ""),
+            str(candidate.get("normalized_term") or ""),
+        )
+        if not key[2]:
+            continue
+        existing = by_key.get(key)
+        if not existing or float(candidate.get("confidence") or 0) > float(existing.get("confidence") or 0):
+            by_key[key] = candidate
+    return sorted(by_key.values(), key=lambda item: (item.get("blocking_publish_candidate") is True, float(item.get("confidence") or 0)), reverse=True)
+
+
+def vocabulary_candidate_term_allowed(normalized: str, known_terms: set[str], min_len: int = 3) -> bool:
+    if not normalized or normalized in known_terms:
+        return False
+    if len(normalized) < min_len:
+        return False
+    if normalized in {"khong", "duoc", "phai", "can", "neu", "thi", "doi voi", "truong hop"}:
+        return False
+    if len(normalized.split()) > 8:
+        return False
+    return True
+
+
+def quoted_phrases(text: str) -> list[str]:
+    output: list[str] = []
+    for match in re.finditer(r"[\"“”'‘’]([^\"“”'‘’]{3,80})[\"“”'‘’]", text):
+        output.append(match.group(1).strip())
+    return output
+
+
+def channel_context_phrases(text: str) -> list[str]:
+    output: list[str] = []
+    pattern = r"(?:qua|trên|tren|kênh|kenh|channel)\s+(?P<term>[A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9 /_-]{2,60})"
+    for match in re.finditer(pattern, text, re.IGNORECASE):
+        term = re.split(r"[.;,\n]", match.group("term"), maxsplit=1)[0].strip()
+        term = re.sub(r"\s+", " ", term)
+        if term:
+            output.extend(split_compound_candidate_term(term))
+    return output
+
+
+def acronym_terms(text: str) -> list[str]:
+    return list(dict.fromkeys(match.group(0) for match in re.finditer(r"\b[A-Z][A-Z0-9]{1,7}\b", text) if match.group(0) not in {"CS", "KH", "TX", "SOP", "ID"}))
+
+
+def split_compound_candidate_term(term: str) -> list[str]:
+    parts = [part.strip(" -_/") for part in re.split(r"[/|]", term) if part.strip(" -_/")]
+    if len(parts) > 1:
+        return [term, *parts]
+    return [term]
+
+
+def guess_channel_canonical_key(normalized: str) -> str:
+    if any(token in normalized for token in {"facebook", "fanpage", "inbox", "social"}):
+        return "chat_social"
+    if "mail" in normalized or "email" in normalized:
+        return "mail"
+    if "call" in normalized or "hotline" in normalized:
+        return "hotline"
+    return ""
+
+
+def first_source_ref(metadata: dict[str, Any]) -> dict[str, Any]:
+    refs = metadata.get("source_refs")
+    if isinstance(refs, list) and refs and isinstance(refs[0], dict):
+        return refs[0]
+    return {}
+
+
+def apply_vocabulary_publish_blocks(chunks: list[Any], vocabulary_report: dict[str, Any]) -> list[Any]:
+    if not vocabulary_report.get("blocking_candidate_count"):
+        return chunks
+    output = []
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        metadata["publish_blocked"] = True
+        metadata["publish_blocked_reason"] = metadata.get("publish_blocked_reason") or "vocabulary_risk_candidate_requires_review"
+        metadata["vocabulary_candidate_review_required"] = True
+        output.append(replace_chunk_metadata(chunk, metadata))
+    return output
 
 
 def normalize_semantic_unit_metadata(metadata: dict[str, Any], chunk: Any, document_type: str) -> dict[str, Any]:

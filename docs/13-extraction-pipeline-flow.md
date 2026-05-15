@@ -84,10 +84,23 @@ Every upload goes through the same outer stages:
      - `refine/refinement_report`
      - `refine/draft_units`
 
-9. **Grounding validation, verification, and publish gate**
+9. **Grounding validation**
    - Run `verify/source_grounding_validator` before publish readiness checks.
    - Every unit must have a real source ref. Synthetic fallback refs are marked with `source_ref_synthetic=true` or `source_ref_quality=synthetic_missing` and never count as grounding.
    - Unsupported units are marked `review_status=needs_review`, `publish_blocked=true`, and `publish_blocked_reason=source_grounding_validation_failed`.
+   - Persist:
+     - `verify/source_grounding_validator`
+
+10. **Vocabulary discovery and candidate queue**
+   - Detect new aliases, business entities, relation phrases, risk phrases, and unknown workbook sheet/collection names from `source_evidence` and draft units.
+   - Compare candidates against active taxonomy terms, extraction signals, relation patterns, and sheet mappings.
+   - Persist only `suggested` candidates in `taxonomy_term_candidates`; candidates do not affect extraction, search, or chat until an admin activates them.
+   - Risk-signal candidates can block publish until reviewed because they may affect compliance interpretation.
+   - Persist:
+     - `vocabulary_discovery/vocabulary_candidates`
+   - Retrieval logs can also create low-confidence `detected` query candidates for zero-result queries. These remain review-only until activated.
+
+11. **Verification and publish gate**
    - Evaluate hard blockers and warnings.
    - For high-risk structured docs, publish requires explicit review.
    - Persist:
@@ -256,9 +269,11 @@ For any extraction issue, inspect these artifacts in order:
    - Shows unit state counts, metadata normalization, action card generation, and relation candidate extraction.
 11. `verify/source_grounding_validator`
    - Shows missing, synthetic, or wrong-type source refs and which units were blocked.
-12. `refine/draft_units`
+12. `vocabulary_discovery/vocabulary_candidates`
+   - Shows detected vocabulary candidates for CS Ops/Admin review. These are `suggested` only and do not affect production search/chat.
+13. `refine/draft_units`
    - Shows the actual units sent to human review.
-13. `verify/verification_report`
+14. `verify/verification_report`
    - Shows publish blockers.
 
 ## Common Failure Modes

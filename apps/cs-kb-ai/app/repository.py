@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import time
@@ -724,6 +725,35 @@ def ensure_domain_config_schema(conn: Connection[Any]) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS taxonomy_term_candidates (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          candidate_key text NOT NULL UNIQUE,
+          candidate_kind text NOT NULL DEFAULT 'taxonomy_term',
+          term text NOT NULL,
+          normalized_term text NOT NULL,
+          term_type text NOT NULL,
+          suggested_canonical_key text NOT NULL DEFAULT '',
+          evidence_text text NOT NULL DEFAULT '',
+          source_document_id uuid REFERENCES ai_documents(id) ON DELETE SET NULL,
+          source_version_id uuid REFERENCES ai_document_versions(id) ON DELETE SET NULL,
+          source_unit_id uuid REFERENCES ai_chunks(id) ON DELETE SET NULL,
+          source_ref jsonb NOT NULL DEFAULT '{}'::jsonb,
+          confidence numeric NOT NULL DEFAULT 0,
+          status text NOT NULL DEFAULT 'suggested',
+          owner_team text NOT NULL DEFAULT '',
+          created_by text NOT NULL DEFAULT 'system',
+          reviewed_by text,
+          reviewed_at timestamptz,
+          review_note text NOT NULL DEFAULT '',
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (source_version_id, normalized_term, term_type, candidate_kind)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS rerank_rules (
           id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
           rule_key text NOT NULL UNIQUE,
@@ -803,6 +833,9 @@ def ensure_domain_config_schema(conn: Connection[Any]) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomy_group_terms_status ON taxonomy_group_terms(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_signals_status_type ON extraction_signals(status, signal_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_signals_normalized ON extraction_signals(normalized_phrase)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomy_term_candidates_status ON taxonomy_term_candidates(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomy_term_candidates_term ON taxonomy_term_candidates(normalized_term, term_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomy_term_candidates_version ON taxonomy_term_candidates(source_version_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rerank_rules_status_scope ON rerank_rules(status, scope)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sheet_mapping_rules_status_priority ON sheet_mapping_rules(status, priority)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_relation_patterns_status_priority ON relation_patterns(status, priority)")
@@ -1385,6 +1418,423 @@ def vietnamese_config_match_preview(text: str) -> dict[str, Any]:
     }
 
 
+def vocabulary_candidates_from_metadata(metadata: DocumentMetadata) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for artifact in metadata.pipeline_artifacts or []:
+        if not isinstance(artifact, dict) or artifact.get("artifact_type") != "vocabulary_candidates":
+            continue
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        for key in ("new_term_candidates", "new_relation_pattern_candidates", "new_risk_signal_candidates", "new_collection_candidates"):
+            values = payload.get(key)
+            if isinstance(values, list):
+                candidates.extend(item for item in values if isinstance(item, dict))
+    return candidates
+
+
+def vocabulary_candidate_key(version_id: str, candidate: dict[str, Any]) -> str:
+    normalized_term = normalize_phrase(candidate.get("normalized_term") or candidate.get("term"))
+    term_type = str(candidate.get("term_type") or candidate.get("candidate_kind") or "unknown")
+    candidate_kind = str(candidate.get("candidate_kind") or "taxonomy_term")
+    digest = hashlib.sha256(f"{version_id}:{candidate_kind}:{term_type}:{normalized_term}".encode("utf-8")).hexdigest()[:24]
+    return f"vocab_{digest}"
+
+
+def persist_vocabulary_candidates_tx(
+    conn: Connection[Any],
+    *,
+    document_id: str,
+    version_id: str,
+    metadata: DocumentMetadata,
+    actor: str,
+) -> int:
+    candidates = vocabulary_candidates_from_metadata(metadata)
+    if not candidates:
+        return 0
+    count = 0
+    for candidate in candidates:
+        term = pg_text(candidate.get("term") or "")
+        normalized_term = normalize_phrase(candidate.get("normalized_term") or term)
+        term_type = pg_text(candidate.get("term_type") or "unknown")[:80]
+        candidate_kind = pg_text(candidate.get("candidate_kind") or "taxonomy_term")[:80]
+        if not term or not normalized_term:
+            continue
+        source_ref = candidate.get("source_ref") if isinstance(candidate.get("source_ref"), dict) else {}
+        metadata_payload = {
+            key: value
+            for key, value in candidate.items()
+            if key
+            not in {
+                "term",
+                "normalized_term",
+                "term_type",
+                "candidate_kind",
+                "suggested_canonical_key",
+                "evidence_text",
+                "source_ref",
+                "confidence",
+                "status",
+            }
+        }
+        try:
+            confidence = float(candidate.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        conn.execute(
+            """
+            INSERT INTO taxonomy_term_candidates (
+              candidate_key,
+              candidate_kind,
+              term,
+              normalized_term,
+              term_type,
+              suggested_canonical_key,
+              evidence_text,
+              source_document_id,
+              source_version_id,
+              source_ref,
+              confidence,
+              status,
+              created_by,
+              metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (source_version_id, normalized_term, term_type, candidate_kind) DO UPDATE
+            SET evidence_text = EXCLUDED.evidence_text,
+                source_ref = EXCLUDED.source_ref,
+                confidence = GREATEST(taxonomy_term_candidates.confidence, EXCLUDED.confidence),
+                metadata = taxonomy_term_candidates.metadata || EXCLUDED.metadata,
+                updated_at = now()
+            """,
+            (
+                vocabulary_candidate_key(version_id, candidate),
+                candidate_kind,
+                term[:240],
+                normalized_term[:240],
+                term_type,
+                pg_text(candidate.get("suggested_canonical_key") or "")[:160],
+                pg_text(candidate.get("evidence_text") or "")[:1000],
+                document_id,
+                version_id,
+                jsonb_text(source_ref),
+                confidence,
+                "suggested",
+                pg_text(actor or "system"),
+                jsonb_text(metadata_payload),
+            ),
+        )
+        count += 1
+    return count
+
+
+def list_vocabulary_candidates(status: str = "suggested", limit: int = 100) -> list[dict[str, Any]]:
+    clauses = []
+    params: list[Any] = []
+    if status:
+        clauses.append("c.status = %s")
+        params.append(pg_text(status))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(max(1, min(int(limit or 100), 500)))
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT c.id::text AS id,
+                   c.candidate_key,
+                   c.candidate_kind,
+                   c.term,
+                   c.normalized_term,
+                   c.term_type,
+                   c.suggested_canonical_key,
+                   c.evidence_text,
+                   c.source_document_id::text AS source_document_id,
+                   c.source_version_id::text AS source_version_id,
+                   c.source_unit_id::text AS source_unit_id,
+                   c.source_ref,
+                   c.confidence,
+                   c.status,
+                   c.owner_team,
+                   c.created_by,
+                   c.reviewed_by,
+                   c.reviewed_at,
+                   c.review_note,
+                   c.metadata,
+                   d.title AS source_document_title,
+                   v.version_number AS source_version_number,
+                   c.created_at,
+                   c.updated_at
+            FROM taxonomy_term_candidates c
+            LEFT JOIN ai_documents d ON d.id = c.source_document_id
+            LEFT JOIN ai_document_versions v ON v.id = c.source_version_id
+            {where}
+            ORDER BY c.created_at DESC
+            LIMIT %s
+            """,
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_vocabulary_candidate_status(candidate_id: str, status: str, actor: str = "system", note: str = "") -> dict[str, Any]:
+    allowed = {"detected", "suggested", "in_review", "active", "archived", "rejected"}
+    if status not in allowed:
+        raise ValueError("invalid_vocabulary_candidate_status")
+    with connection() as conn:
+        conn.row_factory = dict_row
+        row = conn.execute(
+            """
+            UPDATE taxonomy_term_candidates
+            SET status = %s,
+                reviewed_by = %s,
+                reviewed_at = CASE WHEN %s IN ('active', 'archived', 'rejected') THEN now() ELSE reviewed_at END,
+                review_note = %s,
+                updated_at = now()
+            WHERE id = %s
+            RETURNING id::text AS id,
+                      candidate_key,
+                      candidate_kind,
+                      term,
+                      normalized_term,
+                      term_type,
+                      suggested_canonical_key,
+                      evidence_text,
+                      source_document_id::text AS source_document_id,
+                      source_version_id::text AS source_version_id,
+                      source_unit_id::text AS source_unit_id,
+                      source_ref,
+                      confidence,
+                      status,
+                      owner_team,
+                      created_by,
+                      reviewed_by,
+                      reviewed_at,
+                      review_note,
+                      metadata,
+                      created_at,
+                      updated_at
+            """,
+            (status, pg_text(actor or "system"), status, pg_text(note or ""), candidate_id),
+        ).fetchone()
+    if not row:
+        raise LookupError("vocabulary_candidate_not_found")
+    clear_domain_config_cache()
+    return dict(row)
+
+
+def config_key_from_text(prefix: str, text: str) -> str:
+    key = normalize_phrase(text).replace(" ", "_")
+    key = re.sub(r"[^a-z0-9_]+", "", key).strip("_")[:80]
+    return f"{prefix}_{key}" if key and not key.startswith(prefix) else key or f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def activate_vocabulary_candidate(
+    candidate_id: str,
+    *,
+    actor: str = "system",
+    activation_type: str = "auto",
+    canonical_key: str = "",
+    term_key: str = "",
+    canonical_label: str = "",
+    relation_pattern: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        with conn.transaction():
+            candidate = conn.execute(
+                """
+                SELECT id::text AS id,
+                       candidate_kind,
+                       term,
+                       normalized_term,
+                       term_type,
+                       suggested_canonical_key,
+                       evidence_text,
+                       source_ref,
+                       confidence,
+                       status,
+                       metadata
+                FROM taxonomy_term_candidates
+                WHERE id = %s
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if not candidate:
+                raise LookupError("vocabulary_candidate_not_found")
+            if str(candidate["status"]) in {"active", "archived", "rejected"}:
+                raise ValueError("vocabulary_candidate_already_final")
+
+            term = str(candidate.get("term") or "")
+            normalized_term = str(candidate.get("normalized_term") or normalize_phrase(term))
+            term_type = str(candidate.get("term_type") or "unknown")
+            candidate_kind = str(candidate.get("candidate_kind") or "taxonomy_term")
+            metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
+            resolved_activation = activation_type
+            if resolved_activation == "auto":
+                if candidate_kind == "relation_pattern" or term_type == "relation_phrase":
+                    resolved_activation = "relation_pattern"
+                elif candidate_kind == "extraction_signal" or term_type in {"risk_signal", "warning_signal", "condition_signal", "action_signal"}:
+                    resolved_activation = "extraction_signal"
+                else:
+                    resolved_activation = "taxonomy_alias" if (canonical_key or candidate.get("suggested_canonical_key")) else "taxonomy_term"
+
+            if resolved_activation == "taxonomy_alias":
+                target_key = pg_text(canonical_key or candidate.get("suggested_canonical_key") or "")
+                if not target_key:
+                    raise ValueError("canonical_key_required")
+                row = conn.execute(
+                    "SELECT aliases, normalized_aliases FROM taxonomy_terms WHERE term_key = %s AND status = 'active'",
+                    (target_key,),
+                ).fetchone()
+                if not row:
+                    raise LookupError("canonical_taxonomy_term_not_found")
+                aliases = json_list(row.get("aliases"))
+                normalized_aliases = json_list(row.get("normalized_aliases"))
+                aliases = list(dict.fromkeys([*aliases, term]))
+                normalized_aliases = list(dict.fromkeys([*normalized_aliases, normalized_term]))
+                conn.execute(
+                    """
+                    UPDATE taxonomy_terms
+                    SET aliases = %s::jsonb,
+                        normalized_aliases = %s::jsonb,
+                        version = version + 1,
+                        updated_at = now()
+                    WHERE term_key = %s
+                    """,
+                    (jsonb_text(aliases), jsonb_text(normalized_aliases), target_key),
+                )
+            elif resolved_activation == "taxonomy_term":
+                next_key = pg_text(term_key or config_key_from_text("term", term))
+                display = pg_text(canonical_label or term)
+                conn.execute(
+                    """
+                    INSERT INTO taxonomy_terms (
+                      term_key, term_type, canonical_label, display_name, aliases,
+                      normalized_aliases, language, metadata, status, source, owner_team
+                    )
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, 'vi', %s::jsonb, 'active', 'candidate_review', '')
+                    ON CONFLICT (term_key) DO UPDATE
+                    SET aliases = taxonomy_terms.aliases || EXCLUDED.aliases,
+                        normalized_aliases = taxonomy_terms.normalized_aliases || EXCLUDED.normalized_aliases,
+                        metadata = taxonomy_terms.metadata || EXCLUDED.metadata,
+                        version = taxonomy_terms.version + 1,
+                        updated_at = now()
+                    """,
+                    (
+                        next_key,
+                        term_type,
+                        display,
+                        display,
+                        jsonb_text([term]),
+                        jsonb_text([normalized_term]),
+                        jsonb_text({"activated_from_candidate_id": candidate_id}),
+                    ),
+                )
+            elif resolved_activation == "extraction_signal":
+                signal_type = str(metadata.get("signal_type") or term_type)
+                if signal_type not in {"condition_signal", "action_signal", "warning_signal", "risk_signal"}:
+                    signal_type = "risk_signal" if "risk" in term_type else "warning_signal"
+                signal_key = pg_text(term_key or config_key_from_text(signal_type, term))
+                conn.execute(
+                    """
+                    INSERT INTO extraction_signals (
+                      signal_key, signal_type, phrase, normalized_phrase, language,
+                      risk_level, unit_type_hint, metadata, priority, status, source
+                    )
+                    VALUES (%s, %s, %s, %s, 'vi', %s, %s, %s::jsonb, 100, 'active', 'candidate_review')
+                    ON CONFLICT (signal_key) DO UPDATE
+                    SET phrase = EXCLUDED.phrase,
+                        normalized_phrase = EXCLUDED.normalized_phrase,
+                        risk_level = EXCLUDED.risk_level,
+                        unit_type_hint = EXCLUDED.unit_type_hint,
+                        metadata = extraction_signals.metadata || EXCLUDED.metadata,
+                        version = extraction_signals.version + 1,
+                        updated_at = now()
+                    """,
+                    (
+                        signal_key,
+                        signal_type,
+                        term,
+                        normalized_term,
+                        str(metadata.get("risk_level") or ("critical" if signal_type == "risk_signal" else "")),
+                        str(metadata.get("unit_type_hint") or ("compliance_rule" if signal_type == "risk_signal" else "")),
+                        jsonb_text({"activated_from_candidate_id": candidate_id}),
+                    ),
+                )
+            elif resolved_activation == "relation_pattern":
+                pattern_text = relation_pattern or str(metadata.get("suggested_pattern") or "")
+                if not pattern_text:
+                    escaped = re.escape(term).replace(r"\ ", r"\s+")
+                    pattern_text = rf"(?:{escaped})\s+(?P<title>[A-Za-zÀ-ỹ0-9 _./-]{{3,180}})"
+                if not is_safe_config_regex(pattern_text, requires_title_group=True):
+                    raise ValueError("unsafe_relation_pattern")
+                pattern_key = pg_text(term_key or config_key_from_text("relation", term))
+                conn.execute(
+                    """
+                    INSERT INTO relation_patterns (pattern_key, pattern, relation_type, relation_source, language, priority, status, source)
+                    VALUES (%s, %s, %s, %s, 'vi', 100, 'active', 'candidate_review')
+                    ON CONFLICT (pattern_key) DO UPDATE
+                    SET pattern = EXCLUDED.pattern,
+                        relation_type = EXCLUDED.relation_type,
+                        relation_source = EXCLUDED.relation_source,
+                        version = relation_patterns.version + 1,
+                        updated_at = now()
+                    """,
+                    (
+                        pattern_key,
+                        pattern_text,
+                        str(metadata.get("relation_type") or "references"),
+                        str(metadata.get("relation_source") or "candidate_review"),
+                    ),
+                )
+            else:
+                raise ValueError("unsupported_vocabulary_activation_type")
+
+            row = conn.execute(
+                """
+                UPDATE taxonomy_term_candidates
+                SET status = 'active',
+                    reviewed_by = %s,
+                    reviewed_at = now(),
+                    review_note = %s,
+                    metadata = metadata || %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id::text AS id,
+                          candidate_key,
+                          candidate_kind,
+                          term,
+                          normalized_term,
+                          term_type,
+                          suggested_canonical_key,
+                          evidence_text,
+                          source_document_id::text AS source_document_id,
+                          source_version_id::text AS source_version_id,
+                          source_unit_id::text AS source_unit_id,
+                          source_ref,
+                          confidence,
+                          status,
+                          owner_team,
+                          created_by,
+                          reviewed_by,
+                          reviewed_at,
+                          review_note,
+                          metadata,
+                          created_at,
+                          updated_at
+                """,
+                (
+                    pg_text(actor or "system"),
+                    pg_text(note or f"activated_as:{resolved_activation}"),
+                    jsonb_text({"activation_type": resolved_activation, "activated_by": actor or "system"}),
+                    candidate_id,
+                ),
+            ).fetchone()
+    clear_domain_config_cache()
+    if not row:
+        raise LookupError("vocabulary_candidate_not_found")
+    return dict(row)
+
+
 def create_document_version(
     *,
     external_id: str,
@@ -1499,6 +1949,13 @@ def create_document_version(
                 )
 
             insert_chunks(conn, document_id, version_id, chunks)
+            vocabulary_candidate_count = persist_vocabulary_candidates_tx(
+                conn,
+                document_id=document_id,
+                version_id=version_id,
+                metadata=metadata,
+                actor=clean_created_by,
+            )
             job_id = persist_extraction_pipeline_artifacts(
                 conn,
                 document_id=document_id,
@@ -1531,6 +1988,7 @@ def create_document_version(
                     "extraction_confidence": extraction_confidence,
                     "extraction_job_id": job_id,
                     "relation_count": relation_count,
+                    "vocabulary_candidate_count": vocabulary_candidate_count,
                 },
             )
 
@@ -1571,7 +2029,15 @@ def replace_document_version_extraction(
     with connection() as conn:
         with conn.transaction():
             conn.execute("DELETE FROM ai_chunks WHERE version_id = %s", (version_id,))
+            conn.execute("DELETE FROM taxonomy_term_candidates WHERE source_version_id = %s AND status IN ('detected', 'suggested')", (version_id,))
             insert_chunks(conn, document_id, version_id, chunks)
+            vocabulary_candidate_count = persist_vocabulary_candidates_tx(
+                conn,
+                document_id=document_id,
+                version_id=version_id,
+                metadata=metadata,
+                actor=pg_text(actor),
+            )
             conn.execute("DELETE FROM extraction_jobs WHERE version_id = %s", (version_id,))
             job_id = persist_extraction_pipeline_artifacts(
                 conn,
@@ -1629,6 +2095,7 @@ def replace_document_version_extraction(
                     "extraction_confidence": extraction_confidence,
                     "extraction_job_id": job_id,
                     "relation_count": relation_count,
+                    "vocabulary_candidate_count": vocabulary_candidate_count,
                 },
             )
 
@@ -6273,7 +6740,53 @@ def log_retrieval(query: str, filters: dict[str, Any], mode: str, result_count: 
             """,
             (str(uuid.uuid4()), query, json.dumps(filters), mode, result_count, latency_ms),
         )
+        if result_count == 0:
+            persist_query_vocabulary_candidate_tx(conn, query=query, filters=filters, mode=mode)
     return latency_ms
+
+
+def persist_query_vocabulary_candidate_tx(conn: Connection[Any], *, query: str, filters: dict[str, Any], mode: str) -> None:
+    normalized = normalize_phrase(query)
+    if not vocabulary_candidate_term_allowed_for_query(normalized):
+        return
+    candidate_key = f"query_{hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:24]}"
+    conn.execute(
+        """
+        INSERT INTO taxonomy_term_candidates (
+          candidate_key,
+          candidate_kind,
+          term,
+          normalized_term,
+          term_type,
+          evidence_text,
+          confidence,
+          status,
+          created_by,
+          metadata
+        )
+        VALUES (%s, 'taxonomy_term', %s, %s, 'query_alias', %s, 0.35, 'detected', 'retrieval_log', %s::jsonb)
+        ON CONFLICT (candidate_key) DO UPDATE
+        SET metadata = taxonomy_term_candidates.metadata || EXCLUDED.metadata,
+            updated_at = now()
+        """,
+        (
+            candidate_key,
+            pg_text(query)[:240],
+            normalized[:240],
+            pg_text(query)[:1000],
+            jsonb_text({"source": "zero_result_query", "filters": filters, "mode": mode}),
+        ),
+    )
+
+
+def vocabulary_candidate_term_allowed_for_query(normalized: str) -> bool:
+    if not normalized or len(normalized) < 4:
+        return False
+    if len(normalized.split()) > 10:
+        return False
+    if normalized in {"xin chao", "cam on", "help", "test"}:
+        return False
+    return True
 
 
 def list_chat_sessions(status: str = "active", limit: int = 50) -> list[dict[str, Any]]:

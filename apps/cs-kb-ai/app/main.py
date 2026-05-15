@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app import repository
@@ -201,6 +201,7 @@ PIPELINE_INSPECTION_STAGE_ORDER = [
     "plan",
     "reduce",
     "refine",
+    "vocabulary_discovery",
     "verify",
     "commit",
 ]
@@ -1053,6 +1054,45 @@ def list_taxonomy_intents(status: str = "active") -> list[dict[str, Any]]:
 @app.get("/ai/v1/config/vietnamese/match")
 def vietnamese_config_match(text: str) -> dict[str, Any]:
     return repository.vietnamese_config_match_preview(text)
+
+
+@app.get("/ai/v1/config/vocabulary/candidates")
+def list_vocabulary_candidates(status: str = "suggested", limit: int = 100) -> list[dict[str, Any]]:
+    return repository.list_vocabulary_candidates(status, limit)
+
+
+@app.post("/ai/v1/config/vocabulary/candidates/{candidate_id}/status")
+def update_vocabulary_candidate_status(candidate_id: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    try:
+        return repository.update_vocabulary_candidate_status(
+            candidate_id,
+            status=str(payload.get("status") or "in_review"),
+            actor=str(payload.get("actor") or "system"),
+            note=str(payload.get("note") or ""),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/config/vocabulary/candidates/{candidate_id}/activate")
+def activate_vocabulary_candidate(candidate_id: str, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    try:
+        return repository.activate_vocabulary_candidate(
+            candidate_id,
+            actor=str(payload.get("actor") or "system"),
+            activation_type=str(payload.get("activation_type") or "auto"),
+            canonical_key=str(payload.get("canonical_key") or ""),
+            term_key=str(payload.get("term_key") or ""),
+            canonical_label=str(payload.get("canonical_label") or ""),
+            relation_pattern=str(payload.get("relation_pattern") or ""),
+            note=str(payload.get("note") or ""),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/ai/v1/search/synonyms", response_model=list[SynonymGroup])
