@@ -3,7 +3,15 @@ from __future__ import annotations
 import os
 
 
-EMBEDDING_DIMENSIONS = 384
+EMBEDDING_DIMENSIONS = 1536
+DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
+
+
+def first_non_empty(*values: str | None) -> str:
+    for value in values:
+        if value and value.strip():
+            return value.strip()
+    return ""
 
 
 class Settings:
@@ -12,7 +20,6 @@ class Settings:
             "DATABASE_URL",
             "postgres://cs_kb:cs_kb@localhost:5432/cs_kb?sslmode=disable",
         )
-        self.embedding_dimensions = int(os.getenv("EMBEDDING_DIMENSIONS", str(EMBEDDING_DIMENSIONS)))
         self.chunk_target_tokens = int(os.getenv("CHUNK_TARGET_TOKENS", "260"))
         self.chunk_overlap_tokens = int(os.getenv("CHUNK_OVERLAP_TOKENS", "48"))
         self.max_upload_bytes = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
@@ -66,10 +73,12 @@ class Settings:
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()
         self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "").strip()
-        self.embedding_provider = os.getenv("EMBEDDING_PROVIDER", "local_hash").strip().lower()
-        self.embedding_base_url = os.getenv("EMBEDDING_BASE_URL", self.openrouter_base_url).strip()
-        self.embedding_api_key = os.getenv("EMBEDDING_API_KEY", self.openrouter_api_key).strip()
-        self.embedding_model = os.getenv("EMBEDDING_MODEL", "").strip()
+        self.embedding_dimensions = int(os.getenv("EMBEDDING_DIMENSIONS", str(EMBEDDING_DIMENSIONS)))
+        self.embedding_base_url = first_non_empty(os.getenv("EMBEDDING_BASE_URL"), self.openrouter_base_url)
+        self.embedding_api_key = first_non_empty(os.getenv("EMBEDDING_API_KEY"), self.openrouter_api_key)
+        self.embedding_model = first_non_empty(os.getenv("EMBEDDING_MODEL"), DEFAULT_EMBEDDING_MODEL)
+        embedding_provider = os.getenv("EMBEDDING_PROVIDER", "").strip().lower()
+        self.embedding_provider = embedding_provider or ("openrouter" if self.embedding_api_key else "local_hash")
 
 
 settings = Settings()

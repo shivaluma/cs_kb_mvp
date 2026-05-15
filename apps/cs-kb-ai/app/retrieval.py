@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from app.embedding import embed_text
+from app.embedding import EmbeddingProviderError, embed_text
 from app import repository
 from app.search_labels import is_bad_search_label
 from app.schemas import Citation, RetrievalRequest, RetrievalResponse, RetrievalResult
@@ -51,7 +51,28 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
     if request.mode in {"lexical", "hybrid"}:
         lexical_rows = repository.lexical_search(normalized_query, request.filters, search_limit)
     if request.mode in {"vector", "hybrid"}:
-        vector_rows = repository.vector_search(embed_text(normalized_query), request.filters, search_limit)
+        try:
+            vector_rows = repository.vector_search(embed_text(normalized_query), request.filters, search_limit)
+        except EmbeddingProviderError:
+            warnings.append("embedding_unavailable")
+            if request.mode == "vector":
+                latency_ms = repository.log_retrieval(
+                    request.query,
+                    request.filters.model_dump(),
+                    request.mode,
+                    0,
+                    started_at,
+                )
+                return RetrievalResponse(
+                    query=request.query,
+                    normalized_query=normalized_query,
+                    query_expansion=query_expansion,
+                    mode=request.mode,
+                    results=[],
+                    citations=[],
+                    warnings=[*warnings, "no_reliable_source"],
+                    latency_ms=latency_ms,
+                )
 
     if request.mode == "lexical":
         fused_rows = rows_from_single_mode(lexical_rows, "lexical", search_limit)

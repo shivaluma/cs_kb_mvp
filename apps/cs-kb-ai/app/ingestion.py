@@ -5,7 +5,7 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
-from app.embedding import embed_text
+from app.embedding import embed_texts, embedding_runtime_metadata
 from app.openrouter import (
     extract_rule_table_units,
     extract_mixed_docx_policy_units,
@@ -4740,8 +4740,10 @@ def validate_units_for_review(chunks: list[Any], document_type: str) -> list[Any
 
 
 def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrichment: dict[str, Any], filename: str) -> list[dict[str, Any]]:
-    chunks = []
+    prepared_chunks = []
+    embedding_inputs = []
     document_title = str(base_metadata.get("title") or path_title(filename))
+    embedding_metadata = embedding_runtime_metadata()
     for chunk in source_chunks:
         unit_type = str(chunk.metadata.get("unit_type") or chunk.section or "text_section")
         search_label = meaningful_search_label(chunk.heading, chunk.content, unit_type)
@@ -4764,6 +4766,7 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
             **enrichment,
             "source_filename": filename,
             **chunk.metadata,
+            **embedding_metadata,
             "artifact_type": chunk.metadata.get("artifact_type") or ("draft_unit" if extraction_status != "failed" else "source_evidence"),
             "document_title": document_title,
             "extracted_heading": chunk.metadata.get("extracted_heading") or chunk.heading,
@@ -4775,18 +4778,25 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
             "publish_state": chunk.metadata.get("publish_state") or ("blocked" if publish_blocked else "draft"),
             "unit_type": unit_type,
         }
-        chunks.append(
+        embedding_inputs.append(embedding_text_for_unit(chunk.heading, chunk.content, unit_type))
+        prepared_chunks.append(
             {
                 "chunk_index": chunk.chunk_index,
                 "section": chunk.section,
                 "heading": search_label,
                 "content": chunk.content,
                 "token_count": chunk.token_count,
-                "embedding": embed_text(embedding_text_for_unit(chunk.heading, chunk.content, unit_type)),
                 "metadata": chunk_metadata,
             }
         )
-    return chunks
+    embeddings = embed_texts(embedding_inputs)
+    return [
+        {
+            **chunk,
+            "embedding": embeddings[index],
+        }
+        for index, chunk in enumerate(prepared_chunks)
+    ]
 
 
 def replace_chunk_metadata(chunk: Any, metadata: dict[str, Any]) -> Any:

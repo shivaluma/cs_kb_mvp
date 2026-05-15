@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS ai_chunks (
   heading text NOT NULL DEFAULT '',
   content text NOT NULL,
   token_count integer NOT NULL DEFAULT 0,
-  embedding vector(384) NOT NULL,
+  embedding vector(1536) NOT NULL,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (version_id, chunk_index)

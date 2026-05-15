@@ -13,7 +13,7 @@ from fastapi.responses import Response
 from app import repository
 from app.chat import grounded_chat, grounded_chat_session_message
 from app.config import settings
-from app.embedding import embed_text
+from app.embedding import embed_text, embedding_runtime_metadata, remote_embedding_configured
 from app.ingestion import prepare_document_version, preview_document_metadata
 from app.retrieval import retrieve
 from app.search_labels import embedding_text_for_unit, meaningful_search_label
@@ -106,6 +106,14 @@ def healthz() -> dict[str, Any]:
         )
 
     services.append(qdrant_health())
+    services.append(
+        {
+            "name": "embedding_provider",
+            "status": "healthy" if remote_embedding_configured() else "skipped",
+            "latency_ms": 0,
+            "detail": f"{settings.embedding_provider}:{settings.embedding_model}:{settings.embedding_dimensions}",
+        }
+    )
     overall = "healthy" if all(service["status"] in {"healthy", "skipped"} for service in services) else "degraded"
     return {
         "status": overall,
@@ -631,6 +639,7 @@ def failed_extraction_draft(
         ],
     }
     chunks: list[dict[str, Any]] = []
+    embedding_metadata = embedding_runtime_metadata()
     if raw_text.strip():
         chunks.append(
             {
@@ -642,6 +651,7 @@ def failed_extraction_draft(
                 "embedding": embed_text(raw_text[:4000]),
                 "metadata": {
                     **base_metadata,
+                    **embedding_metadata,
                     "unit_type": "full_sop",
                     "retrieval_scope": "document",
                     "source_evidence_only": True,
@@ -660,6 +670,7 @@ def failed_extraction_draft(
                     "metadata": {
                         **base_metadata,
                         **source_chunk.metadata,
+                        **embedding_metadata,
                         "unit_type": "text_section",
                         "retrieval_scope": "unit",
                         "source_evidence_only": True,
@@ -862,7 +873,7 @@ def update_extraction_unit(unit_id: str, request: ExtractionUnitUpdateRequest) -
             unit_type=request.unit_type,
             confidence=request.confidence,
             review_status=request.review_status,
-            metadata=request.metadata,
+            metadata={**request.metadata, **embedding_runtime_metadata()},
             actor=request.actor,
             embedding=embed_text(embedding_text_for_unit(request.title, request.content, request.unit_type)),
         )
@@ -883,7 +894,7 @@ def create_extraction_unit(version_id: str, request: ExtractionUnitCreateRequest
             unit_type=request.unit_type,
             confidence=request.confidence,
             review_status=request.review_status,
-            metadata=request.metadata,
+            metadata={**request.metadata, **embedding_runtime_metadata()},
             actor=request.actor,
             embedding=embed_text(embedding_text_for_unit(request.title, request.content, request.unit_type)),
         )
