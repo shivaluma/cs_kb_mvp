@@ -75,6 +75,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/ai/documents/{id}/extraction-units", h.proxyAIDocumentExtractionUnits)
 	mux.HandleFunc("PATCH /api/v1/ai/extraction-units/{id}", h.proxyAIExtractionUnitUpdate)
 	mux.HandleFunc("POST /api/v1/ai/extraction-units/{id}", h.proxyAIExtractionUnitUpdate)
+	mux.HandleFunc("DELETE /api/v1/ai/extraction-units/{id}", h.proxyAIExtractionUnitDelete)
 	mux.HandleFunc("POST /api/v1/ai/documents/{id}/archive", h.proxyAIDocumentArchive)
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/publish", h.proxyAIVersionPublish)
 	mux.HandleFunc("POST /api/v1/ai/versions/{id}/retry-indexing", h.proxyAIVersionRetryIndexing)
@@ -398,6 +399,10 @@ func (h *Handler) proxyAICollectionDetail(w http.ResponseWriter, r *http.Request
 
 func (h *Handler) proxyAIExtractionUnitUpdate(w http.ResponseWriter, r *http.Request) {
 	h.proxyAIWithMethod("/ai/v1/extraction-units/"+r.PathValue("id"), http.MethodPatch, 30*time.Second)(w, r)
+}
+
+func (h *Handler) proxyAIExtractionUnitDelete(w http.ResponseWriter, r *http.Request) {
+	h.proxyAIWithMethod("/ai/v1/extraction-units/"+r.PathValue("id"), http.MethodDelete, 30*time.Second)(w, r)
 }
 
 func (h *Handler) proxyAIVersionRaw(w http.ResponseWriter, r *http.Request) {

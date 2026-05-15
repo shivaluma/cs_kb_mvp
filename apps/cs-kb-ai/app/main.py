@@ -884,6 +884,16 @@ def update_extraction_unit(unit_id: str, request: ExtractionUnitUpdateRequest) -
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.delete("/ai/v1/extraction-units/{unit_id}")
+def delete_extraction_unit(unit_id: str, actor: str = "cs-ops-ui") -> dict[str, Any]:
+    try:
+        return repository.delete_extraction_unit(unit_id=unit_id, actor=actor)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/ai/v1/versions/{version_id}/extraction-units", response_model=ExtractionUnit)
 def create_extraction_unit(version_id: str, request: ExtractionUnitCreateRequest) -> ExtractionUnit:
     try:

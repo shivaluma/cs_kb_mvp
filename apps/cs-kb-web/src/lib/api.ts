@@ -60,6 +60,24 @@ export async function apiPatch<T = unknown>(
   return response.json() as Promise<T>;
 }
 
+export async function apiDelete<T = unknown>(
+  path: string,
+  timeoutMs = 15000,
+): Promise<T> {
+  const response = await withTimeout((signal) =>
+    fetch(`${API_BASE_URL}${path}`, {
+      method: "DELETE",
+      signal,
+    }),
+    timeoutMs,
+  );
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`DELETE ${path} failed (${response.status})${detail ? `: ${detail}` : ""}`);
+  }
+  return response.json() as Promise<T>;
+}
+
 export async function apiUpload<T>(path: string, form: FormData): Promise<T> {
   const response = await withTimeout(
     (signal) =>

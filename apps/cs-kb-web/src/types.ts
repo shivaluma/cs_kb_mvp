@@ -402,7 +402,7 @@ export type ExtractionUnit = {
   source_page?: number | null;
   source_bbox?: number[];
   confidence: number;
-  review_status: "needs_review" | "reviewed" | "approved";
+  review_status: "needs_review" | "reviewed" | "approved" | "rejected";
   metadata: Record<string, unknown>;
 };
 
@@ -411,7 +411,7 @@ export type ExtractionUnitUpdate = {
   content: string;
   unit_type: string;
   confidence: number;
-  review_status: "needs_review" | "reviewed" | "approved";
+  review_status: "needs_review" | "reviewed" | "approved" | "rejected";
   metadata: Record<string, unknown>;
   actor: string;
 };

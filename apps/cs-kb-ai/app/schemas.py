@@ -30,7 +30,7 @@ DocumentType = Literal[
     "training_material",
     "unknown",
 ]
-ReviewStatus = Literal["needs_review", "reviewed", "approved"]
+ReviewStatus = Literal["needs_review", "reviewed", "approved", "rejected"]
 BulkReviewScope = Literal["all", "atomic"]
 RelationType = Literal[
     "references",
