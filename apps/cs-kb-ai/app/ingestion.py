@@ -758,7 +758,7 @@ def extract_mixed_docx_policy_chunks(
         "source_type": classification.source_type,
         "sub_type": "communication_guideline",
         "structure_type": "mixed_docx",
-        "actor": "CS",
+        "actor": "cs",
         "owner_context": "Customer Service",
         "affected_audience": document_audience,
         "audience": document_audience,
@@ -842,7 +842,7 @@ def extract_mixed_docx_policy_chunks(
                     "source_type": classification.source_type,
                     "sub_type": "communication_guideline",
                     "structure_type": "mixed_docx",
-                    "actor": "CS",
+                    "actor": "cs",
                     "owner_context": "Customer Service",
                     "affected_audience": infer_affected_audience(content) or document_audience,
                     "audience": infer_affected_audience(content) or document_audience,
@@ -890,7 +890,7 @@ def extract_mixed_docx_policy_chunks(
                         "source_type": classification.source_type,
                         "sub_type": "communication_guideline",
                         "structure_type": "mixed_docx",
-                        "actor": "CS",
+                        "actor": "cs",
                         "owner_context": "Customer Service",
                         "affected_audience": infer_affected_audience(row_content) or document_audience,
                         "audience": infer_affected_audience(row_content) or document_audience,
@@ -943,7 +943,7 @@ def extract_mixed_docx_policy_chunks(
             "source_type": classification.source_type,
             "sub_type": "communication_guideline",
             "structure_type": "mixed_docx",
-            "actor": "CS",
+            "actor": "cs",
             "owner_context": "Customer Service",
             "affected_audience": infer_affected_audience(text) or document_audience,
             "audience": infer_affected_audience(text) or document_audience,
@@ -966,6 +966,7 @@ def extract_mixed_docx_policy_chunks(
             "review_status": "needs_review",
             "tags": mixed_docx_tags(unit_type, text, channels, risk),
             "aliases": mixed_docx_aliases(unit_type, section_path, text),
+            **mixed_docx_condition_action_metadata(text),
             **({"attached_to": attached_to} if attached_to else {}),
         }
         chunks.append(
@@ -1014,11 +1015,15 @@ def mixed_docx_source_ref_for_block(filename: str, block: dict[str, Any]) -> dic
             [str(column) for column in block.get("columns", [])],
             str(block.get("cell_text") or block.get("text") or ""),
         )
+    numbering = block.get("numbering") if isinstance(block.get("numbering"), dict) else {}
+    source_ref = block.get("source_ref") if isinstance(block.get("source_ref"), dict) else {}
+    inline_item_index = source_ref.get("inline_item_index") or numbering.get("inline_item_index")
     return {
         "source_type": "docx",
         "source_file": filename,
         "paragraph_index": int(block.get("paragraph_index") or 0),
         "heading_path": [str(item) for item in block.get("section_path", []) if str(item).strip()],
+        **({"inline_item_index": inline_item_index} if inline_item_index is not None else {}),
     }
 
 
@@ -1131,6 +1136,22 @@ def mixed_docx_unit_type(block: dict[str, Any]) -> str:
     return ""
 
 
+def mixed_docx_condition_action_metadata(text: str) -> dict[str, str]:
+    stripped = str(text or "").strip()
+    normalized = normalized_search_text(stripped)
+    if not normalized.startswith("neu "):
+        return {}
+    separator_match = re.search(r"\s*(?::|=>|->| thì | thi )\s*", stripped, re.IGNORECASE)
+    if not separator_match:
+        return {"condition": stripped}
+    condition = stripped[: separator_match.start()].strip(" :-")
+    action = stripped[separator_match.end():].strip(" :-")
+    return {
+        **({"condition": condition} if condition else {}),
+        **({"action": action} if action else {}),
+    }
+
+
 def mixed_docx_heading(unit_type: str, text: str, section_path: list[str]) -> str:
     section_tail = section_path[-1] if section_path else ""
     if unit_type == "compliance_rule":
@@ -1186,7 +1207,7 @@ def mixed_docx_risk_metadata(text: str) -> dict[str, Any]:
         risk_category = risk_category or "disclosure_control"
     if "quy trinh xu ly noi bo" in normalized:
         signals.append("quy trình xử lý nội bộ")
-        risk_level = max_risk_level(risk_level, "high")
+        risk_level = max_risk_level(risk_level, "critical")
         risk_category = "internal_process_disclosure"
     if "che tai" in normalized:
         signals.append("chế tài")
@@ -5076,6 +5097,18 @@ def source_block_quality_checks(blocks: list[dict[str, Any]]) -> dict[str, bool]
     table_blocks = [block for block in blocks if isinstance(block, dict) and str(block.get("type") or "").startswith("docx_table")]
     table_rows = [block for block in blocks if isinstance(block, dict) and block.get("type") == "docx_table_row"]
     list_items = [block for block in blocks if isinstance(block, dict) and block.get("block_type") == "list_item"]
+    call_chat_blocks = [
+        block
+        for block in blocks
+        if isinstance(block, dict)
+        and "call" in normalized_search_text(" > ".join(str(item) for item in block.get("section_path", [])))
+        and "chat" in normalized_search_text(" > ".join(str(item) for item in block.get("section_path", [])))
+    ]
+    inline_items = [
+        block
+        for block in list_items
+        if isinstance(block.get("numbering"), dict) and block["numbering"].get("inline_bullet") is True
+    ]
     return {
         "table_order_preserved": all(
             int(left.get("index") or 0) <= int(right.get("index") or 0)
@@ -5094,6 +5127,11 @@ def source_block_quality_checks(blocks: list[dict[str, Any]]) -> dict[str, bool]
             for block in table_rows
         ) if table_rows else True,
         "bullet_items_split": bool(list_items) and all(block.get("list_group") for block in list_items),
+        "call_chat_not_nested_under_email": all(
+            not any("email" in normalized_search_text(str(item)) for item in block.get("section_path", [])[:-1])
+            for block in call_chat_blocks
+        ) if call_chat_blocks else True,
+        "inline_bullets_split": bool(inline_items),
     }
 
 
@@ -5267,6 +5305,33 @@ def extraction_quality_checks(chunks: list[dict[str, Any]], metadata_items: list
         if str(metadata.get("retrieval_scope") or "") != "document"
         and str(metadata.get("unit_type") or "") != "full_sop"
     ]
+    call_chat_metadata = [
+        metadata for metadata in atomic_metadata
+        if (
+            {"call", "chat"}.issubset(set(metadata.get("channel") or []))
+            or (
+                "call" in normalized_search_text(" ".join(str(item) for item in metadata.get("section_path", [])))
+                and "chat" in normalized_search_text(" ".join(str(item) for item in metadata.get("section_path", [])))
+            )
+        )
+    ]
+    inline_bullet_metadata = [
+        metadata
+        for metadata in metadata_items
+        if isinstance(metadata.get("numbering"), dict) and metadata["numbering"].get("inline_bullet") is True
+    ]
+    mixed_docx_metadata = [
+        metadata for metadata in metadata_items if metadata.get("structure_type") == "mixed_docx"
+    ]
+    def has_customer_service_audience(metadata: dict[str, Any]) -> bool:
+        values = [metadata.get("audience"), metadata.get("affected_audience")]
+        for value in values:
+            if isinstance(value, list) and any(normalized_search_text(str(item)) == "customer service" for item in value):
+                return True
+            if isinstance(value, str) and normalized_search_text(value) == "customer service":
+                return True
+        return False
+
     checks = {
         "table_order_preserved": all(metadata.get("docx_order_preserved") is not False for metadata in metadata_items),
         "section_path_present": all(isinstance(metadata.get("section_path"), list) and metadata.get("section_path") for metadata in atomic_metadata if metadata.get("structure_type") == "mixed_docx"),
@@ -5283,6 +5348,16 @@ def extraction_quality_checks(chunks: list[dict[str, Any]], metadata_items: list
             for metadata in table_ref_units
         ) if table_ref_units else True,
         "bullet_items_split": sum(1 for metadata in metadata_items if metadata.get("block_type") == "list_item") >= 2,
+        "call_chat_not_nested_under_email": bool(call_chat_metadata) and all(
+            not any("email" in normalized_search_text(str(item)) for item in metadata.get("section_path", [])[:-1])
+            for metadata in call_chat_metadata
+        ),
+        "inline_bullets_split": bool(inline_bullet_metadata),
+        "actor_audience_normalized": all(
+            str(metadata.get("actor") or "").lower() == "cs"
+            and not has_customer_service_audience(metadata)
+            for metadata in mixed_docx_metadata
+        ) if mixed_docx_metadata else True,
         "email_macro_table_extracted": any(
             metadata.get("unit_type") == "macro_table"
             and "email" in (metadata.get("channel") or [])
@@ -5305,6 +5380,19 @@ def extraction_quality_checks(chunks: list[dict[str, Any]], metadata_items: list
             metadata.get("unit_type") in {"compliance_rule", "warning"}
             and "che tai" in normalized_search_text(str(chunk.get("content") or ""))
             and metadata.get("risk_level") in {"high", "critical"}
+            for chunk in chunks
+            for metadata in [chunk.get("metadata") or {}]
+        ),
+        "high_risk_forbidden_phrase_detected": any(
+            any(signal in normalized_search_text(str(chunk.get("content") or "")) for signal in ["tuyet doi khong", "cham loi", "khong chu dong cung cap"])
+            and metadata.get("risk_level") in {"high", "critical"}
+            for chunk in chunks
+            for metadata in [chunk.get("metadata") or {}]
+        ),
+        "critical_internal_disclosure_detected": any(
+            "quy trinh xu ly noi bo" in normalized_search_text(str(chunk.get("content") or ""))
+            and metadata.get("risk_level") == "critical"
+            and "internal_process_disclosure" in str(metadata.get("risk_category") or "")
             for chunk in chunks
             for metadata in [chunk.get("metadata") or {}]
         ),

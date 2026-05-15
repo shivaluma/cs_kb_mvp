@@ -39,6 +39,10 @@ ROMAN_SECTION_RE = re.compile(r"^\s*([IVXLCDM]+)[.)]\s+(.+?)\s*$", re.IGNORECASE
 NUMBERED_SECTION_RE = re.compile(r"^\s*(\d{1,2})[.)]\s*(.+?)\s*$")
 DOCX_TEXT_HEADING_RE = re.compile(r"^\s*(?:đối với|doi voi)\s+(.+?)\s*$", re.IGNORECASE)
 DOCX_PROHIBITION_RE = re.compile(r"(tuyệt\s+đối\s+không|không\s+chủ\s+động\s+cung\s+cấp|quy\s+trình\s+xử\s+lý\s+nội\s+bộ|chế\s+tài|chấm\s+lỗi)", re.IGNORECASE)
+INLINE_BULLET_MARKER_RE = re.compile(
+    r"(^|\s)([-*•‣▪])\s+(?=(?:nếu|neu|kh|tx|cs|không|khong|chỉ|chi|trường hợp|truong hop)\b)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -271,7 +275,7 @@ def extract_docx_structure(data: bytes, filename: str = "") -> tuple[str, list[d
     blocks: list[dict[str, Any]] = []
     raw_lines: list[str] = []
     tables: list[dict[str, Any]] = []
-    section_path: list[str] = []
+    section_stack: list[dict[str, Any]] = []
     paragraph_index = 0
     table_index = 0
     current_list_group = ""
@@ -280,20 +284,21 @@ def extract_docx_structure(data: bytes, filename: str = "") -> tuple[str, list[d
         if block_kind == "paragraph":
             paragraph = body_item
             assert isinstance(paragraph, DocxParagraph)
-            block, next_section_path, current_list_group = docx_paragraph_block(
+            block, next_section_stack, current_list_group = docx_paragraph_block(
                 paragraph=paragraph,
                 paragraph_index=paragraph_index,
                 block_index=len(blocks),
-                section_path=section_path,
+                section_stack=section_stack,
                 current_list_group=current_list_group,
                 source_file=filename,
             )
             paragraph_index += 1
             if not block:
                 continue
-            section_path = next_section_path
-            blocks.append(block)
-            raw_lines.append(str(block.get("text") or ""))
+            section_stack = next_section_stack
+            paragraph_blocks = expand_docx_inline_bullet_block(block, start_block_index=len(blocks))
+            blocks.extend(paragraph_blocks)
+            raw_lines.extend(str(item.get("text") or "") for item in paragraph_blocks if str(item.get("text") or "").strip())
             continue
 
         if block_kind != "table":
@@ -304,7 +309,7 @@ def extract_docx_structure(data: bytes, filename: str = "") -> tuple[str, list[d
             table=table,
             table_index=table_index,
             start_block_index=len(blocks),
-            section_path=section_path,
+            section_path=section_path_from_stack(section_stack),
             source_file=filename,
         )
         table_index += 1
@@ -333,23 +338,25 @@ def docx_paragraph_block(
     paragraph: DocxParagraph,
     paragraph_index: int,
     block_index: int,
-    section_path: list[str],
+    section_stack: list[dict[str, Any]],
     current_list_group: str,
     source_file: str = "",
-) -> tuple[dict[str, Any], list[str], str]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
     text = normalize_cell_text(paragraph.text)
     if not text:
-        return {}, section_path, ""
+        return {}, section_stack, ""
 
     style = str(getattr(getattr(paragraph, "style", None), "name", "") or "")
     numbering = docx_paragraph_numbering(paragraph)
-    heading = docx_section_heading(text, style, bool(numbering))
-    next_section_path = section_path
+    heading = docx_section_heading(text, style, numbering)
+    next_section_stack = section_stack
+    next_section_path = section_path_from_stack(section_stack)
     block_type = "paragraph"
     list_group = ""
 
     if heading:
-        next_section_path = next_docx_section_path(section_path, heading["text"], int(heading["level"]))
+        next_section_stack = next_docx_section_stack(section_stack, heading["text"], int(heading["level"]))
+        next_section_path = section_path_from_stack(next_section_stack)
         block_type = "heading"
         current_list_group = ""
     elif is_docx_list_item(text, style, numbering):
@@ -382,7 +389,7 @@ def docx_paragraph_block(
         "source_ref": source_ref,
         "source_refs": [source_ref],
     }
-    return block, next_section_path, current_list_group
+    return block, next_section_stack, current_list_group
 
 
 def docx_table_blocks(
@@ -513,14 +520,14 @@ def is_docx_list_item(text: str, style: str, numbering: dict[str, Any]) -> bool:
     return bool(BULLET_RE.match(text))
 
 
-def docx_section_heading(text: str, style: str, has_numbering: bool) -> dict[str, Any]:
+def docx_section_heading(text: str, style: str, numbering: dict[str, Any]) -> dict[str, Any]:
     stripped = text.strip()
     roman = ROMAN_SECTION_RE.match(stripped)
     if roman and len(stripped) <= 180:
         return {"level": 1, "text": stripped, "kind": "roman_section"}
 
     numbered = NUMBERED_SECTION_RE.match(stripped)
-    if numbered and len(stripped) <= 160 and not has_numbering:
+    if numbered and len(stripped) <= 160:
         remainder = numbered.group(2).strip()
         if DOCX_TEXT_HEADING_RE.match(remainder) or len(remainder.split()) <= 10:
             return {"level": 2, "text": stripped, "kind": "numbered_subsection"}
@@ -534,7 +541,46 @@ def docx_section_heading(text: str, style: str, has_numbering: bool) -> dict[str
         level = int(level_match.group(1)) if level_match else 1
         return {"level": min(max(level, 1), 4), "text": stripped, "kind": "style_heading"}
 
+    if looks_like_docx_top_level_heading_text(stripped, style, numbering):
+        return {"level": 1, "text": stripped, "kind": "inferred_top_level_heading"}
+
     return {}
+
+
+def looks_like_docx_top_level_heading_text(text: str, style: str, numbering: dict[str, Any]) -> bool:
+    if len(text) > 180 or BULLET_RE.match(text):
+        return False
+    normalized = normalize_phrase(text)
+    if DOCX_TEXT_HEADING_RE.match(text):
+        return False
+    top_level_prefixes = (
+        "mau cau",
+        "quy tac",
+        "quy dinh",
+        "truong hop",
+        "noi dung",
+        "cach xung ho",
+        "kiem soat",
+    )
+    if not normalized.startswith(top_level_prefixes):
+        return False
+    style_key = style.lower()
+    has_list_or_numbering_context = bool(numbering) or any(signal in style_key for signal in ["list", "number", "heading"])
+    return bool(has_list_or_numbering_context or len(text.split()) <= 14)
+
+
+def section_path_from_stack(section_stack: list[dict[str, Any]]) -> list[str]:
+    return [str(item.get("text") or "").strip() for item in sorted(section_stack, key=lambda item: int(item.get("level") or 0)) if str(item.get("text") or "").strip()]
+
+
+def next_docx_section_stack(section_stack: list[dict[str, Any]], heading: str, level: int) -> list[dict[str, Any]]:
+    next_stack = [
+        item
+        for item in section_stack
+        if int(item.get("level") or 0) < level
+    ]
+    next_stack.append({"level": max(level, 1), "text": heading})
+    return next_stack
 
 
 def next_docx_section_path(current_path: list[str], heading: str, level: int) -> list[str]:
@@ -545,6 +591,72 @@ def next_docx_section_path(current_path: list[str], heading: str, level: int) ->
         output.append("")
     output = [item for item in output if item]
     return [*output, heading]
+
+
+def split_docx_inline_bullets(text: str) -> tuple[str, list[str]]:
+    markers = list(INLINE_BULLET_MARKER_RE.finditer(text))
+    if not markers:
+        return text.strip(), []
+    title = text[: markers[0].start(2)].strip(" :-\n\r\t")
+    items: list[str] = []
+    for index, marker in enumerate(markers):
+        start = marker.end()
+        end = markers[index + 1].start(2) if index + 1 < len(markers) else len(text)
+        item = text[start:end].strip(" ;\n\r\t")
+        if item:
+            items.append(item)
+    return title, items
+
+
+def expand_docx_inline_bullet_block(block: dict[str, Any], *, start_block_index: int) -> list[dict[str, Any]]:
+    block_type = str(block.get("block_type") or block.get("type") or "")
+    if block_type == "heading" or block_type.startswith("docx_table"):
+        return [block]
+    title, items = split_docx_inline_bullets(str(block.get("text") or ""))
+    if len(items) < 2:
+        return [block]
+
+    list_group = str(block.get("list_group") or f"list_{start_block_index}")
+    output: list[dict[str, Any]] = []
+    if title:
+        parent = dict(block)
+        parent_refs = [dict(ref, inline_group=True) for ref in block.get("source_refs", []) if isinstance(ref, dict)]
+        parent["block_id"] = f"{block.get('block_id')}_group"
+        parent["block_type"] = "list_group"
+        parent["type"] = "list_group"
+        parent["index"] = start_block_index
+        parent["text"] = title
+        parent["list_group"] = list_group
+        parent["items"] = items
+        if parent_refs:
+            parent["source_refs"] = parent_refs
+            parent["source_ref"] = parent_refs[0]
+        output.append(parent)
+
+    for item_index, item in enumerate(items, start=1):
+        item_block = dict(block)
+        item_refs = [
+            dict(ref, inline_item_index=item_index)
+            for ref in block.get("source_refs", [])
+            if isinstance(ref, dict)
+        ]
+        item_block["block_id"] = f"{block.get('block_id')}_i{item_index}"
+        item_block["block_type"] = "list_item"
+        item_block["type"] = "list_item"
+        item_block["index"] = start_block_index + len(output)
+        item_block["text"] = item
+        item_block["list_group"] = list_group
+        item_block["numbering"] = {
+            **(block.get("numbering") if isinstance(block.get("numbering"), dict) else {}),
+            "inline_bullet": True,
+            "inline_item_index": item_index,
+        }
+        if item_refs:
+            item_block["source_refs"] = item_refs
+            item_block["source_ref"] = item_refs[0]
+        output.append(item_block)
+
+    return output
 
 
 def extract_docx_text(data: bytes) -> str:
