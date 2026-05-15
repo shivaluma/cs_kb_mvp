@@ -456,6 +456,93 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertNotIn("missing_atomic_units", verification["payload"]["hard_blockers"])
         self.assertNotIn("degraded_units_require_manual_curation", verification["payload"]["hard_blockers"])
 
+    def test_mixed_docx_communication_guideline_preserves_order_sections_and_risk_units(self) -> None:
+        ingestion.extract_rule_table_units = lambda _filename, _raw_text: self.fail("mixed DOCX should not use pure rule_table extraction")
+        data = communication_guideline_docx_bytes()
+
+        raw, _digest, chunks, warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định nội dung phản hồi TX, KH.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=data,
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        self.assertEqual(enrichment["document_type"], "policy_rule")
+        self.assertEqual(enrichment["sub_type"], "communication_guideline")
+        self.assertEqual(enrichment["structure_type"], "mixed_docx")
+        self.assertEqual(enrichment["extraction_status"], "structured")
+        self.assertIn("mixed_docx_policy_extraction_used", warnings)
+
+        source_blocks = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_blocks")
+        email_open_block = next(
+            block for block in source_blocks["payload"]["preview_blocks"]
+            if block.get("type") == "docx_table_row" and "Open" in block.get("text", "")
+        )
+        self.assertEqual(email_open_block["section_path"], ["I. Mẫu câu chào mở đầu và kết thúc", "1. Đối với Email"])
+        self.assertLess(raw.index("Open | Xin chào Quý khách hàng"), raw.index("IV. Kiểm soát chất lượng"))
+
+        macro_table = next(chunk for chunk in chunks if chunk["metadata"].get("unit_type") == "macro_table")
+        self.assertEqual(macro_table["metadata"]["section_path"], ["I. Mẫu câu chào mở đầu và kết thúc", "1. Đối với Email"])
+        self.assertIn("Xin chào Quý khách hàng", "\n".join(macro_table["metadata"]["notes"]))
+        self.assertTrue(all(ref["source_type"] == "docx_table" for ref in macro_table["metadata"]["source_refs"]))
+        self.assertEqual(
+            {row["cells"]["Phần"] for row in macro_table["metadata"]["rows"]},
+            {"Open", "Body", "Close"},
+        )
+
+        call_chat_units = [
+            chunk for chunk in chunks
+            if chunk["metadata"].get("block_type") == "list_item"
+            and "2. Đối với Call/Chat" in chunk["metadata"].get("section_path", [])
+        ]
+        self.assertGreaterEqual(len(call_chat_units), 2)
+        self.assertEqual(len({unit["content"] for unit in call_chat_units}), len(call_chat_units))
+        self.assertTrue(any("Xin chào anh/chị" in unit["content"] for unit in call_chat_units))
+
+        apology_units = [
+            chunk for chunk in chunks
+            if chunk["metadata"].get("unit_type") == "wording_rule"
+        ]
+        self.assertTrue(any("xin lỗi" in unit["content"].lower() for unit in apology_units))
+
+        sanction_rule = next(chunk for chunk in chunks if "chế tài" in chunk["content"] and chunk["metadata"].get("unit_type") != "full_sop")
+        self.assertEqual(sanction_rule["metadata"]["unit_type"], "compliance_rule")
+        self.assertIn(sanction_rule["metadata"]["risk_level"], {"high", "critical"})
+        self.assertEqual(sanction_rule["metadata"]["actor"], "CS")
+        self.assertEqual(sanction_rule["metadata"]["affected_audience"], ["driver", "customer"])
+        self.assertNotEqual(sanction_rule["metadata"].get("affected_audience"), ["Customer Service"])
+
+        internal_rule = next(chunk for chunk in chunks if "quy trình xử lý nội bộ" in chunk["content"] and chunk["metadata"].get("unit_type") != "full_sop")
+        self.assertEqual(internal_rule["metadata"]["unit_type"], "compliance_rule")
+        self.assertIn(internal_rule["metadata"]["risk_level"], {"high", "critical"})
+        self.assertIn("internal_process_disclosure", internal_rule["metadata"]["risk_category"])
+
+        self.assertTrue(
+            all(
+                any(
+                    ref.get("paragraph_index") is not None
+                    or (ref.get("source_type") == "docx_table" and ref.get("row_index") is not None)
+                    for ref in chunk["metadata"].get("source_refs", [])
+                )
+                for chunk in chunks
+            )
+        )
+
+        verification = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "verification_report")
+        checks = verification["payload"]["checks"]
+        for check in [
+            "table_order_preserved",
+            "section_path_present",
+            "table_rows_have_source_refs",
+            "bullet_items_split",
+            "email_macro_table_extracted",
+            "call_chat_greeting_extracted",
+            "apology_wording_rules_extracted",
+            "sanction_disclosure_warning_extracted",
+            "internal_process_disclosure_rule_extracted",
+        ]:
+            self.assertTrue(checks[check], check)
+
     def test_llm_refine_can_enrich_structured_units_after_extraction(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: self.fail("docx policy table should not call OpenRouter")
 
@@ -1130,6 +1217,39 @@ def docx_policy_table_bytes() -> bytes:
         cells = table.add_row().cells
         for index, value in enumerate(row):
             cells[index].text = value
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def communication_guideline_docx_bytes() -> bytes:
+    document = Document()
+    document.add_paragraph("Quy định nội dung phản hồi TX, KH")
+    document.add_paragraph("I. Mẫu câu chào mở đầu và kết thúc")
+    document.add_paragraph("1. Đối với Email")
+    table = document.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Phần"
+    table.rows[0].cells[1].text = "Nội dung"
+    for label, text in [
+        ("Open", "Xin chào Quý khách hàng,"),
+        ("Body", "CS phản hồi theo đúng nội dung xử lý trong case và không tự thêm thông tin ngoài SOP."),
+        ("Close", "Trân trọng cảm ơn Quý khách hàng đã liên hệ be."),
+    ]:
+        cells = table.add_row().cells
+        cells[0].text = label
+        cells[1].text = text
+    document.add_paragraph('Lưu ý: Câu "Xin chào Quý khách hàng" chỉ áp dụng cho Email gửi KH.')
+    document.add_paragraph("2. Đối với Call/Chat")
+    document.add_paragraph("CS chào KH/TX: Xin chào anh/chị, em là CS be đang hỗ trợ mình.", style="List Bullet")
+    document.add_paragraph("CS xác nhận đúng vấn đề của KH/TX trước khi phản hồi hướng xử lý.", style="List Bullet")
+    document.add_paragraph("II. Quy định wording xin lỗi")
+    document.add_paragraph("Chỉ dùng từ xin lỗi khi lỗi phát sinh từ phía be hoặc trải nghiệm dịch vụ bị ảnh hưởng.", style="List Bullet")
+    document.add_paragraph("Không lạm dụng xin lỗi trong mọi câu phản hồi; ưu tiên ghi nhận thông tin và hướng xử lý.", style="List Bullet")
+    document.add_paragraph("III. Nội dung không được cung cấp")
+    document.add_paragraph("Không cung cấp ngưỡng/lý do chế tài cho TX/KH trong phản hồi.", style="List Bullet")
+    document.add_paragraph("Không chủ động cung cấp quy trình xử lý nội bộ cho TX/KH.", style="List Bullet")
+    document.add_paragraph("IV. Kiểm soát chất lượng")
+    document.add_paragraph("CS có thể bị chấm lỗi nếu tự ý cung cấp nội dung nội bộ hoặc sai mẫu phản hồi.")
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()

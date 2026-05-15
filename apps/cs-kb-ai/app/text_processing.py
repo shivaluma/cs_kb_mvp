@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from docx import Document as DocxDocument
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import Table as DocxTable
+from docx.text.paragraph import Paragraph as DocxParagraph
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
@@ -31,6 +35,10 @@ ACTION_RE = re.compile(
 NOTE_RE = re.compile(r"^\s*(lưu ý|luu y|note|warning|cảnh báo|canh bao|script|sla|zt)\b", re.IGNORECASE)
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
 DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+ROMAN_SECTION_RE = re.compile(r"^\s*([IVXLCDM]+)[.)]\s+(.+?)\s*$", re.IGNORECASE)
+NUMBERED_SECTION_RE = re.compile(r"^\s*(\d{1,2})[.)]\s*(.+?)\s*$")
+DOCX_TEXT_HEADING_RE = re.compile(r"^\s*(?:đối với|doi voi)\s+(.+?)\s*$", re.IGNORECASE)
+DOCX_PROHIBITION_RE = re.compile(r"(tuyệt\s+đối\s+không|không\s+chủ\s+động\s+cung\s+cấp|quy\s+trình\s+xử\s+lý\s+nội\s+bộ|chế\s+tài|chấm\s+lỗi)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,8 @@ class DocumentClassification:
     confidence: float
     requires_review: bool
     warnings: list[str] = field(default_factory=list)
+    sub_type: str = ""
+    structure_type: str = ""
 
 
 def classify_document(filename: str, content_type: str, raw_text: str = "") -> DocumentClassification:
@@ -70,6 +80,16 @@ def classify_document(filename: str, content_type: str, raw_text: str = "") -> D
         )
     if lower_name.endswith(".pdf") and looks_like_workflow(normalized):
         return DocumentClassification("workflow_diagram", "diagram_pdf", 0.78, True)
+    if lower_name.endswith(".docx") and looks_like_communication_guideline_docx(lower_name, normalized):
+        return DocumentClassification(
+            "policy_rule",
+            "docx_policy_rule",
+            0.88,
+            True,
+            ["effective_from_missing_needs_review", "mixed_docx_policy_detected"],
+            sub_type="communication_guideline",
+            structure_type="mixed_docx",
+        )
     if looks_like_policy_rule(lower_name, normalized):
         return DocumentClassification(
             "policy_rule",
@@ -160,6 +180,16 @@ def looks_like_policy_rule(lower_name: str, normalized_text: str) -> bool:
     return sum(1 for hit in signals if hit) >= 3
 
 
+def looks_like_communication_guideline_docx(lower_name: str, normalized_text: str) -> bool:
+    source = normalize_phrase(lower_name) + " " + normalized_text
+    has_policy_name = any(term in source for term in ["quy dinh", "noi dung phan hoi", "phan hoi tx kh", "mau cau", "giao tiep"])
+    has_channel_mix = sum(1 for term in ["email", "call", "chat"] if term in source) >= 2
+    has_audience = any(term in source for term in ["tx", "kh", "tai xe", "khach hang", "quy khach hang"])
+    has_comm_content = any(term in source for term in ["macro", "script", "mau cau", "xin chao", "xin loi", "phan hoi"])
+    has_operational_risk = bool(DOCX_PROHIBITION_RE.search(source)) or any(term in source for term in ["khong cung cap", "noi bo", "zt"])
+    return has_policy_name and has_channel_mix and has_audience and (has_comm_content or has_operational_risk)
+
+
 def looks_like_kb_index_workbook(raw_text: str) -> bool:
     sheet_names = {
         normalize_phrase(match.group(1))
@@ -233,81 +263,288 @@ def render_pdf_page_jpeg(data: bytes, page_number: int = 1, scale: float = 1.8) 
     return buffer.getvalue()
 
 
-def extract_docx_structure(data: bytes) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+def extract_docx_structure(data: bytes, filename: str = "") -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     if len(data) > settings.max_upload_bytes:
         raise ValueError(f"file_too_large:{settings.max_upload_bytes}")
 
     doc = DocxDocument(io.BytesIO(data))
     blocks: list[dict[str, Any]] = []
     raw_lines: list[str] = []
+    tables: list[dict[str, Any]] = []
+    section_path: list[str] = []
+    paragraph_index = 0
+    table_index = 0
+    current_list_group = ""
 
-    for paragraph_index, paragraph in enumerate(doc.paragraphs):
-        text = normalize_cell_text(paragraph.text)
-        if not text:
+    for block_kind, body_item in iter_docx_body_blocks(doc):
+        if block_kind == "paragraph":
+            paragraph = body_item
+            assert isinstance(paragraph, DocxParagraph)
+            block, next_section_path, current_list_group = docx_paragraph_block(
+                paragraph=paragraph,
+                paragraph_index=paragraph_index,
+                block_index=len(blocks),
+                section_path=section_path,
+                current_list_group=current_list_group,
+                source_file=filename,
+            )
+            paragraph_index += 1
+            if not block:
+                continue
+            section_path = next_section_path
+            blocks.append(block)
+            raw_lines.append(str(block.get("text") or ""))
             continue
+
+        if block_kind != "table":
+            continue
+        table = body_item
+        assert isinstance(table, DocxTable)
+        table_blocks, table_payload = docx_table_blocks(
+            table=table,
+            table_index=table_index,
+            start_block_index=len(blocks),
+            section_path=section_path,
+            source_file=filename,
+        )
+        table_index += 1
+        if not table_blocks:
+            continue
+        current_list_group = ""
+        blocks.extend(table_blocks)
+        raw_lines.extend(str(block.get("text") or "") for block in table_blocks if str(block.get("text") or "").strip())
+        tables.append(table_payload)
+    return normalize_whitespace("\n".join(raw_lines)), blocks, tables
+
+
+def iter_docx_body_blocks(doc: Any) -> list[tuple[str, DocxParagraph | DocxTable]]:
+    output: list[tuple[str, DocxParagraph | DocxTable]] = []
+    body = doc.element.body
+    for child in body.iterchildren():
+        if isinstance(child, CT_P):
+            output.append(("paragraph", DocxParagraph(child, doc)))
+        elif isinstance(child, CT_Tbl):
+            output.append(("table", DocxTable(child, doc)))
+    return output
+
+
+def docx_paragraph_block(
+    *,
+    paragraph: DocxParagraph,
+    paragraph_index: int,
+    block_index: int,
+    section_path: list[str],
+    current_list_group: str,
+    source_file: str = "",
+) -> tuple[dict[str, Any], list[str], str]:
+    text = normalize_cell_text(paragraph.text)
+    if not text:
+        return {}, section_path, ""
+
+    style = str(getattr(getattr(paragraph, "style", None), "name", "") or "")
+    numbering = docx_paragraph_numbering(paragraph)
+    heading = docx_section_heading(text, style, bool(numbering))
+    next_section_path = section_path
+    block_type = "paragraph"
+    list_group = ""
+
+    if heading:
+        next_section_path = next_docx_section_path(section_path, heading["text"], int(heading["level"]))
+        block_type = "heading"
+        current_list_group = ""
+    elif is_docx_list_item(text, style, numbering):
+        block_type = "list_item"
+        list_group = current_list_group or f"list_{block_index}"
+        current_list_group = list_group
+    else:
+        current_list_group = ""
+
+    source_ref = {
+        "source_type": "docx",
+        **({"source_file": source_file} if source_file else {}),
+        "paragraph_index": paragraph_index,
+        "heading_path": next_section_path,
+    }
+    block = {
+        "block_id": f"p{paragraph_index}",
+        "block_type": block_type,
+        "type": block_type,
+        "index": block_index,
+        "text": text,
+        "section_path": next_section_path,
+        "paragraph_index": paragraph_index,
+        "table_index": None,
+        "row_index": None,
+        "cells": {},
+        "style": style,
+        "numbering": numbering,
+        "list_group": list_group,
+        "source_ref": source_ref,
+        "source_refs": [source_ref],
+    }
+    return block, next_section_path, current_list_group
+
+
+def docx_table_blocks(
+    *,
+    table: DocxTable,
+    table_index: int,
+    start_block_index: int,
+    section_path: list[str],
+    source_file: str = "",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    columns: list[str] = []
+
+    for table_row in table.rows:
+        cell_values = [normalize_docx_cell_text(cell.text) for cell in table_row.cells]
+        if not any(cell_values):
+            continue
+        if not columns:
+            columns = unique_docx_headers(cell_values)
+            header_text = " | ".join(columns)
+            source_ref = docx_block_table_source_ref(table_index, 0, columns, section_path, source_file=source_file)
+            blocks.append(
+                {
+                    "block_id": f"t{table_index}_h",
+                    "block_type": "docx_table_header",
+                    "type": "docx_table_header",
+                    "index": start_block_index + len(blocks),
+                    "text": header_text,
+                    "section_path": section_path,
+                    "paragraph_index": None,
+                    "table_index": table_index,
+                    "row_index": 0,
+                    "headers": columns,
+                    "columns": columns,
+                    "cells": {column: column for column in columns},
+                    "cell_values": cell_values,
+                    "style": "table",
+                    "numbering": {},
+                    "source_ref": source_ref,
+                    "source_refs": [source_ref],
+                }
+            )
+            continue
+
+        row_index = len(rows) + 1
+        values = {
+            columns[index]: cell_values[index]
+            for index in range(min(len(columns), len(cell_values)))
+            if columns[index]
+        }
+        row_text = " | ".join(cell_preview(cell) for cell in cell_values if cell)
+        source_ref = docx_block_table_source_ref(table_index, row_index, columns, section_path, row_text, source_file=source_file)
+        row_payload = {
+            "row_index": row_index,
+            "headers": columns,
+            "columns": columns,
+            "cells": values,
+            "cell_values": cell_values,
+            "cell_text": row_text,
+            "values": values,
+            "text": row_text,
+            "section_path": section_path,
+            "source_ref": source_ref,
+            "source_refs": [source_ref],
+        }
+        rows.append(row_payload)
         blocks.append(
             {
-                "type": "paragraph",
-                "index": len(blocks),
-                "paragraph_index": paragraph_index,
-                "text": text,
-            }
-        )
-        raw_lines.append(text)
-
-    tables: list[dict[str, Any]] = []
-    for table_index, table in enumerate(doc.tables):
-        columns: list[str] = []
-        rows: list[dict[str, Any]] = []
-        for row in table.rows:
-            cells = [normalize_docx_cell_text(cell.text) for cell in row.cells]
-            if not any(cells):
-                continue
-            if not columns:
-                columns = unique_docx_headers(cells)
-                header_text = " | ".join(columns)
-                blocks.append(
-                    {
-                        "type": "docx_table_header",
-                        "index": len(blocks),
-                        "table_index": table_index,
-                        "row_index": 0,
-                        "columns": columns,
-                        "cells": cells,
-                        "text": header_text,
-                    }
-                )
-                raw_lines.append(header_text)
-                continue
-
-            row_index = len(rows) + 1
-            values = {columns[index]: cells[index] for index in range(min(len(columns), len(cells))) if columns[index]}
-            row_text = " | ".join(cell_preview(cell) for cell in cells if cell)
-            row_payload = {
+                "block_id": f"t{table_index}_r{row_index}",
+                "block_type": "docx_table_row",
+                "type": "docx_table_row",
+                "index": start_block_index + len(blocks),
+                "text": row_text,
+                "section_path": section_path,
+                "paragraph_index": None,
+                "table_index": table_index,
                 "row_index": row_index,
-                "cells": cells,
+                "headers": columns,
+                "columns": columns,
+                "cells": values,
+                "cell_values": cell_values,
                 "cell_text": row_text,
                 "values": values,
-                "text": row_text,
+                "style": "table",
+                "numbering": {},
+                "source_ref": source_ref,
+                "source_refs": [source_ref],
             }
-            rows.append(row_payload)
-            blocks.append(
-                    {
-                        "type": "docx_table_row",
-                        "index": len(blocks),
-                        "table_index": table_index,
-                        "row_index": row_index,
-                        "columns": columns,
-                        "cells": cells,
-                        "cell_text": row_text,
-                        "values": values,
-                        "text": row_text,
-                    }
-            )
-            raw_lines.append(row_text)
-        if columns:
-            tables.append({"table_index": table_index, "columns": columns, "rows": rows})
-    return normalize_whitespace("\n".join(raw_lines)), blocks, tables
+        )
+
+    if not columns:
+        return [], {"table_index": table_index, "headers": [], "columns": [], "rows": [], "section_path": section_path}
+    return blocks, {"table_index": table_index, "headers": columns, "columns": columns, "rows": rows, "section_path": section_path}
+
+
+def docx_block_table_source_ref(table_index: int, row_index: int, columns: list[str], section_path: list[str], cell_text: str = "", source_file: str = "") -> dict[str, Any]:
+    return {
+        "source_type": "docx_table",
+        **({"source_file": source_file} if source_file else {}),
+        "table_index": table_index,
+        "row_index": row_index,
+        "column_names": columns,
+        "heading_path": section_path,
+        **({"cell_text": cell_text[:1000]} if cell_text else {}),
+    }
+
+
+def docx_paragraph_numbering(paragraph: DocxParagraph) -> dict[str, Any]:
+    p_pr = getattr(paragraph._p, "pPr", None)
+    num_pr = getattr(p_pr, "numPr", None) if p_pr is not None else None
+    if num_pr is None:
+        return {}
+    num_id = getattr(getattr(num_pr, "numId", None), "val", None)
+    ilvl = getattr(getattr(num_pr, "ilvl", None), "val", None)
+    return {
+        **({"num_id": str(num_id)} if num_id is not None else {}),
+        **({"level": int(ilvl)} if ilvl is not None else {}),
+    }
+
+
+def is_docx_list_item(text: str, style: str, numbering: dict[str, Any]) -> bool:
+    style_key = style.lower()
+    if any(signal in style_key for signal in ["list", "bullet", "number"]):
+        return True
+    if numbering:
+        return True
+    return bool(BULLET_RE.match(text))
+
+
+def docx_section_heading(text: str, style: str, has_numbering: bool) -> dict[str, Any]:
+    stripped = text.strip()
+    roman = ROMAN_SECTION_RE.match(stripped)
+    if roman and len(stripped) <= 180:
+        return {"level": 1, "text": stripped, "kind": "roman_section"}
+
+    numbered = NUMBERED_SECTION_RE.match(stripped)
+    if numbered and len(stripped) <= 160 and not has_numbering:
+        remainder = numbered.group(2).strip()
+        if DOCX_TEXT_HEADING_RE.match(remainder) or len(remainder.split()) <= 10:
+            return {"level": 2, "text": stripped, "kind": "numbered_subsection"}
+
+    if DOCX_TEXT_HEADING_RE.match(stripped) and len(stripped) <= 120:
+        return {"level": 2, "text": stripped, "kind": "text_heading"}
+
+    style_key = style.lower()
+    if style_key.startswith("heading") and len(stripped) <= 180:
+        level_match = re.search(r"(\d+)", style_key)
+        level = int(level_match.group(1)) if level_match else 1
+        return {"level": min(max(level, 1), 4), "text": stripped, "kind": "style_heading"}
+
+    return {}
+
+
+def next_docx_section_path(current_path: list[str], heading: str, level: int) -> list[str]:
+    if level <= 1:
+        return [heading]
+    output = current_path[: level - 1]
+    while len(output) < level - 1:
+        output.append("")
+    output = [item for item in output if item]
+    return [*output, heading]
 
 
 def extract_docx_text(data: bytes) -> str:
@@ -897,9 +1134,13 @@ def vietnamese_unit_title(unit_type: str) -> str:
         "routing_rule": "Quy định routing",
         "exception_rule": "Trường hợp ngoại lệ",
         "threshold_rule": "Quy định ngưỡng",
+        "macro_table": "Bảng macro phản hồi",
+        "wording_rule": "Quy định wording",
         "macro_script": "Script phản hồi",
         "operational_note": "Lưu ý vận hành",
         "security_note": "Lưu ý bảo mật",
+        "compliance_rule": "Quy định tuân thủ",
+        "example": "Ví dụ",
         "related_document": "Tài liệu liên quan",
         "issue_router_unit": "Dòng điều hướng vấn đề",
         "quick_action_rule": "Hành động nhanh",

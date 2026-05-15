@@ -196,6 +196,8 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
         "policy_rule",
         "exception_rule",
         "threshold_rule",
+        "macro_table",
+        "wording_rule",
         "sla_rule",
         "decision_rule",
         "escalation_rule",
@@ -212,7 +214,9 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
         "product_update_note",
         "security_note",
         "compliance_note",
+        "compliance_rule",
         "warning",
+        "example",
     }
     if unit_type in action_unit_types and metadata_overlap:
         boost += 0.025
@@ -233,10 +237,10 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
 
     if has_prohibition_intent(normalized_query) and has_prohibition_answer(text):
         boost += 0.28
-        if unit_type in {"security_note", "compliance_note", "warning", "operational_note", "policy_rule", "exception_rule"}:
+        if unit_type in {"security_note", "compliance_note", "compliance_rule", "warning", "operational_note", "policy_rule", "exception_rule"}:
             boost += 0.08
 
-    if any(token in query_tokens for token in {"zt", "bao", "mat", "security", "compliance", "khong", "cam"}) and unit_type in {"security_note", "compliance_note", "warning", "operational_note"}:
+    if any(token in query_tokens for token in {"zt", "bao", "mat", "security", "compliance", "khong", "cam"}) and unit_type in {"security_note", "compliance_note", "compliance_rule", "warning", "operational_note"}:
         boost += 0.06
 
     risk_level = normalize_phrase(str(metadata.get("risk_level") or ""))

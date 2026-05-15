@@ -8,6 +8,7 @@ from typing import Any
 from app.embedding import embed_text
 from app.openrouter import (
     extract_rule_table_units,
+    extract_mixed_docx_policy_units,
     extract_workflow_units,
     extract_workflow_units_v3,
     extract_workflow_units_v2,
@@ -364,6 +365,8 @@ def prepare_document_version(
     enrichment = {
         "document_type": classification.document_type,
         "source_type": classification.source_type,
+        "sub_type": getattr(classification, "sub_type", ""),
+        "structure_type": getattr(classification, "structure_type", ""),
         "review_status": "needs_review",
         "extraction_confidence": classification.confidence,
         "extraction_status": extraction_status,
@@ -403,7 +406,7 @@ def extract_raw_evidence(filename: str, content_type: str, data: bytes) -> tuple
         raw_text, warnings, spreadsheet_chunks = extract_spreadsheet(filename.lower(), data)
         return raw_text, warnings, {"spreadsheet_chunks": spreadsheet_chunks, "sheets": spreadsheet_rows(filename.lower(), data)}
     if is_docx_file(filename.lower(), content_type):
-        raw_text, blocks, tables = extract_docx_structure(data)
+        raw_text, blocks, tables = extract_docx_structure(data, filename=filename)
         return raw_text, [], {"docx_blocks": blocks, "docx_tables": tables}
     raw_text, warnings = extract_text(filename, content_type, data)
     return raw_text, warnings, {}
@@ -450,6 +453,20 @@ def try_ai_structuring(
             warnings.append("kb_index_plan_extraction_used")
             return mark_structured_chunks(chunks), warnings, ""
         if classification.document_type in {"policy_rule", "policy_table"}:
+            mixed_docx_chunks = extract_mixed_docx_policy_chunks(filename, content_type, raw_text, raw_context, classification)
+            if mixed_docx_chunks:
+                return mark_structured_chunks(mixed_docx_chunks), ["mixed_docx_policy_extraction_used"], ""
+            if getattr(classification, "structure_type", "") == "mixed_docx":
+                llm_units, llm_warnings = extract_mixed_docx_policy_units(
+                    filename,
+                    raw_text,
+                    raw_context.get("docx_blocks", []) if isinstance(raw_context.get("docx_blocks"), list) else [],
+                )
+                warnings.extend(llm_warnings)
+                if not llm_units:
+                    return [], warnings, f"ai_mixed_docx_policy_structuring_failed:{','.join(llm_warnings)}"
+                chunks = ai_units_to_chunks(llm_units, filename, classification.source_type, classification.document_type)
+                return mark_structured_chunks(chunks), warnings, ""
             table_chunks = extract_docx_policy_table_chunks(filename, content_type, raw_text, raw_context, classification)
             if table_chunks:
                 return mark_structured_chunks(table_chunks), ["docx_policy_table_extraction_used"], ""
@@ -709,6 +726,521 @@ def docx_policy_row_chunk(
         token_count=len(tokenize(content)),
         metadata=metadata,
     )
+
+
+def extract_mixed_docx_policy_chunks(
+    filename: str,
+    content_type: str,
+    raw_text: str,
+    raw_context: dict[str, Any],
+    classification: Any,
+) -> list[Chunk]:
+    if not is_docx_file(filename.lower(), content_type):
+        return []
+    if getattr(classification, "structure_type", "") != "mixed_docx":
+        return []
+    blocks = raw_context.get("docx_blocks")
+    tables = raw_context.get("docx_tables")
+    if not isinstance(blocks, list) or not blocks:
+        return []
+    if not isinstance(tables, list):
+        tables = []
+
+    chunks: list[Chunk] = []
+    document_source_refs = mixed_docx_document_source_refs(filename, blocks)
+    document_risk = mixed_docx_risk_metadata(raw_text)
+    document_channels = infer_mixed_docx_channels(raw_text)
+    document_audience = infer_affected_audience(raw_text)
+    full_metadata = {
+        "unit_type": "full_sop",
+        "retrieval_scope": "document",
+        "document_type": classification.document_type,
+        "source_type": classification.source_type,
+        "sub_type": "communication_guideline",
+        "structure_type": "mixed_docx",
+        "actor": "CS",
+        "owner_context": "Customer Service",
+        "affected_audience": document_audience,
+        "audience": document_audience,
+        "channel": document_channels,
+        "risk_level": document_risk["risk_level"] if document_risk["risk_level"] != "low" else "medium",
+        "risk_category": document_risk["risk_category"],
+        "required_unit_types": [
+            "full_sop",
+            "macro_table",
+            "macro_script",
+            "wording_rule",
+            "handling_rule",
+            "warning",
+            "compliance_rule",
+            "operational_note",
+            "example",
+        ],
+        "source_refs": document_source_refs,
+        "source_ref_quality": source_ref_quality_from_refs(document_source_refs),
+        "source_ref_acknowledged": True,
+        "docx_order_preserved": True,
+        "confidence": min(max(float(getattr(classification, "confidence", 0.88)), 0.0), 0.92),
+        "review_status": "needs_review",
+        "tags": ["communication_guideline", "mixed_docx", *document_channels],
+        "aliases": [path_title(filename), "quy định nội dung phản hồi TX KH", "mẫu câu phản hồi CS"],
+    }
+    chunks.append(
+        Chunk(
+            chunk_index=0,
+            section="full_sop",
+            heading=path_title(filename),
+            content=raw_text[:30000],
+            token_count=len(tokenize(raw_text[:30000])),
+            metadata=full_metadata,
+        )
+    )
+
+    macro_table_ids: dict[int, str] = {}
+    consumed_note_paragraphs: set[int] = set()
+    for table in tables:
+        if not isinstance(table, dict) or not looks_like_macro_docx_table(table):
+            continue
+        table_index = int(table.get("table_index") or 0)
+        rows = [row for row in table.get("rows", []) if isinstance(row, dict)]
+        if not rows:
+            continue
+        section_path = [str(item) for item in table.get("section_path", []) if str(item).strip()]
+        channels = infer_mixed_docx_channels(" ".join(section_path) + " " + json.dumps(table, ensure_ascii=False))
+        notes = following_note_blocks_for_table(blocks, table_index)
+        consumed_note_paragraphs.update(
+            int(note.get("paragraph_index"))
+            for note in notes
+            if note.get("paragraph_index") is not None
+        )
+        table_id = f"macro_table_{table_index}"
+        macro_table_ids[table_index] = table_id
+        table_refs = [
+            docx_table_source_ref(
+                filename,
+                table_index,
+                int(row.get("row_index") or 0),
+                [str(column) for column in table.get("columns", [])],
+                str(row.get("cell_text") or row.get("text") or ""),
+            )
+            for row in rows
+        ]
+        note_texts = [str(note.get("text") or "").strip() for note in notes if str(note.get("text") or "").strip()]
+        content = mixed_docx_macro_table_content(table, note_texts)
+        chunks.append(
+            Chunk(
+                chunk_index=len(chunks),
+                section="macro_table",
+                heading=mixed_docx_macro_table_title(section_path, channels, table_index),
+                content=content,
+                token_count=len(tokenize(content)),
+                metadata={
+                    "unit_type": "macro_table",
+                    "retrieval_scope": "unit",
+                    "parent_unit_id": table_id,
+                    "document_type": classification.document_type,
+                    "source_type": classification.source_type,
+                    "sub_type": "communication_guideline",
+                    "structure_type": "mixed_docx",
+                    "actor": "CS",
+                    "owner_context": "Customer Service",
+                    "affected_audience": infer_affected_audience(content) or document_audience,
+                    "audience": infer_affected_audience(content) or document_audience,
+                    "channel": channels or document_channels,
+                    "section_path": section_path,
+                    "source_table_index": table_index,
+                    "headers": [str(column) for column in table.get("columns", [])],
+                    "rows": rows,
+                    "notes": note_texts,
+                    "source_refs": table_refs,
+                    "source_ref_quality": "table_row",
+                    "source_ref_acknowledged": True,
+                    "docx_order_preserved": True,
+                    "risk_level": "low",
+                    "confidence": 0.88,
+                    "review_status": "needs_review",
+                    "tags": ["macro_table", "communication_guideline", *(channels or [])],
+                    "aliases": mixed_docx_aliases("macro_table", section_path, content),
+                },
+            )
+        )
+        for row in rows:
+            row_index = int(row.get("row_index") or 0)
+            row_content = mixed_docx_table_row_content(row)
+            if not row_content:
+                continue
+            row_ref = docx_table_source_ref(
+                filename,
+                table_index,
+                row_index,
+                [str(column) for column in table.get("columns", [])],
+                str(row.get("cell_text") or row.get("text") or ""),
+            )
+            chunks.append(
+                Chunk(
+                    chunk_index=len(chunks),
+                    section="macro_script",
+                    heading=mixed_docx_row_heading(row, channels, row_index),
+                    content=row_content,
+                    token_count=len(tokenize(row_content)),
+                    metadata={
+                        "unit_type": "macro_script",
+                        "retrieval_scope": "unit",
+                        "document_type": classification.document_type,
+                        "source_type": classification.source_type,
+                        "sub_type": "communication_guideline",
+                        "structure_type": "mixed_docx",
+                        "actor": "CS",
+                        "owner_context": "Customer Service",
+                        "affected_audience": infer_affected_audience(row_content) or document_audience,
+                        "audience": infer_affected_audience(row_content) or document_audience,
+                        "channel": channels or document_channels,
+                        "section_path": section_path,
+                        "source_table_index": table_index,
+                        "source_row_index": row_index,
+                        "cells": row.get("cells", {}),
+                        "source_refs": [row_ref],
+                        "source_ref_quality": "table_row",
+                        "source_ref_acknowledged": True,
+                        "attached_to": table_id,
+                        "docx_order_preserved": True,
+                        "risk_level": "low",
+                        "confidence": 0.86,
+                        "review_status": "needs_review",
+                        "tags": ["macro_script", *(channels or [])],
+                        "aliases": mixed_docx_aliases("macro_script", section_path, row_content),
+                    },
+                )
+            )
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("block_type") or block.get("type") or "")
+        if block_type in {"heading", "docx_table_header", "docx_table_row"}:
+            continue
+        paragraph_index = block.get("paragraph_index")
+        if paragraph_index is not None and int(paragraph_index) in consumed_note_paragraphs:
+            # The note is already retained on the nearest macro_table.
+            note_text = str(block.get("text") or "").strip()
+            if not note_text:
+                continue
+        text = str(block.get("text") or "").strip()
+        if not text:
+            continue
+        unit_type = mixed_docx_unit_type(block)
+        if not unit_type:
+            continue
+        section_path = [str(item) for item in block.get("section_path", []) if str(item).strip()]
+        channels = infer_mixed_docx_channels(" ".join(section_path) + " " + text) or document_channels
+        risk = mixed_docx_risk_metadata(text)
+        refs = [mixed_docx_source_ref_for_block(filename, block)]
+        attached_to = mixed_docx_attached_table_id_for_note(block, blocks, macro_table_ids)
+        metadata = {
+            "unit_type": unit_type,
+            "retrieval_scope": "unit",
+            "document_type": classification.document_type,
+            "source_type": classification.source_type,
+            "sub_type": "communication_guideline",
+            "structure_type": "mixed_docx",
+            "actor": "CS",
+            "owner_context": "Customer Service",
+            "affected_audience": infer_affected_audience(text) or document_audience,
+            "audience": infer_affected_audience(text) or document_audience,
+            "channel": channels,
+            "section_path": section_path,
+            "paragraph_index": paragraph_index,
+            "block_id": block.get("block_id"),
+            "block_type": block_type,
+            "list_group": block.get("list_group") or "",
+            "numbering": block.get("numbering") or {},
+            "style": block.get("style") or "",
+            "source_refs": refs,
+            "source_ref_quality": source_ref_quality_from_refs(refs),
+            "source_ref_acknowledged": True,
+            "risk_level": risk["risk_level"],
+            "risk_category": risk["risk_category"],
+            "risk_signals": risk["signals"],
+            "docx_order_preserved": True,
+            "confidence": 0.82 if unit_type in {"compliance_rule", "warning"} else 0.76,
+            "review_status": "needs_review",
+            "tags": mixed_docx_tags(unit_type, text, channels, risk),
+            "aliases": mixed_docx_aliases(unit_type, section_path, text),
+            **({"attached_to": attached_to} if attached_to else {}),
+        }
+        chunks.append(
+            Chunk(
+                chunk_index=len(chunks),
+                section=unit_type,
+                heading=mixed_docx_heading(unit_type, text, section_path),
+                content=text,
+                token_count=len(tokenize(text)),
+                metadata=metadata,
+            )
+        )
+
+    return chunks if len(chunks) > 1 else []
+
+
+def looks_like_macro_docx_table(table: dict[str, Any]) -> bool:
+    text = normalized_search_text(json.dumps(table, ensure_ascii=False))
+    section_text = normalized_search_text(" ".join(str(item) for item in table.get("section_path", [])))
+    has_channel_context = any(channel in section_text or channel in text for channel in ["email", "call", "chat"])
+    has_macro_rows = (
+        ("open" in text and "body" in text and "close" in text)
+        or any(term in text for term in ["mo dau", "than bai", "ket thuc", "loi chao", "xin chao", "macro", "script", "mau cau"])
+    )
+    has_small_shape = 1 <= len(table.get("rows", [])) <= 12
+    return has_channel_context and has_macro_rows and has_small_shape
+
+
+def mixed_docx_document_source_refs(filename: str, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    first_paragraph = next((block for block in blocks if isinstance(block, dict) and block.get("paragraph_index") is not None), None)
+    if first_paragraph:
+        refs.append(mixed_docx_source_ref_for_block(filename, first_paragraph))
+    first_table_row = next((block for block in blocks if isinstance(block, dict) and block.get("type") == "docx_table_row"), None)
+    if first_table_row:
+        refs.append(mixed_docx_source_ref_for_block(filename, first_table_row))
+    return refs or [{"source_type": "docx", "source_file": filename, "paragraph_index": 0, "heading_path": []}]
+
+
+def mixed_docx_source_ref_for_block(filename: str, block: dict[str, Any]) -> dict[str, Any]:
+    if block.get("type") == "docx_table_row":
+        return docx_table_source_ref(
+            filename,
+            int(block.get("table_index") or 0),
+            int(block.get("row_index") or 0),
+            [str(column) for column in block.get("columns", [])],
+            str(block.get("cell_text") or block.get("text") or ""),
+        )
+    return {
+        "source_type": "docx",
+        "source_file": filename,
+        "paragraph_index": int(block.get("paragraph_index") or 0),
+        "heading_path": [str(item) for item in block.get("section_path", []) if str(item).strip()],
+    }
+
+
+def following_note_blocks_for_table(blocks: list[dict[str, Any]], table_index: int) -> list[dict[str, Any]]:
+    table_indexes = [
+        int(block.get("index") or 0)
+        for block in blocks
+        if isinstance(block, dict) and block.get("table_index") == table_index
+    ]
+    if not table_indexes:
+        return []
+    start = max(table_indexes)
+    notes: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict) or int(block.get("index") or 0) <= start:
+            continue
+        block_type = str(block.get("block_type") or block.get("type") or "")
+        if block_type == "heading" or block_type.startswith("docx_table"):
+            break
+        text = str(block.get("text") or "").strip()
+        if not text:
+            continue
+        normalized = normalized_search_text(text)
+        if any(signal in normalized for signal in ["luu y", "note", "xin chao", "quy khach", "khach hang"]):
+            notes.append(block)
+    return notes
+
+
+def mixed_docx_attached_table_id_for_note(block: dict[str, Any], blocks: list[dict[str, Any]], macro_table_ids: dict[int, str]) -> str:
+    text = normalized_search_text(str(block.get("text") or ""))
+    if not any(signal in text for signal in ["luu y", "note", "xin chao", "quy khach"]):
+        return ""
+    index = int(block.get("index") or 0)
+    prior_table_blocks = [
+        prior
+        for prior in blocks
+        if isinstance(prior, dict)
+        and int(prior.get("index") or 0) < index
+        and prior.get("type") == "docx_table_row"
+        and int(prior.get("table_index") or -1) in macro_table_ids
+    ]
+    if not prior_table_blocks:
+        return ""
+    table_index = int(prior_table_blocks[-1].get("table_index") or 0)
+    return macro_table_ids.get(table_index, "")
+
+
+def mixed_docx_macro_table_content(table: dict[str, Any], notes: list[str]) -> str:
+    lines: list[str] = []
+    section_path = [str(item) for item in table.get("section_path", []) if str(item).strip()]
+    if section_path:
+        lines.append(" > ".join(section_path))
+    for row in table.get("rows", []):
+        if not isinstance(row, dict):
+            continue
+        row_text = mixed_docx_table_row_content(row)
+        if row_text:
+            lines.append(row_text)
+    for note in notes:
+        lines.append(f"Lưu ý: {note}")
+    return "\n".join(lines).strip()
+
+
+def mixed_docx_table_row_content(row: dict[str, Any]) -> str:
+    cells = row.get("cells") if isinstance(row.get("cells"), dict) else row.get("values") if isinstance(row.get("values"), dict) else {}
+    if not cells:
+        return str(row.get("text") or "").strip()
+    values = [str(value).strip() for value in cells.values() if str(value).strip()]
+    if not values:
+        return ""
+    label = values[0]
+    body = " / ".join(values[1:]).strip()
+    return f"{label}: {body}" if body else label
+
+
+def mixed_docx_macro_table_title(section_path: list[str], channels: list[str], table_index: int) -> str:
+    channel_label = "/".join(channel.upper() if channel == "email" else channel.title() for channel in channels) if channels else f"bảng {table_index + 1}"
+    tail = section_path[-1] if section_path else ""
+    return f"Macro {channel_label}: {tail}".strip(": ")[:180]
+
+
+def mixed_docx_row_heading(row: dict[str, Any], channels: list[str], row_index: int) -> str:
+    cells = row.get("cells") if isinstance(row.get("cells"), dict) else row.get("values") if isinstance(row.get("values"), dict) else {}
+    label = next((str(value).strip() for value in cells.values() if str(value).strip()), f"Dòng {row_index}")
+    channel_label = "/".join(channels) if channels else "macro"
+    return f"{channel_label} {label}".strip()[:180]
+
+
+def mixed_docx_unit_type(block: dict[str, Any]) -> str:
+    text = str(block.get("text") or "").strip()
+    normalized = normalized_search_text(text)
+    section = normalized_search_text(" ".join(str(item) for item in block.get("section_path", [])))
+    risk = mixed_docx_risk_metadata(text)
+    if risk["risk_level"] in {"high", "critical"}:
+        if risk["risk_category"] in {"sanction_disclosure", "internal_process_disclosure", "disclosure_control", "prohibited_disclosure"}:
+            return "compliance_rule"
+        return "warning"
+    if any(signal in normalized for signal in ["xin loi", "rat tiec", "mong quy khach thong cam"]) or "xin loi" in section:
+        return "wording_rule"
+    if any(signal in normalized for signal in ["vi du", "vd", "example"]):
+        return "example"
+    if normalized.startswith(("luu y", "note", "ghi chu")):
+        return "operational_note"
+    if any(signal in normalized for signal in ["xin chao", "chao anh", "chao chi", "quy khach hang"]) and any(channel in section or channel in normalized for channel in ["email", "call", "chat"]):
+        return "macro_script"
+    if block.get("block_type") == "list_item":
+        return "handling_rule"
+    if any(signal in normalized for signal in ["cs ", "khong ", "can ", "phai ", "doi voi", "truong hop", "neu "]):
+        return "handling_rule"
+    return ""
+
+
+def mixed_docx_heading(unit_type: str, text: str, section_path: list[str]) -> str:
+    section_tail = section_path[-1] if section_path else ""
+    if unit_type == "compliance_rule":
+        return "Quy định không tiết lộ"
+    if unit_type == "warning":
+        return "Cảnh báo tuân thủ"
+    if unit_type == "wording_rule":
+        return "Quy định wording xin lỗi"
+    if unit_type == "macro_script":
+        return "Script chào hỏi"
+    if unit_type == "example":
+        return "Ví dụ phản hồi"
+    if unit_type == "operational_note":
+        return "Lưu ý vận hành"
+    first = re.split(r"[.;\n]", text, maxsplit=1)[0].strip()
+    return (first or section_tail or unit_type.replace("_", " ").title())[:180]
+
+
+def infer_mixed_docx_channels(text: str) -> list[str]:
+    normalized = normalized_search_text(text)
+    channels: list[str] = []
+    if "email" in normalized or "mail" in normalized:
+        channels.append("email")
+    if "call" in normalized or "hotline" in normalized:
+        channels.append("call")
+    if "chat" in normalized:
+        channels.append("chat")
+    return list(dict.fromkeys(channels))
+
+
+def infer_affected_audience(text: str) -> list[str]:
+    normalized = normalized_search_text(text)
+    audience: list[str] = []
+    if "tx" in normalized.split() or "tai xe" in normalized:
+        audience.append("driver")
+    if "kh" in normalized.split() or "khach hang" in normalized or "quy khach" in normalized:
+        audience.append("customer")
+    return list(dict.fromkeys(audience))
+
+
+def mixed_docx_risk_metadata(text: str) -> dict[str, Any]:
+    normalized = normalized_search_text(text)
+    signals: list[str] = []
+    risk_level = "low"
+    risk_category = ""
+    if "tuyet doi khong" in normalized:
+        signals.append("TUYỆT ĐỐI KHÔNG")
+        risk_level = "critical"
+        risk_category = "prohibited_disclosure"
+    if "khong chu dong cung cap" in normalized:
+        signals.append("không chủ động cung cấp")
+        risk_level = max_risk_level(risk_level, "high")
+        risk_category = risk_category or "disclosure_control"
+    if "quy trinh xu ly noi bo" in normalized:
+        signals.append("quy trình xử lý nội bộ")
+        risk_level = max_risk_level(risk_level, "high")
+        risk_category = "internal_process_disclosure"
+    if "che tai" in normalized:
+        signals.append("chế tài")
+        risk_level = max_risk_level(risk_level, "critical" if "khong cung cap" in normalized or "khong chu dong" in normalized else "high")
+        risk_category = risk_category or "sanction_disclosure"
+    if "cham loi" in normalized:
+        signals.append("chấm lỗi")
+        risk_level = max_risk_level(risk_level, "high")
+        risk_category = risk_category or "qa_compliance"
+    return {"risk_level": normalize_risk_level(risk_level), "risk_category": risk_category, "signals": signals}
+
+
+def max_risk_level(left: str, right: str) -> str:
+    order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    return left if order.get(left, 0) >= order.get(right, 0) else right
+
+
+def normalize_risk_level(value: Any) -> str:
+    normalized = normalized_search_text(str(value or ""))
+    if normalized in {"critical", "nghiem trong", "rat cao"}:
+        return "critical"
+    if normalized in {"high", "cao", "zt", "compliance"}:
+        return "high"
+    if normalized in {"medium", "trung binh", "moderate"}:
+        return "medium"
+    return "low"
+
+
+def mixed_docx_tags(unit_type: str, text: str, channels: list[str], risk: dict[str, Any]) -> list[str]:
+    tags = ["communication_guideline", unit_type, *channels]
+    normalized = normalized_search_text(text)
+    if "xin loi" in normalized:
+        tags.append("apology_wording")
+    if "xin chao" in normalized or "quy khach hang" in normalized:
+        tags.append("greeting")
+    if risk.get("risk_category"):
+        tags.append(str(risk["risk_category"]))
+    return list(dict.fromkeys(tag for tag in tags if tag))
+
+
+def mixed_docx_aliases(unit_type: str, section_path: list[str], text: str) -> list[str]:
+    aliases = [unit_type.replace("_", " "), *section_path]
+    normalized = normalized_search_text(text)
+    if "email" in normalized:
+        aliases.append("email macro")
+    if "call" in normalized or "chat" in normalized:
+        aliases.append("call chat greeting")
+    if "xin loi" in normalized:
+        aliases.append("quy định xin lỗi")
+    if "che tai" in normalized:
+        aliases.append("không cung cấp lý do chế tài")
+    if "quy trinh xu ly noi bo" in normalized:
+        aliases.append("không cung cấp quy trình xử lý nội bộ")
+    return [alias for alias in dict.fromkeys(alias.strip() for alias in aliases) if alias]
 
 
 def spreadsheet_related_document_chunks(filename: str, raw_context: dict[str, Any]) -> list[Chunk]:
@@ -3570,6 +4102,8 @@ def degraded_chunk(index: int, section: str, heading: str, content: str, metadat
     base_metadata = {
         "document_type": classification.document_type,
         "source_type": classification.source_type,
+        "sub_type": getattr(classification, "sub_type", ""),
+        "structure_type": getattr(classification, "structure_type", ""),
         "review_status": "needs_review",
         "confidence": min(classification.confidence, 0.55),
         "extraction_status": "degraded",
@@ -3688,6 +4222,8 @@ def refine_units_for_delivery(
 
 
 def should_attempt_llm_refine(document_type: str, chunks: list[Any]) -> bool:
+    if any(str(chunk.metadata.get("structure_type") or "") == "mixed_docx" for chunk in chunks):
+        return False
     return document_type in {"policy_rule", "policy_table"}
 
 
@@ -3821,6 +4357,8 @@ def refine_unit_metadata(chunk: Any, metadata: dict[str, Any]) -> dict[str, Any]
         "tags": tags,
         "aliases": aliases,
     }
+    if metadata.get("risk_level"):
+        refined["risk_level"] = normalize_risk_level(metadata.get("risk_level"))
     if metadata.get("structure_type") == "financial_threshold_matrix" or "rounding" in tags:
         threshold = metadata.get("rounding_threshold") or parse_rounding_threshold(chunk.content)
         if threshold:
@@ -3849,6 +4387,10 @@ def infer_tags_from_text(text: str, unit_type: str) -> list[str]:
         tags.append("pm04")
     if any(term in normalized for term in ["khong ap dung", "exception", "ngoai le"]):
         tags.append("no_rounding")
+    if any(term in normalized for term in ["email", "call", "chat", "xin chao", "xin loi"]):
+        tags.append("communication_guideline")
+    if any(term in normalized for term in ["che tai", "quy trinh xu ly noi bo", "khong chu dong cung cap"]):
+        tags.append("compliance")
     return list(dict.fromkeys(tag for tag in tags if tag))
 
 
@@ -4079,9 +4621,13 @@ def merge_duplicate_chunks(existing: Any, duplicate: Any) -> Any:
 
 def stronger_unit_type(left: str, right: str) -> str:
     priority = {
+        "compliance_rule": 94,
         "policy_rule": 90,
         "exception_rule": 88,
         "threshold_rule": 86,
+        "wording_rule": 72,
+        "macro_table": 71,
+        "macro_script": 69,
         "candidate_rule": 70,
         "handling_rule": 68,
         "operational_instruction": 66,
@@ -4291,6 +4837,13 @@ def paragraph_groups_from_blocks(blocks: list[dict[str, Any]], max_chars: int = 
         if not text:
             continue
         item = {**block, "index": int(block.get("index") if block.get("index") is not None else index)}
+        if block.get("block_type") == "list_item" or block.get("type") == "list_item":
+            if current:
+                groups.append(current)
+                current = []
+                current_len = 0
+            groups.append([item])
+            continue
         starts_new = is_heading_like_text(text) or (current and starts_warning_block(text)) or current_len + len(text) > max_chars
         if current and starts_new:
             groups.append(current)
@@ -4373,7 +4926,10 @@ def source_ref_for_text_block(filename: str, content_type: str, blocks: list[dic
                 int(table_block.get("row_index") or 0),
                 [str(column) for column in table_block.get("columns", [])],
             )
-        return {"source_type": "docx", "source_file": filename, "paragraph_index": start_index, "heading_path": []}
+        paragraph_block = next((block for block in selected if block.get("paragraph_index") is not None), None)
+        paragraph_index = int(paragraph_block.get("paragraph_index")) if paragraph_block else start_index
+        heading_path = paragraph_block.get("section_path") if isinstance(paragraph_block, dict) and isinstance(paragraph_block.get("section_path"), list) else []
+        return {"source_type": "docx", "source_file": filename, "paragraph_index": paragraph_index, "heading_path": heading_path}
     if lower.endswith(".pdf") or content_type == "application/pdf":
         page = int(selected[0].get("page", 1)) if selected else 1
         return {"source_type": "pdf", "source_file": filename, "page": page}
@@ -4498,10 +5054,36 @@ def source_blocks_payload(filename: str, content_type: str, raw_text: str, block
         "filename": filename,
         "docx_table_count": len(raw_context.get("docx_tables", [])) if isinstance(raw_context.get("docx_tables"), list) else 0,
         "preview_blocks": blocks[:60],
+        "quality_checks": source_block_quality_checks(blocks),
         "raw_text_chars": len(raw_text),
         "source_ref_quality": source_ref_quality_from_blocks(blocks),
         "spreadsheet_sheet_count": len(raw_context.get("sheets", [])) if isinstance(raw_context.get("sheets"), list) else 0,
         "warnings": warnings[:20],
+    }
+
+
+def source_block_quality_checks(blocks: list[dict[str, Any]]) -> dict[str, bool]:
+    table_blocks = [block for block in blocks if isinstance(block, dict) and str(block.get("type") or "").startswith("docx_table")]
+    table_rows = [block for block in blocks if isinstance(block, dict) and block.get("type") == "docx_table_row"]
+    list_items = [block for block in blocks if isinstance(block, dict) and block.get("block_type") == "list_item"]
+    return {
+        "table_order_preserved": all(
+            int(left.get("index") or 0) <= int(right.get("index") or 0)
+            for left, right in zip(table_blocks, table_blocks[1:])
+        ) if table_blocks else True,
+        "section_path_present": all("section_path" in block and isinstance(block.get("section_path"), list) for block in blocks if isinstance(block, dict)),
+        "table_rows_have_source_refs": all(
+            isinstance(block.get("source_refs"), list)
+            and any(
+                isinstance(ref, dict)
+                and ref.get("source_type") == "docx_table"
+                and ref.get("table_index") is not None
+                and ref.get("row_index") is not None
+                for ref in block.get("source_refs", [])
+            )
+            for block in table_rows
+        ) if table_rows else True,
+        "bullet_items_split": bool(list_items) and all(block.get("list_group") for block in list_items),
     }
 
 
@@ -4514,6 +5096,8 @@ def classification_payload(classification: Any) -> dict[str, Any]:
         "risk_level": risk_level_for_document_type(classification.document_type),
         "source_type": classification.source_type,
         "signals": classification.warnings,
+        "structure_type": getattr(classification, "structure_type", ""),
+        "sub_type": getattr(classification, "sub_type", ""),
     }
 
 
@@ -4625,6 +5209,7 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
     hard_blockers: list[str] = []
     warnings: list[str] = []
     metadata_items = [chunk.get("metadata") or {} for chunk in chunks]
+    quality_checks = extraction_quality_checks(chunks, metadata_items)
     has_full_sop = any(str(metadata.get("unit_type") or "") == "full_sop" or str(metadata.get("retrieval_scope") or "") == "document" for metadata in metadata_items)
     atomic_units = [
         metadata for metadata in metadata_items
@@ -4651,9 +5236,79 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
         warnings.append("missing_related_sop")
     return {
         "coverage_score": max(0, 100 - len(hard_blockers) * 20 - len(warnings) * 5),
+        "checks": quality_checks,
         "hard_blockers": list(dict.fromkeys(hard_blockers)),
         "warnings": list(dict.fromkeys(warnings)),
     }
+
+
+def extraction_quality_checks(chunks: list[dict[str, Any]], metadata_items: list[dict[str, Any]]) -> dict[str, bool]:
+    text = "\n".join(str(chunk.get("content") or "") for chunk in chunks)
+    normalized = normalized_search_text(text)
+    table_ref_units = [
+        metadata for metadata in metadata_items
+        if any(
+            isinstance(ref, dict) and ref.get("source_type") == "docx_table"
+            for ref in metadata.get("source_refs", []) if isinstance(ref, dict)
+        )
+    ]
+    atomic_metadata = [
+        metadata for metadata in metadata_items
+        if str(metadata.get("retrieval_scope") or "") != "document"
+        and str(metadata.get("unit_type") or "") != "full_sop"
+    ]
+    checks = {
+        "table_order_preserved": all(metadata.get("docx_order_preserved") is not False for metadata in metadata_items),
+        "section_path_present": all(isinstance(metadata.get("section_path"), list) and metadata.get("section_path") for metadata in atomic_metadata if metadata.get("structure_type") == "mixed_docx"),
+        "table_rows_have_source_refs": all(
+            any(
+                isinstance(ref, dict)
+                and ref.get("source_type") == "docx_table"
+                and ref.get("table_index") is not None
+                and ref.get("row_index") is not None
+                and isinstance(ref.get("column_names"), list)
+                for ref in metadata.get("source_refs", [])
+                if isinstance(ref, dict)
+            )
+            for metadata in table_ref_units
+        ) if table_ref_units else True,
+        "bullet_items_split": sum(1 for metadata in metadata_items if metadata.get("block_type") == "list_item") >= 2,
+        "email_macro_table_extracted": any(
+            metadata.get("unit_type") == "macro_table"
+            and "email" in (metadata.get("channel") or [])
+            for metadata in metadata_items
+        ),
+        "call_chat_greeting_extracted": any(
+            metadata.get("unit_type") in {"macro_script", "handling_rule"}
+            and {"call", "chat"} & set(metadata.get("channel") or [])
+            and any(signal in normalized_search_text(str(chunk.get("content") or "")) for signal in ["xin chao", "chao"])
+            for chunk in chunks
+            for metadata in [chunk.get("metadata") or {}]
+        ),
+        "apology_wording_rules_extracted": any(
+            metadata.get("unit_type") == "wording_rule"
+            and "xin loi" in normalized_search_text(str(chunk.get("content") or ""))
+            for chunk in chunks
+            for metadata in [chunk.get("metadata") or {}]
+        ),
+        "sanction_disclosure_warning_extracted": any(
+            metadata.get("unit_type") in {"compliance_rule", "warning"}
+            and "che tai" in normalized_search_text(str(chunk.get("content") or ""))
+            and metadata.get("risk_level") in {"high", "critical"}
+            for chunk in chunks
+            for metadata in [chunk.get("metadata") or {}]
+        ),
+        "internal_process_disclosure_rule_extracted": any(
+            metadata.get("unit_type") in {"compliance_rule", "warning"}
+            and "quy trinh xu ly noi bo" in normalized_search_text(str(chunk.get("content") or ""))
+            and metadata.get("risk_level") in {"high", "critical"}
+            for chunk in chunks
+            for metadata in [chunk.get("metadata") or {}]
+        ),
+    }
+    if "email" not in normalized and "call" not in normalized and "chat" not in normalized:
+        return {key: value for key, value in checks.items() if key in {"table_order_preserved", "section_path_present", "table_rows_have_source_refs", "bullet_items_split"}}
+    return checks
 
 
 def policy_table_verification_blockers(metadata_items: list[dict[str, Any]], document_type: str) -> list[str]:

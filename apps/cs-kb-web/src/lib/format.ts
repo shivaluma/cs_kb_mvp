@@ -17,8 +17,12 @@ const contentTypeUnitTypes: Record<string, string[]> = {
     "workflow_step",
     "decision_point",
     "warning",
+    "compliance_rule",
+    "wording_rule",
     "operational_note",
+    "macro_table",
     "macro_script",
+    "example",
   ],
   issue_router: [
     "issue_router_unit",

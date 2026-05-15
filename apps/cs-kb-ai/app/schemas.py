@@ -71,6 +71,8 @@ ExtractionUnitType = Literal[
     "handling_rule",
     "exception_rule",
     "threshold_rule",
+    "macro_table",
+    "wording_rule",
     "workflow_overview",
     "workflow_graph",
     "workflow_step",
@@ -84,7 +86,9 @@ ExtractionUnitType = Literal[
     "operational_note",
     "security_note",
     "compliance_note",
+    "compliance_rule",
     "warning",
+    "example",
     "related_document",
     "issue_router_unit",
     "quick_action_rule",
@@ -277,6 +281,13 @@ def normalize_extraction_unit_type(value: str, payload: dict[str, Any]) -> str:
         "risk_note": "warning",
         "warning_note": "warning",
         "alert": "warning",
+        "compliance": "compliance_rule",
+        "compliance_warning": "compliance_rule",
+        "wording": "wording_rule",
+        "wording_policy": "wording_rule",
+        "macro": "macro_script",
+        "macro_row": "macro_script",
+        "table_macro": "macro_table",
         "exception": "exception_rule",
         "no_apply": "exception_rule",
         "threshold": "threshold_rule",
@@ -289,6 +300,10 @@ def normalize_extraction_unit_type(value: str, payload: dict[str, Any]) -> str:
         return "exception_rule"
     if "moc" in text or "threshold" in text:
         return "threshold_rule"
+    if any(signal in text for signal in ["che tai", "noi bo", "compliance", "tuan thu"]):
+        return "compliance_rule"
+    if any(signal in text for signal in ["xin loi", "wording", "cach noi", "mau cau"]):
+        return "wording_rule"
     if any(signal in text for signal in ["luu y", "zt", "loi", "warning", "risk"]):
         return "warning"
     if any(signal in text for signal in ["neu", "doi voi", "truong hop", "quy dinh", "policy", "rule"]):

@@ -165,6 +165,42 @@ Architecture/schema mapping:
 """
 
 
+MIXED_DOCX_POLICY_EXTRACTION_PROMPT = """You are extracting a mixed DOCX communication guideline for CS SOP ingestion.
+
+Use the structured DOCX blocks as source of truth. Each block has block_id, block_type, text, section_path, paragraph_index, table_index, row_index, cells, style, numbering, and source_ref.
+Preserve the section_path on every extracted unit. Preserve DOCX table rows as rows/cells, not flattened prose.
+
+Return JSON:
+{
+  "full_sop": {},
+  "units": [],
+  "warnings": [],
+  "metadata_suggestions": {},
+  "coverage_report": {}
+}
+
+Allowed unit intent for this flow:
+- full_sop
+- macro_table
+- macro_script
+- wording_rule
+- handling_rule
+- warning
+- compliance_rule
+- operational_note
+- example
+
+Rules:
+1. Use section_path to attach units under the correct Roman section and numbered/text subsection.
+2. For macro tables, create one macro_table unit with metadata.rows/cells and one macro_script per row when useful.
+3. DOCX table units must cite {source_type:"docx_table", source_file, table_index, row_index, column_names}.
+4. Paragraph/list units must cite {source_type:"docx", source_file, paragraph_index, heading_path}.
+5. Do not set affected audience to Customer Service. Use actor="CS"; affected_audience is driver/customer when TX/KH appear.
+6. Infer channel as email/call/chat only when present in section_path or block text.
+7. If text contains "TUYỆT ĐỐI KHÔNG", "không chủ động cung cấp", "quy trình xử lý nội bộ", "chế tài", or "chấm lỗi", create warning/compliance_rule and set risk_level high or critical plus risk_category.
+"""
+
+
 def start_ai_breakdown_capture() -> Token[list[dict[str, Any]] | None]:
     return _AI_BREAKDOWN_BUFFER.set([])
 
@@ -1451,6 +1487,102 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
                     "json_repair_used": repaired,
                     "source_ref_repairs": [warning for warning in output_warnings if warning.startswith("source_refs_repaired_from_text_lines")],
                 },
+                "status": status,
+                "warnings": output_warnings[:40],
+            }
+        )
+
+
+def extract_mixed_docx_policy_units(filename: str, raw_text: str, structured_blocks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    if not enabled():
+        record_ai_breakdown({"filename": filename, "flow": "mixed_docx_policy", "status": "skipped", "skip_reason": "openrouter_disabled"})
+        return [], ["openrouter_disabled"]
+
+    extraction_prompt = (
+        MIXED_DOCX_POLICY_EXTRACTION_PROMPT
+        + "\n\nPipeline-specific constraints:\n"
+        "- Trả đúng ExtractedUnit shape: unit_type, title, content, confidence, metadata, source_refs.\n"
+        "- metadata phải giữ section_path, actor, affected_audience, channel, risk_level, risk_category khi có căn cứ.\n"
+        "- Với table rows, metadata.rows phải giữ cells theo header và source_refs docx_table.\n"
+        "- Giữ Open/Body/Close đúng vị trí dưới section_path Email; không đưa bảng xuống cuối tài liệu.\n\n"
+        f"Filename: {filename}\n\n"
+        f"Structured DOCX blocks JSON:\n{json.dumps(structured_blocks[:240], ensure_ascii=False)[:50000]}\n\n"
+        f"Ordered raw text fallback:\n{raw_text[:12000]}"
+    )
+    payload = {
+        "model": settings.openrouter_extraction_model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": extraction_prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.03,
+    }
+    breakdown = base_ai_breakdown(
+        filename=filename,
+        flow="mixed_docx_policy",
+        model=str(payload["model"]),
+        prompt=extraction_prompt,
+        raw_text=raw_text,
+        temperature=0.03,
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": settings.public_app_url,
+        "X-Title": "CS SOP Knowledge Base",
+    }
+    content = ""
+    parsed: Any = None
+    normalized: list[dict[str, Any]] = []
+    output_warnings: list[str] = []
+    status = "failed"
+    error = ""
+    repaired = False
+    try:
+        content = completion_content(payload, headers)
+        parsed, repaired = parse_json_with_repair(content, payload, headers)
+        normalized_payload, model_warnings = normalize_rule_table_response_payload(parsed)
+        payload_model = ExtractedUnitsPayload.model_validate(normalized_payload)
+        normalized = [normalize_unit(unit.model_dump()) for unit in payload_model.units]
+        usable = [unit for unit in normalized if unit["content"]]
+        if not any(unit["unit_type"] == "full_sop" for unit in usable):
+            output_warnings = ["openrouter_mixed_docx_missing_full_sop_unit"]
+            error = "openrouter_mixed_docx_missing_full_sop_unit"
+            return [], output_warnings
+        missing_refs = source_ref_validation_errors(usable, filename)
+        if missing_refs:
+            output_warnings = missing_refs
+            error = ",".join(missing_refs)
+            return [], output_warnings
+        warnings = ["openrouter_mixed_docx_policy_extraction_used", *[f"model_warning:{warning}" for warning in model_warnings]]
+        if repaired:
+            warnings.append("openrouter_json_repair_used")
+        output_warnings = warnings
+        status = "completed"
+        return usable, warnings
+    except json.JSONDecodeError as exc:
+        error = f"openrouter_mixed_docx_invalid_json:{exc.msg}:{exc.pos}"
+        output_warnings = [error]
+        return [], output_warnings
+    except ValidationError as exc:
+        error = f"openrouter_mixed_docx_validation_failed:{validation_summary(exc)}"
+        output_warnings = [error]
+        return [], output_warnings
+    except Exception as exc:
+        error = f"openrouter_mixed_docx_extraction_failed:{exc.__class__.__name__}"
+        output_warnings = [error]
+        return [], output_warnings
+    finally:
+        record_ai_breakdown(
+            {
+                **breakdown,
+                "error": error,
+                "normalized_unit_count": len(normalized),
+                "normalized_unit_types": sorted({str(unit.get("unit_type") or "") for unit in normalized if isinstance(unit, dict)}),
+                "parsed_response": json_preview(parsed) if parsed is not None else None,
+                "raw_response": ai_response_preview(content),
+                "repairs": {"json_repair_used": repaired},
                 "status": status,
                 "warnings": output_warnings[:40],
             }
