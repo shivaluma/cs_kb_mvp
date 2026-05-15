@@ -70,7 +70,7 @@ type WorkflowEdgeMetadata = NonNullable<WorkflowGraphMetadata["edges"]>[number];
 type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
 type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
 type DocumentStep = "view" | "gate" | "workflow" | "sop" | "publish" | "review" | "kbIndex" | "chunks";
-type ReviewFilter = "needs_review" | "reviewed" | "approved" | "rejected" | "source_refs" | "atomic" | "all";
+type ReviewFilter = "needs_review" | "reviewed" | "approved" | "source_refs" | "atomic" | "all";
 type RequiredWorkflowUnit = {
   key: string;
   label: string;
@@ -108,7 +108,6 @@ export function DocumentsWorkspace({
   chunks,
   chunksLoading,
   collections,
-  deletingUnitId,
   documents,
   extractionUnits,
   extractionUnitsLoading,
@@ -119,7 +118,6 @@ export function DocumentsWorkspace({
   onApplyCollection,
   onBulkReviewVersion,
   onCreateExtractionUnit,
-  onDeleteExtractionUnit,
   onInspectVersion,
   onFileSelected,
   onPublishVersion,
@@ -145,7 +143,6 @@ export function DocumentsWorkspace({
   chunks: DocumentChunk[];
   chunksLoading: boolean;
   collections: KBCollectionSummary[];
-  deletingUnitId: string;
   documents: DocumentSummary[];
   extractionUnits: ExtractionUnit[];
   extractionUnitsLoading: boolean;
@@ -156,7 +153,6 @@ export function DocumentsWorkspace({
   onApplyCollection: (units: ExtractionUnit[], collection: KBCollectionSummary | null) => void;
   onBulkReviewVersion: (versionId: string, scope?: "all" | "atomic", reviewStatus?: "reviewed" | "approved", force?: boolean) => void;
   onCreateExtractionUnit: (versionId: string, unit: ExtractionUnitCreate) => void;
-  onDeleteExtractionUnit: (unit: ExtractionUnit) => void;
   onInspectVersion: (versionId: string) => void;
   onFileSelected: (file: File | null) => void;
   onPublishVersion: (versionId: string, force?: boolean) => void;
@@ -212,11 +208,9 @@ export function DocumentsWorkspace({
     }
     return document.status === sourceFilter;
   });
-  const activeExtractionUnits = extractionUnits.filter((unit) => !isRejectedExtractionUnit(unit));
   const documentLayerUnits = extractionUnits.filter(isDocumentLayer);
-  const activeDocumentLayerUnits = activeExtractionUnits.filter(isDocumentLayer);
-  const fullSopUnit = activeDocumentLayerUnits.find((unit) => unit.unit_type === "full_sop") ?? activeDocumentLayerUnits[0];
-  const workflowGraphUnit = activeExtractionUnits.find(isWorkflowGraphUnit);
+  const fullSopUnit = documentLayerUnits.find((unit) => unit.unit_type === "full_sop") ?? documentLayerUnits[0];
+  const workflowGraphUnit = extractionUnits.find(isWorkflowGraphUnit);
   const workflowGraphUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && isWorkflowGraphUnit(unit));
   const workflowGraph = workflowGraphUnit?.metadata.workflow_graph as WorkflowGraphMetadata | undefined;
   const sourceEvidenceView = useMemo(() => sourceEvidenceViewPayload(extractionPipeline), [extractionPipeline]);
@@ -224,14 +218,13 @@ export function DocumentsWorkspace({
   const workflowGraphUncertainEdges = workflowGraph?.uncertain_edges ?? workflowGraphUnit?.metadata.uncertain_edges ?? [];
   const workflowEdgeReviewSummary = buildWorkflowEdgeReviewSummary(workflowGraph, workflowGraphUnit);
   const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && !isWorkflowGraphUnit(unit));
-  const activeAtomicUnits = activeExtractionUnits.filter((unit) => !isDocumentLayer(unit) && !isWorkflowGraphUnit(unit));
   const suggestedUploadCollection = collections.find((collection) => collection.slug === upload.suggestedCollectionSlug);
   const selectedIsArchived = selectedDocument?.status === "archived";
   const pendingReviewCount = extractionUnits.filter((unit) => unit.review_status === "needs_review").length;
   const pendingAtomicReviewCount = atomicUnits.filter((unit) => unit.review_status === "needs_review").length;
-  const highRiskUnitCount = activeExtractionUnits.filter(hasRiskSignal).length;
-  const effectiveDateReviewed = activeExtractionUnits.some(hasEffectiveDateSignal);
-  const defaultEffectiveFrom = inferredEffectiveFrom(activeExtractionUnits, selectedDocument, selectedVersion);
+  const highRiskUnitCount = extractionUnits.filter(hasRiskSignal).length;
+  const effectiveDateReviewed = extractionUnits.some(hasEffectiveDateSignal);
+  const defaultEffectiveFrom = inferredEffectiveFrom(extractionUnits, selectedDocument, selectedVersion);
   const ownerAssigned = Boolean(selectedDocument?.metadata?.owner_team || selectedDocument?.metadata?.ownerTeam);
   const policyRequiresGovernance = ["policy_rule", "policy_table"].includes(String(selectedDocument?.latest_document_type ?? ""));
   const workflowRequiresGraph = selectedDocument?.latest_document_type === "workflow_diagram";
@@ -250,28 +243,28 @@ export function DocumentsWorkspace({
     (workflowGraphUnit?.metadata.graph_validation_acknowledged === true && workflowGraphAcknowledgementReason.length > 0);
   const workflowGraphIssueCount = (workflowGraphWarningsAcknowledged ? 0 : workflowGraphWarningIssueCount) + workflowEdgeReviewSummary.blockingCount;
   const workflowGraphIssuesAcknowledged = workflowGraphIssueCount === 0;
-  const pageOnlySourceRefUnacknowledged = activeExtractionUnits.filter(
+  const pageOnlySourceRefUnacknowledged = extractionUnits.filter(
     (unit) => unit.metadata.source_ref_quality === "page_only" && unit.metadata.source_ref_acknowledged !== true,
   ).length;
   const requiredWorkflowUnits = requiredUnitTypesFromExtraction(workflowGraphUnit, fullSopUnit);
   const missingWorkflowUnits = requiredWorkflowUnits.filter(
-    (required) => !activeExtractionUnits.some((unit) => required.types.includes(unit.unit_type) && isReviewedExtractionUnit(unit)),
+    (required) => !extractionUnits.some((unit) => required.types.includes(unit.unit_type) && unit.review_status !== "needs_review"),
   );
   const showWorkflowTab = workflowRequiresGraph || requiredWorkflowUnits.length > 0 || workflowGraphUnits.length > 0;
   const showKbIndexTab = isKbIndexWorkbook;
   const workflowRequirementStatuses = requiredWorkflowUnits.map((required) => {
-    const matchingUnits = activeExtractionUnits.filter((unit) => required.types.includes(unit.unit_type));
-    const reviewedUnits = matchingUnits.filter(isReviewedExtractionUnit);
+    const matchingUnits = extractionUnits.filter((unit) => required.types.includes(unit.unit_type));
+    const reviewedUnits = matchingUnits.filter((unit) => unit.review_status !== "needs_review");
     const status: WorkflowRequirementStatus["status"] = reviewedUnits.length ? "ready" : matchingUnits.length ? "needs_review" : "missing";
     return {
       ...required,
-      candidateUnits: candidateUnitsForRequirement(required, activeAtomicUnits),
+      candidateUnits: candidateUnitsForRequirement(required, atomicUnits),
       matchingUnits,
       reviewedUnits,
       status,
     };
   });
-  const validationRuleCount = activeExtractionUnits.filter((unit) => unit.unit_type === "validation_rule").length;
+  const validationRuleCount = extractionUnits.filter((unit) => unit.unit_type === "validation_rule").length;
   const reviewStats = extractionUnits.reduce(
     (acc, unit) => {
       acc.total += 1;
@@ -289,7 +282,6 @@ export function DocumentsWorkspace({
     needs_review: extractionUnits.filter((unit) => unit.review_status === "needs_review").length,
     reviewed: extractionUnits.filter((unit) => unit.review_status === "reviewed").length,
     approved: extractionUnits.filter((unit) => unit.review_status === "approved").length,
-    rejected: extractionUnits.filter((unit) => unit.review_status === "rejected").length,
     source_refs: pageOnlySourceRefUnacknowledged,
     atomic: atomicUnits.length,
     all: extractionUnits.length,
@@ -301,9 +293,9 @@ export function DocumentsWorkspace({
       passed: Boolean(fullSopUnit),
     },
     {
-      detail: activeAtomicUnits.length ? `${activeAtomicUnits.length} searchable units` : "No quick-answer units",
+      detail: atomicUnits.length ? `${atomicUnits.length} searchable units` : "No quick-answer units",
       label: "Atomic retrieval units",
-      passed: activeAtomicUnits.length > 0,
+      passed: atomicUnits.length > 0,
     },
     {
       detail: workflowGraphUnit
@@ -312,7 +304,7 @@ export function DocumentsWorkspace({
           : `${workflowGraphIssueCount} topology or decision edge issue(s) need review`
         : "Workflow graph missing",
       label: "Workflow graph reviewed",
-      passed: !workflowRequiresGraph || Boolean(workflowGraphUnit && isReviewedExtractionUnit(workflowGraphUnit) && (workflowGraph?.edges?.length ?? 0) > 0 && workflowGraphIssuesAcknowledged && workflowEdgeReviewSummary.blockingCount === 0),
+      passed: !workflowRequiresGraph || Boolean(workflowGraphUnit && workflowGraphUnit.review_status !== "needs_review" && (workflowGraph?.edges?.length ?? 0) > 0 && workflowGraphIssuesAcknowledged && workflowEdgeReviewSummary.blockingCount === 0),
     },
     {
       detail: pageOnlySourceRefUnacknowledged
@@ -368,7 +360,7 @@ export function DocumentsWorkspace({
     workflowGraphUnit,
   });
   const sopQualityAudit = buildSopQualityAudit({
-    atomicUnits: activeAtomicUnits,
+    atomicUnits,
     effectiveDateReviewed,
     fullSopUnit,
     highRiskUnitCount,
@@ -1087,9 +1079,7 @@ export function DocumentsWorkspace({
                                 defaultEffectiveFrom={defaultEffectiveFrom}
                                 documentGovernance={selectedDocumentGovernance}
                                 disabled={!canEditSelectedVersion}
-                                deleting={deletingUnitId === unit.unit_id}
                                 key={unit.unit_id}
-                                onDelete={onDeleteExtractionUnit}
                                 onSave={onUpdateExtractionUnit}
                                 saving={savingUnitId === unit.unit_id}
                                 unit={unit}
@@ -1108,9 +1098,7 @@ export function DocumentsWorkspace({
                                 defaultEffectiveFrom={defaultEffectiveFrom}
                                 documentGovernance={selectedDocumentGovernance}
                                 disabled={!canEditSelectedVersion}
-                                deleting={deletingUnitId === unit.unit_id}
                                 key={unit.unit_id}
-                                onDelete={onDeleteExtractionUnit}
                                 onSave={onUpdateExtractionUnit}
                                 saving={savingUnitId === unit.unit_id}
                                 unit={unit}
@@ -1134,9 +1122,7 @@ export function DocumentsWorkspace({
                               defaultEffectiveFrom={defaultEffectiveFrom}
                               documentGovernance={selectedDocumentGovernance}
                               disabled={!canEditSelectedVersion}
-                              deleting={deletingUnitId === unit.unit_id}
                               key={unit.unit_id}
-                              onDelete={onDeleteExtractionUnit}
                               onSave={onUpdateExtractionUnit}
                               saving={savingUnitId === unit.unit_id}
                               unit={unit}
@@ -1157,10 +1143,8 @@ export function DocumentsWorkspace({
             <TabsContent className="mt-0 space-y-4" value="kbIndex">
               <KBIndexReviewPanel
                 canEdit={canEditSelectedVersion}
-                deletingUnitId={deletingUnitId}
                 defaultEffectiveFrom={defaultEffectiveFrom}
                 kbIndexPlan={kbIndexPlan}
-                onDeleteExtractionUnit={onDeleteExtractionUnit}
                 onUpdateExtractionUnit={onUpdateExtractionUnit}
                 savingUnitId={savingUnitId}
                 units={extractionUnits}
@@ -1663,19 +1647,10 @@ const REVIEW_FILTERS: Array<{ label: string; value: ReviewFilter }> = [
   { label: "Needs review", value: "needs_review" },
   { label: "Reviewed", value: "reviewed" },
   { label: "Approved", value: "approved" },
-  { label: "Rejected", value: "rejected" },
   { label: "Source refs", value: "source_refs" },
   { label: "Atomic", value: "atomic" },
   { label: "All", value: "all" },
 ];
-
-function isReviewedExtractionUnit(unit: ExtractionUnit) {
-  return unit.review_status === "reviewed" || unit.review_status === "approved";
-}
-
-function isRejectedExtractionUnit(unit: ExtractionUnit) {
-  return unit.review_status === "rejected";
-}
 
 function unitMatchesReviewFilter(unit: ExtractionUnit, filter: ReviewFilter, isAtomic: boolean) {
   if (filter === "all") {
@@ -1685,7 +1660,7 @@ function unitMatchesReviewFilter(unit: ExtractionUnit, filter: ReviewFilter, isA
     return isAtomic;
   }
   if (filter === "source_refs") {
-    return !isRejectedExtractionUnit(unit) && unit.metadata.source_ref_quality === "page_only" && unit.metadata.source_ref_acknowledged !== true;
+    return unit.metadata.source_ref_quality === "page_only" && unit.metadata.source_ref_acknowledged !== true;
   }
   return unit.review_status === filter;
 }
@@ -1701,12 +1676,6 @@ function reviewFilterEmptyState(filter: ReviewFilter) {
     return {
       text: "Every page-only source reference is acknowledged.",
       title: "No source refs need acknowledgement",
-    };
-  }
-  if (filter === "rejected") {
-    return {
-      text: "Rejected units will appear here after CS Ops excludes them from publish.",
-      title: "No rejected units",
     };
   }
   return {
@@ -2071,19 +2040,15 @@ function SourceDocumentView({
 
 function KBIndexReviewPanel({
   canEdit,
-  deletingUnitId,
   defaultEffectiveFrom,
   kbIndexPlan,
-  onDeleteExtractionUnit,
   onUpdateExtractionUnit,
   savingUnitId,
   units,
 }: {
   canEdit: boolean;
-  deletingUnitId: string;
   defaultEffectiveFrom: string;
   kbIndexPlan: KBIndexPlanPayload | null;
-  onDeleteExtractionUnit: (unit: ExtractionUnit) => void;
   onUpdateExtractionUnit: (unit: ExtractionUnit, update: ExtractionUnitUpdate) => void;
   savingUnitId: string;
   units: ExtractionUnit[];
@@ -2160,9 +2125,7 @@ function KBIndexReviewPanel({
                 <ExtractionReviewEditor
                   defaultEffectiveFrom={defaultEffectiveFrom}
                   disabled={!canEdit}
-                  deleting={deletingUnitId === unit.unit_id}
                   key={unit.unit_id}
-                  onDelete={onDeleteExtractionUnit}
                   onSave={onUpdateExtractionUnit}
                   saving={savingUnitId === unit.unit_id}
                   unit={unit}

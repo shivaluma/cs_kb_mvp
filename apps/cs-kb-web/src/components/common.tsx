@@ -393,9 +393,6 @@ export function StatusBadge({ status }: { status: string }) {
   if (status === "archived") {
     return <Badge variant="outline">{status}</Badge>;
   }
-  if (status === "rejected") {
-    return <Badge variant="destructive">{status}</Badge>;
-  }
   return <Badge variant="secondary">{status}</Badge>;
 }
 

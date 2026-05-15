@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiDelete, apiGet, apiPost, apiUpload } from "@/lib/api";
+import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import type {
   DocumentChunk,
   ExtractionPipelineInspection,
@@ -281,53 +281,6 @@ export function useCreateExtractionUnit() {
         { queryKey: ["ai-extraction-units"] },
         (current) => (current ? [...current, unit].sort((left, right) => left.unit_index - right.unit_index) : [unit]),
       );
-      queryClient.invalidateQueries({ queryKey: ["ai-document-chunks"] });
-      queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
-      queryClient.invalidateQueries({ queryKey: ["ai-documents"] });
-    },
-  });
-}
-
-export function useDeleteExtractionUnit() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: { unitId: string; actor: string }) =>
-      apiDelete<{ deleted: boolean; document_id: string; unit_id: string; version_id: string }>(
-        `/api/v1/ai/extraction-units/${payload.unitId}?actor=${encodeURIComponent(payload.actor)}`,
-      ),
-    onMutate: async (payload) => {
-      await queryClient.cancelQueries({ queryKey: ["ai-extraction-units"] });
-      await queryClient.cancelQueries({ queryKey: ["ai-document-chunks"] });
-
-      const previousExtractionUnits = queryClient.getQueriesData<ExtractionUnit[]>({
-        queryKey: ["ai-extraction-units"],
-      });
-      const previousChunks = queryClient.getQueriesData<DocumentChunk[]>({
-        queryKey: ["ai-document-chunks"],
-      });
-
-      queryClient.setQueriesData<ExtractionUnit[]>(
-        { queryKey: ["ai-extraction-units"] },
-        (current) => current?.filter((unit) => unit.unit_id !== payload.unitId) ?? current,
-      );
-      queryClient.setQueriesData<DocumentChunk[]>(
-        { queryKey: ["ai-document-chunks"] },
-        (current) => current?.filter((chunk) => chunk.chunk_id !== payload.unitId) ?? current,
-      );
-
-      return { previousExtractionUnits, previousChunks };
-    },
-    onError: (_error, _payload, context) => {
-      context?.previousExtractionUnits.forEach(([queryKey, data]) => {
-        queryClient.setQueryData(queryKey, data);
-      });
-      context?.previousChunks.forEach(([queryKey, data]) => {
-        queryClient.setQueryData(queryKey, data);
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["ai-publish-readiness"] });
-      queryClient.invalidateQueries({ queryKey: ["ai-extraction-units"] });
       queryClient.invalidateQueries({ queryKey: ["ai-document-chunks"] });
       queryClient.invalidateQueries({ queryKey: ["ai-document-versions"] });
       queryClient.invalidateQueries({ queryKey: ["ai-documents"] });

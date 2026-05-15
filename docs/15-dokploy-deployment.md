@@ -55,9 +55,9 @@ Environment:
 DATABASE_URL=postgres://...
 OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=google/gemini-2.5-flash-lite
-OPENROUTER_EXTRACTION_MODEL=anthropic/claude-3.5-haiku
-OPENROUTER_REFINE_MODEL=anthropic/claude-3.5-haiku
-OPENROUTER_VISION_MODEL=anthropic/claude-3.5-haiku
+OPENROUTER_EXTRACTION_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_REFINE_MODEL=google/gemini-3-flash-preview
+OPENROUTER_VISION_MODEL=google/gemini-2.5-flash-lite
 OPENROUTER_METADATA_MODEL=google/gemini-2.5-flash-lite
 OPENROUTER_CHAT_SIMPLE_MODEL=google/gemini-2.5-flash-lite
 OPENROUTER_CHAT_POLICY_MODEL=moonshotai/kimi-k2.5

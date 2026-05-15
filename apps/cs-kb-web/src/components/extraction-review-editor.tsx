@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   IconCircleCheck as CheckCircle2,
-  IconCircleX as XCircle,
   IconRotate as RotateCcw,
-  IconDeviceFloppy as Save,
-  IconTrash as Trash2
+  IconDeviceFloppy as Save
 } from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -75,16 +73,13 @@ type Draft = {
 
 export function ExtractionReviewEditor({
   defaultEffectiveFrom,
-  deleting = false,
   documentGovernance,
   disabled,
-  onDelete,
   onSave,
   saving,
   unit,
 }: {
   defaultEffectiveFrom?: string;
-  deleting?: boolean;
   documentGovernance?: {
     riskLevel: string;
     reviewFrequency: string;
@@ -92,33 +87,28 @@ export function ExtractionReviewEditor({
     nextReviewDue: string;
   };
   disabled: boolean;
-  onDelete?: (unit: ExtractionUnit) => void;
   onSave: (unit: ExtractionUnit, update: ExtractionUnitUpdate) => void;
   saving: boolean;
   unit: ExtractionUnit;
 }) {
   const initialDraft = useMemo(() => unitToDraft(unit), [unit]);
   const [draft, setDraft] = useState<Draft>(initialDraft);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const normalizedSearchLabel = meaningfulSearchLabel(draft.title, draft.content, draft.unitType);
   const searchLabelWillNormalize = normalizedSearchLabel !== draft.title.trim();
 
   useEffect(() => {
     setDraft(initialDraft);
-    setConfirmingDelete(false);
   }, [initialDraft]);
 
   const changed = JSON.stringify(draft) !== JSON.stringify(initialDraft) || normalizedSearchLabel !== initialDraft.title.trim();
   const workflowGraphError = workflowGraphJsonError(draft.workflowGraphJson);
   const valid = normalizedSearchLabel.length > 0 && draft.content.trim().length > 0 && Number.isFinite(Number(draft.confidence)) && !workflowGraphError;
   const confidence = Math.max(0, Math.min(Number(draft.confidence) || 0, 1));
-  const busy = saving || deleting;
 
   function buildUpdate(reviewStatus = draft.reviewStatus): ExtractionUnitUpdate {
     const workflowGraph = parseWorkflowGraphJson(draft.workflowGraphJson);
     const workflowGraphPatch = workflowGraph ? workflowGraphMetadataPatch(workflowGraph) : {};
     const autoReviewing = reviewStatus === "reviewed" || reviewStatus === "approved";
-    const rejecting = reviewStatus === "rejected";
     const effectiveFrom = draft.effectiveFrom || defaultEffectiveFrom || "";
     return {
       title: normalizedSearchLabel,
@@ -136,15 +126,6 @@ export function ExtractionReviewEditor({
         effective_from: effectiveFrom,
         source_ref_acknowledged: autoReviewing && unit.metadata.source_ref_quality === "page_only" ? true : draft.sourceRefAcknowledged,
         ...workflowGraphPatch,
-        ...(rejecting
-          ? {
-              index_eligible: false,
-              manual_curation_status: "rejected",
-              publish_blocked: false,
-              publish_blocked_reason: "",
-              source_evidence_only: true,
-            }
-          : {}),
       },
     };
   }
@@ -158,14 +139,6 @@ export function ExtractionReviewEditor({
       ...buildUpdate(reviewStatus),
       review_status: reviewStatus,
     });
-  }
-
-  function requestDelete() {
-    if (!confirmingDelete) {
-      setConfirmingDelete(true);
-      return;
-    }
-    onDelete?.(unit);
   }
 
   return (
@@ -309,7 +282,6 @@ export function ExtractionReviewEditor({
               <SelectItem value="needs_review">needs_review</SelectItem>
               <SelectItem value="reviewed">reviewed</SelectItem>
               <SelectItem value="approved">approved</SelectItem>
-              <SelectItem value="rejected">rejected</SelectItem>
             </SelectContent>
           </Select>
         </label>
@@ -390,23 +362,17 @@ export function ExtractionReviewEditor({
               ? "Unsaved changes will refresh the embedding after save."
               : "No unsaved changes. Use review actions to move this unit through curation."}
         </p>
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex items-center gap-2">
           {draft.reviewStatus === "reviewed" || draft.reviewStatus === "approved" ? (
             <span className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
               <CheckCircle2 className="size-3.5" />
               reviewed
             </span>
           ) : null}
-          {draft.reviewStatus === "rejected" ? (
-            <span className="inline-flex items-center gap-1 text-xs font-medium text-destructive">
-              <XCircle className="size-3.5" />
-              rejected
-            </span>
-          ) : null}
           {!disabled && unit.review_status === "needs_review" ? (
             <Button
               data-testid={`extraction-unit-${unit.unit_id}-mark-reviewed`}
-              disabled={busy || !valid}
+              disabled={saving || !valid}
               onClick={() => transitionReviewStatus("reviewed")}
               size="sm"
               type="button"
@@ -415,10 +381,10 @@ export function ExtractionReviewEditor({
               Mark reviewed
             </Button>
           ) : null}
-          {!disabled && unit.review_status !== "approved" && unit.review_status !== "rejected" ? (
+          {!disabled && unit.review_status !== "approved" ? (
             <Button
               data-testid={`extraction-unit-${unit.unit_id}-approve`}
-              disabled={busy || !valid}
+              disabled={saving || !valid}
               onClick={() => transitionReviewStatus("approved")}
               size="sm"
               type="button"
@@ -427,61 +393,9 @@ export function ExtractionReviewEditor({
               Approve
             </Button>
           ) : null}
-          {!disabled && unit.review_status !== "rejected" ? (
-            <Button
-              className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-              data-testid={`extraction-unit-${unit.unit_id}-reject`}
-              disabled={busy || !valid}
-              onClick={() => transitionReviewStatus("rejected")}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <XCircle data-icon="inline-start" className="size-4" />
-              Reject
-            </Button>
-          ) : !disabled ? (
-            <Button
-              data-testid={`extraction-unit-${unit.unit_id}-reopen`}
-              disabled={busy || !valid}
-              onClick={() => transitionReviewStatus("needs_review")}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              Reopen
-            </Button>
-          ) : null}
-          {!disabled && onDelete ? (
-            <>
-              {confirmingDelete ? (
-                <Button
-                  disabled={busy}
-                  onClick={() => setConfirmingDelete(false)}
-                  size="sm"
-                  type="button"
-                  variant="ghost"
-                >
-                  Cancel
-                </Button>
-              ) : null}
-              <Button
-                className={confirmingDelete ? "border-destructive bg-destructive text-destructive-foreground hover:bg-destructive/90" : undefined}
-                data-testid={`extraction-unit-${unit.unit_id}-delete`}
-                disabled={busy}
-                onClick={requestDelete}
-                size="sm"
-                type="button"
-                variant={confirmingDelete ? "outline" : "ghost"}
-              >
-                <Trash2 data-icon="inline-start" className="size-4" />
-                {deleting ? "Deleting" : confirmingDelete ? "Confirm delete" : "Delete"}
-              </Button>
-            </>
-          ) : null}
           <Button
             data-testid={`extraction-unit-${unit.unit_id}-reset`}
-            disabled={!changed || busy}
+            disabled={!changed || saving}
             onClick={() => setDraft(initialDraft)}
             size="sm"
             type="button"
@@ -492,7 +406,7 @@ export function ExtractionReviewEditor({
           </Button>
           <Button
             data-testid={`extraction-unit-${unit.unit_id}-save`}
-            disabled={disabled || !changed || !valid || busy}
+            disabled={disabled || !changed || !valid || saving}
             onClick={save}
             size="sm"
             type="button"

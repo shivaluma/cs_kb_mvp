@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from app.config import DEFAULT_EMBEDDING_MODEL, DEFAULT_EXTRACT_PIPELINE_MODEL, Settings
+from app.config import DEFAULT_EMBEDDING_MODEL, Settings
 
 
 class EmbeddingConfigTest(unittest.TestCase):
@@ -29,27 +29,6 @@ class EmbeddingConfigTest(unittest.TestCase):
 
         self.assertEqual(settings.embedding_provider, "local_hash")
         self.assertEqual(settings.embedding_model, DEFAULT_EMBEDDING_MODEL)
-
-    def test_extraction_pipeline_defaults_to_claude_haiku(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            settings = Settings()
-
-        self.assertEqual(settings.openrouter_extraction_model, DEFAULT_EXTRACT_PIPELINE_MODEL)
-        self.assertEqual(settings.openrouter_refine_model, DEFAULT_EXTRACT_PIPELINE_MODEL)
-        self.assertEqual(settings.openrouter_vision_model, DEFAULT_EXTRACT_PIPELINE_MODEL)
-
-    def test_extraction_pipeline_maps_deprecated_gemini_3_preview_to_claude_haiku(self) -> None:
-        env = {
-            "OPENROUTER_EXTRACTION_MODEL": "google/gemini-3-flash-preview",
-            "OPENROUTER_REFINE_MODEL": "google/gemini-3-flash-preview",
-            "OPENROUTER_VISION_MODEL": "google/gemini-3-flash-preview",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            settings = Settings()
-
-        self.assertEqual(settings.openrouter_extraction_model, DEFAULT_EXTRACT_PIPELINE_MODEL)
-        self.assertEqual(settings.openrouter_refine_model, DEFAULT_EXTRACT_PIPELINE_MODEL)
-        self.assertEqual(settings.openrouter_vision_model, DEFAULT_EXTRACT_PIPELINE_MODEL)
 
 
 if __name__ == "__main__":

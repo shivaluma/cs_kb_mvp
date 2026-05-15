@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import unittest
 
 from app import repository
-from app.schemas import ExtractionUnitUpdateRequest, RetrievalFilters
+from app.schemas import RetrievalFilters
 
 
 class RepositoryGateTest(unittest.TestCase):
@@ -27,20 +27,6 @@ class RepositoryGateTest(unittest.TestCase):
                 }
             )
         )
-
-    def test_rejected_extraction_unit_status_is_valid_but_not_publish_ready(self) -> None:
-        request = ExtractionUnitUpdateRequest(
-            title="Noise unit",
-            content="Duplicate or incorrect extracted content.",
-            unit_type="policy_rule",
-            confidence=0.2,
-            review_status="rejected",
-            metadata={},
-            actor="cs-ops-ui",
-        )
-
-        self.assertEqual(request.review_status, "rejected")
-        self.assertFalse(repository.is_reviewed_status("rejected"))
 
     def test_production_retrieval_requires_published_approved_structured_chunks(self) -> None:
         where_sql, params = repository.filter_sql(RetrievalFilters(status=["published"]))

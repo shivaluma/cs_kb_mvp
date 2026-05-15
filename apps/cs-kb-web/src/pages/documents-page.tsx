@@ -6,7 +6,6 @@ import {
   useArchiveDocument,
   useBulkReviewVersion,
   useCreateExtractionUnit,
-  useDeleteExtractionUnit,
   useDocumentChunks,
   useDocumentMetadataPreview,
   useDocuments,
@@ -72,7 +71,6 @@ export function DocumentsPage() {
   const retryIndexingMutation = useRetryVersionIndexing();
   const bulkReviewMutation = useBulkReviewVersion();
   const createExtractionUnitMutation = useCreateExtractionUnit();
-  const deleteExtractionUnitMutation = useDeleteExtractionUnit();
   const updateExtractionUnitMutation = useUpdateExtractionUnit();
   const archiveDocumentMutation = useArchiveDocument();
 
@@ -411,16 +409,6 @@ export function DocumentsPage() {
     );
   }
 
-  function deleteExtractionUnit(unit: ExtractionUnit) {
-    deleteExtractionUnitMutation.mutate(
-      { unitId: unit.unit_id, actor: "cs-ops-ui" },
-      {
-        onSuccess: () => reportNotice(`Deleted extraction unit ${unit.unit_index}.`),
-        onError: () => reportError("Could not delete this extraction unit. Only editable draft versions can be changed."),
-      },
-    );
-  }
-
   function archiveDocument(document: DocumentSummary) {
     const confirmed = window.confirm(`Archive "${document.title}"? It will be removed from active retrieval, Meilisearch, collection membership, and approved relation expansion.`);
     if (!confirmed) {
@@ -447,7 +435,6 @@ export function DocumentsPage() {
     retryIndexingMutation.isPending ? "indexing" :
     bulkReviewMutation.isPending ? "bulk-review" :
     createExtractionUnitMutation.isPending ? "create-unit" :
-    deleteExtractionUnitMutation.isPending ? "delete-unit" :
     "";
 
   return (
@@ -468,7 +455,6 @@ export function DocumentsPage() {
         onApplyCollection={applyCollectionToUnits}
         onBulkReviewVersion={bulkReviewVersion}
         onCreateExtractionUnit={createExtractionUnit}
-        onDeleteExtractionUnit={deleteExtractionUnit}
         onFileSelected={previewFileMetadata}
         onInspectVersion={(versionId) => setParams({ version: versionId })}
         onPublishVersion={publishVersion}
@@ -479,7 +465,6 @@ export function DocumentsPage() {
         onUpload={handleUpload}
         publishReadiness={publishReadinessQuery.data ?? null}
         publishReadinessLoading={publishReadinessQuery.isFetching}
-        deletingUnitId={deleteExtractionUnitMutation.isPending ? deleteExtractionUnitMutation.variables?.unitId ?? "" : ""}
         savingUnitId={updateExtractionUnitMutation.isPending ? updateExtractionUnitMutation.variables?.unitId ?? "" : ""}
         selectedChunkVersionId={effectiveVersionId}
         selectedDocument={selectedDocument}
