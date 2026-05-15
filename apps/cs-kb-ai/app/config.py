@@ -5,6 +5,8 @@ import os
 
 EMBEDDING_DIMENSIONS = 1536
 DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
+DEFAULT_EXTRACT_PIPELINE_MODEL = "anthropic/claude-3.5-haiku"
+DEPRECATED_EXTRACT_PIPELINE_MODELS = {"google/gemini-3-flash-preview"}
 
 
 def first_non_empty(*values: str | None) -> str:
@@ -12,6 +14,11 @@ def first_non_empty(*values: str | None) -> str:
         if value and value.strip():
             return value.strip()
     return ""
+
+
+def normalize_extract_pipeline_model(value: str | None, fallback: str = DEFAULT_EXTRACT_PIPELINE_MODEL) -> str:
+    model = (value or "").strip() or fallback
+    return DEFAULT_EXTRACT_PIPELINE_MODEL if model in DEPRECATED_EXTRACT_PIPELINE_MODELS else model
 
 
 class Settings:
@@ -26,14 +33,17 @@ class Settings:
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
         self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
-        self.openrouter_extraction_model = os.getenv("OPENROUTER_EXTRACTION_MODEL", self.openrouter_model).strip() or self.openrouter_model
-        self.openrouter_refine_model = os.getenv(
-            "OPENROUTER_REFINE_MODEL",
-            "google/gemini-3-flash-preview",
-        ).strip()
-        self.openrouter_vision_model = (
-            os.getenv("OPENROUTER_VISION_MODEL", "").strip()
-            or self.openrouter_refine_model
+        self.openrouter_extraction_model = normalize_extract_pipeline_model(
+            os.getenv("OPENROUTER_EXTRACTION_MODEL", ""),
+            DEFAULT_EXTRACT_PIPELINE_MODEL,
+        )
+        self.openrouter_refine_model = normalize_extract_pipeline_model(
+            os.getenv("OPENROUTER_REFINE_MODEL", ""),
+            DEFAULT_EXTRACT_PIPELINE_MODEL,
+        )
+        self.openrouter_vision_model = normalize_extract_pipeline_model(
+            os.getenv("OPENROUTER_VISION_MODEL", ""),
+            self.openrouter_refine_model,
         )
         self.openrouter_metadata_model = os.getenv("OPENROUTER_METADATA_MODEL", self.openrouter_model)
         self.openrouter_chat_model = os.getenv("OPENROUTER_CHAT_MODEL", self.openrouter_model)

@@ -2071,6 +2071,9 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         metadata = row.get("metadata") or {}
         if not isinstance(metadata, dict):
             metadata = {}
+        review_status = str(metadata.get("review_status") or "needs_review")
+        if review_status == "rejected":
+            continue
         unit_extraction_status = str(metadata.get("extraction_status") or "")
         if unit_extraction_status == "failed" or unit_extraction_status.startswith("failed"):
             failures.append("extraction_failed_validation")
@@ -2086,14 +2089,14 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
             workflow_unit_status_by_type[unit_type] = workflow_unit_status_by_type.get(unit_type, False) or is_reviewed_status(metadata.get("review_status"))
         required_unit_types.update(required_unit_types_from_metadata(metadata))
         has_full_sop = has_full_sop or unit_type == "full_sop" or retrieval_scope == "document"
-        pending_units += 1 if str(metadata.get("review_status") or "needs_review") == "needs_review" else 0
+        pending_units += 1 if review_status == "needs_review" else 0
         has_owner = has_owner or bool(metadata.get("owner_team"))
         has_effective_from = has_effective_from or bool(metadata.get("effective_from"))
         has_historical_sheets = has_historical_sheets or bool(metadata.get("historical_sheets"))
         has_high_risk_signal = has_high_risk_signal or is_high_risk_metadata(metadata, text)
         if unit_type == "workflow_graph" or metadata.get("workflow_graph"):
             has_workflow_graph = True
-            workflow_graph_reviewed = str(metadata.get("review_status") or "needs_review") in {"reviewed", "approved"}
+            workflow_graph_reviewed = review_status in {"reviewed", "approved"}
             try:
                 workflow_graph_confidence = float(metadata.get("graph_confidence") or metadata.get("confidence") or 0)
             except (TypeError, ValueError):
@@ -4413,7 +4416,15 @@ def update_extraction_unit(
                 merged_metadata["publish_blocked"] = False
                 merged_metadata["publish_blocked_reason"] = ""
                 merged_metadata["source_evidence_only"] = False
-            if review_status == "reviewed":
+            if review_status == "rejected":
+                merged_metadata["manual_curation_status"] = "rejected"
+                merged_metadata["source_evidence_only"] = True
+                merged_metadata["index_eligible"] = False
+                merged_metadata["publish_blocked"] = False
+                merged_metadata["publish_blocked_reason"] = ""
+                merged_metadata["rejected_at"] = datetime.now(timezone.utc).isoformat()
+                merged_metadata["rejected_by"] = actor
+            if review_status in {"reviewed", "approved"}:
                 merged_metadata["reviewed_at"] = datetime.now(timezone.utc).isoformat()
 
             conn.execute(
@@ -4524,6 +4535,72 @@ def update_extraction_unit(
         source_type,
         updated_metadata,
     )
+
+
+def delete_extraction_unit(*, unit_id: str, actor: str) -> dict[str, Any]:
+    with connection() as conn:
+        with conn.transaction():
+            conn.row_factory = dict_row
+            row = conn.execute(
+                """
+                SELECT c.id::text AS unit_id,
+                       c.document_id::text AS document_id,
+                       c.version_id::text AS version_id,
+                       c.chunk_index AS unit_index,
+                       c.section,
+                       c.heading AS title,
+                       c.metadata,
+                       v.status AS version_status
+                FROM ai_chunks c
+                JOIN ai_document_versions v ON v.id = c.version_id
+                WHERE c.id = %s
+                FOR UPDATE
+                """,
+                (unit_id,),
+            ).fetchone()
+            if not row:
+                raise LookupError("extraction_unit_not_found")
+            if row["version_status"] != "draft":
+                raise ValueError("published_or_archived_versions_are_immutable")
+
+            conn.execute("DELETE FROM ai_chunks WHERE id = %s", (unit_id,))
+            conn.execute(
+                """
+                UPDATE ai_document_versions
+                SET review_status = CASE
+                    WHEN review_status = 'approved' THEN review_status
+                    ELSE 'reviewed'
+                END,
+                    chunk_count = (SELECT COUNT(*) FROM ai_chunks WHERE version_id = %s)
+                WHERE id = %s
+                """,
+                (row["version_id"], row["version_id"]),
+            )
+            conn.execute(
+                "UPDATE ai_documents SET updated_at = now() WHERE id = %s",
+                (row["document_id"],),
+            )
+            audit_tx(
+                conn,
+                actor=actor,
+                action="extraction_unit_delete",
+                entity_type="ai_chunk",
+                entity_id=unit_id,
+                metadata={
+                    "document_id": row["document_id"],
+                    "version_id": row["version_id"],
+                    "unit_index": row["unit_index"],
+                    "unit_type": row["section"],
+                    "title": row["title"],
+                },
+            )
+
+    return {
+        "deleted": True,
+        "document_id": row["document_id"],
+        "unit_id": unit_id,
+        "version_id": row["version_id"],
+    }
 
 
 def create_extraction_unit(
