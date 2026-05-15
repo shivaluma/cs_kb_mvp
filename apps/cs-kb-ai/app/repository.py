@@ -14,6 +14,16 @@ from psycopg.rows import dict_row, tuple_row
 from psycopg_pool import ConnectionPool
 
 from app.config import settings
+from app.vietnamese_defaults import (
+    DEFAULT_DISPLAY_LABELS,
+    DEFAULT_EXTRACTION_SIGNALS,
+    DEFAULT_KB_COLLECTIONS,
+    DEFAULT_RELATION_PATTERNS,
+    DEFAULT_RERANK_RULES,
+    DEFAULT_SHEET_MAPPING_RULES,
+    DEFAULT_TAXONOMY_GROUPS,
+    DEFAULT_TAXONOMY_TERMS,
+)
 from app.embedding import vector_literal
 from app.search_labels import is_bad_search_label, meaningful_search_label
 from app.schemas import DocumentMetadata, RetrievalFilters, SynonymGroupCreateRequest, SynonymSuggestionAcceptRequest
@@ -22,7 +32,9 @@ from app.text_processing import normalize_phrase, render_pdf_page_jpeg, tokenize
 
 pool = ConnectionPool(settings.database_url, min_size=1, max_size=10, open=False)
 _synonym_cache: tuple[float, list[dict[str, Any]]] = (0, [])
+_domain_config_cache: dict[str, tuple[float, Any]] = {}
 SYNONYM_CACHE_SECONDS = 30
+DOMAIN_CONFIG_CACHE_SECONDS = 30
 EFFECTIVE_HEADING_SQL = """
 CASE
   WHEN COALESCE(c.heading, '') ~ '^[[:space:]]*([Bb][uư][oơ]?c[[:space:]]*)?[0-9]{1,3}(\\.[0-9]{1,3})*\\.?[[:space:]]*$' THEN ''
@@ -76,49 +88,13 @@ RELATION_TYPE_PRIORITY = {
     "related_to": 14,
     "possible_conflict": 15,
 }
-TEXT_RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+TEXT_RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = tuple(
     (
-        re.compile(
-            r"(?:thực hiện|thuc hien|áp dụng|ap dung|xử lý|xu ly|hỗ trợ|ho tro)\s+theo\s+(?P<title>(?:quy\s*(?:định|dinh|trình|trinh)|sop|hướng\s*dẫn|huong\s*dan|macro)[^.;\n]{3,180})",
-            re.IGNORECASE,
-        ),
-        "requires",
-        "explicit_text_reference",
-    ),
-    (
-        re.compile(
-            r"(?:theo|xem(?:\s+thêm)?|tham\s*khảo|tham\s*khao)\s+(?P<title>(?:quy\s*(?:định|dinh|trình|trinh)|sop|hướng\s*dẫn|huong\s*dan|macro)[^.;\n]{3,180})",
-            re.IGNORECASE,
-        ),
-        "references",
-        "explicit_text_reference",
-    ),
-    (
-        re.compile(
-            r"(?:chuyển|chuyen)\s+(?:case\s+)?(?:cho|đến|den|về|ve|vào|vao)\s+(?P<title>[A-Za-zÀ-ỹ0-9 _./-]{2,90})",
-            re.IGNORECASE,
-        ),
-        "routes_to",
-        "operational_handoff",
-    ),
-)
-
-DEFAULT_KB_COLLECTIONS = (
-    ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
-    ("customer-rider-operations", "Customer / Rider Operations", "audience"),
-    ("driver-operations", "Driver Operations", "audience"),
-    ("merchant-mcu-operations", "Merchant / MCU Operations", "audience"),
-    ("cleaner-operations", "Cleaner Operations", "audience"),
-    ("payment-refund", "Payment & Refund", "task"),
-    ("account-verification", "Account & Verification", "task"),
-    ("trip-order-issues", "Trip / Order Issues", "task"),
-    ("promotion-voucher", "Promotion / Voucher", "task"),
-    ("social-call-email-handling", "Social / Call / Email Handling", "channel"),
-    ("tech-bpla-msc-handoff", "Tech / BPLA / MSC Handoff", "owner"),
-    ("qa-zt-compliance", "QA / ZT / Compliance", "risk"),
-    ("vip-customer-handling", "VIP Customer Handling", "risk"),
-    ("tool-directory", "Tool Directory", "tool"),
-    ("product-updates", "Product Updates", "domain"),
+        re.compile(str(item["pattern"]), re.IGNORECASE),
+        str(item["relation_type"]),
+        str(item["relation_source"]),
+    )
+    for item in DEFAULT_RELATION_PATTERNS
 )
 
 
@@ -156,6 +132,15 @@ def connection() -> Iterator[Connection[Any]]:
         pool.open()
     with pool.connection() as conn:
         conn.row_factory = tuple_row
+        yield conn
+
+
+@contextmanager
+def domain_config_connection() -> Iterator[Connection[Any]]:
+    if pool.closed:
+        pool.open(wait=False)
+    with pool.connection(timeout=1.0) as conn:
+        conn.row_factory = dict_row
         yield conn
 
 
@@ -476,6 +461,8 @@ def ensure_schema() -> None:
         )
         ensure_search_taxonomy_schema(conn)
         seed_search_taxonomy(conn)
+        ensure_domain_config_schema(conn)
+        seed_domain_defaults(conn)
 
 
 def ensure_kb_index_schema(conn: Connection[Any]) -> None:
@@ -657,6 +644,296 @@ def seed_search_taxonomy(conn: Connection[Any]) -> None:
     cleanup_synonym_normalized_terms(conn)
 
 
+def ensure_domain_config_schema(conn: Connection[Any]) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS taxonomy_terms (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          term_key text NOT NULL UNIQUE,
+          term_type text NOT NULL,
+          canonical_label text NOT NULL DEFAULT '',
+          display_name text NOT NULL DEFAULT '',
+          aliases jsonb NOT NULL DEFAULT '[]'::jsonb,
+          normalized_aliases jsonb NOT NULL DEFAULT '[]'::jsonb,
+          language text NOT NULL DEFAULT 'vi',
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          status text NOT NULL DEFAULT 'active',
+          owner_team text NOT NULL DEFAULT '',
+          source text NOT NULL DEFAULT 'manual',
+          version integer NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute("ALTER TABLE taxonomy_terms ADD COLUMN IF NOT EXISTS canonical_label text NOT NULL DEFAULT ''")
+    conn.execute("ALTER TABLE taxonomy_terms ADD COLUMN IF NOT EXISTS normalized_aliases jsonb NOT NULL DEFAULT '[]'::jsonb")
+    conn.execute("ALTER TABLE taxonomy_terms ADD COLUMN IF NOT EXISTS language text NOT NULL DEFAULT 'vi'")
+    conn.execute("ALTER TABLE taxonomy_terms ADD COLUMN IF NOT EXISTS owner_team text NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS taxonomy_groups (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          group_key text NOT NULL UNIQUE,
+          group_type text NOT NULL,
+          display_name text NOT NULL DEFAULT '',
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          status text NOT NULL DEFAULT 'active',
+          source text NOT NULL DEFAULT 'manual',
+          version integer NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS taxonomy_group_terms (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          group_id uuid NOT NULL REFERENCES taxonomy_groups(id) ON DELETE CASCADE,
+          term_key text NOT NULL,
+          weight numeric NOT NULL DEFAULT 1,
+          status text NOT NULL DEFAULT 'active',
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (group_id, term_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS extraction_signals (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          signal_key text NOT NULL UNIQUE,
+          signal_type text NOT NULL,
+          phrase text NOT NULL,
+          normalized_phrase text NOT NULL,
+          language text NOT NULL DEFAULT 'vi',
+          risk_level text NOT NULL DEFAULT '',
+          unit_type_hint text NOT NULL DEFAULT '',
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          priority integer NOT NULL DEFAULT 100,
+          status text NOT NULL DEFAULT 'active',
+          owner_team text NOT NULL DEFAULT '',
+          source text NOT NULL DEFAULT 'manual',
+          version integer NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rerank_rules (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          rule_key text NOT NULL UNIQUE,
+          scope text NOT NULL,
+          rule_type text NOT NULL DEFAULT 'weight',
+          weight numeric NOT NULL DEFAULT 0,
+          params jsonb NOT NULL DEFAULT '{}'::jsonb,
+          priority integer NOT NULL DEFAULT 100,
+          status text NOT NULL DEFAULT 'active',
+          source text NOT NULL DEFAULT 'manual',
+          version integer NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sheet_mapping_rules (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          rule_key text NOT NULL UNIQUE,
+          match_type text NOT NULL DEFAULT 'exact',
+          pattern text NOT NULL,
+          sheet_kind text NOT NULL DEFAULT 'review_required',
+          collection_slug text NOT NULL DEFAULT '',
+          collection_name text NOT NULL DEFAULT '',
+          collection_type text NOT NULL DEFAULT 'domain',
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          priority integer NOT NULL DEFAULT 100,
+          status text NOT NULL DEFAULT 'active',
+          source text NOT NULL DEFAULT 'manual',
+          version integer NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS relation_patterns (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          pattern_key text NOT NULL UNIQUE,
+          pattern text NOT NULL,
+          relation_type text NOT NULL,
+          relation_source text NOT NULL DEFAULT 'configured_pattern',
+          language text NOT NULL DEFAULT 'vi',
+          priority integer NOT NULL DEFAULT 100,
+          status text NOT NULL DEFAULT 'active',
+          source text NOT NULL DEFAULT 'manual',
+          version integer NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute("ALTER TABLE relation_patterns ADD COLUMN IF NOT EXISTS language text NOT NULL DEFAULT 'vi'")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS display_labels (
+          id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+          label_type text NOT NULL,
+          label_key text NOT NULL,
+          label text NOT NULL,
+          sort_order integer NOT NULL DEFAULT 100,
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          status text NOT NULL DEFAULT 'active',
+          source text NOT NULL DEFAULT 'manual',
+          version integer NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (label_type, label_key)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomy_terms_status_type ON taxonomy_terms(status, term_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomy_groups_status_type ON taxonomy_groups(status, group_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taxonomy_group_terms_status ON taxonomy_group_terms(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_signals_status_type ON extraction_signals(status, signal_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_signals_normalized ON extraction_signals(normalized_phrase)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rerank_rules_status_scope ON rerank_rules(status, scope)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sheet_mapping_rules_status_priority ON sheet_mapping_rules(status, priority)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_relation_patterns_status_priority ON relation_patterns(status, priority)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_display_labels_status_type ON display_labels(status, label_type)")
+
+
+def seed_domain_defaults(conn: Connection[Any]) -> None:
+    for item in DEFAULT_TAXONOMY_TERMS:
+        conn.execute(
+            """
+            INSERT INTO taxonomy_terms (
+              term_key, term_type, canonical_label, display_name, aliases,
+              normalized_aliases, language, metadata, status, source
+            )
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb, 'active', 'default_seed')
+            ON CONFLICT (term_key) DO NOTHING
+            """,
+            (
+                item["term_key"],
+                item["term_type"],
+                item.get("canonical_label") or item.get("display_name", ""),
+                item.get("display_name", ""),
+                jsonb_text(item.get("aliases", [])),
+                jsonb_text([normalize_phrase(alias) for alias in item.get("aliases", []) if normalize_phrase(alias)]),
+                item.get("language", "vi"),
+                jsonb_text(item.get("metadata", {})),
+            ),
+        )
+    for group in DEFAULT_TAXONOMY_GROUPS:
+        conn.execute(
+            """
+            INSERT INTO taxonomy_groups (group_key, group_type, display_name, metadata, status, source)
+            VALUES (%s, %s, %s, %s::jsonb, 'active', 'default_seed')
+            ON CONFLICT (group_key) DO NOTHING
+            """,
+            (group["group_key"], group["group_type"], group.get("display_name", ""), jsonb_text(group.get("metadata", {}))),
+        )
+        row = conn.execute("SELECT id FROM taxonomy_groups WHERE group_key = %s", (group["group_key"],)).fetchone()
+        if not row:
+            continue
+        group_id = row[0]
+        for term_key in group.get("term_keys", []):
+            conn.execute(
+                """
+                INSERT INTO taxonomy_group_terms (group_id, term_key, weight, status)
+                VALUES (%s, %s, 1, 'active')
+                ON CONFLICT (group_id, term_key) DO NOTHING
+                """,
+                (group_id, term_key),
+            )
+    for item in DEFAULT_EXTRACTION_SIGNALS:
+        phrase = str(item.get("phrase") or "")
+        conn.execute(
+            """
+            INSERT INTO extraction_signals (
+              signal_key, signal_type, phrase, normalized_phrase, language,
+              risk_level, unit_type_hint, metadata, priority, status, source
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, 'active', 'default_seed')
+            ON CONFLICT (signal_key) DO NOTHING
+            """,
+            (
+                item["signal_key"],
+                item["signal_type"],
+                phrase,
+                normalize_phrase(phrase),
+                item.get("language", "vi"),
+                item.get("risk_level", ""),
+                item.get("unit_type_hint", ""),
+                jsonb_text(item.get("metadata", {})),
+                item.get("priority", 100),
+            ),
+        )
+    for item in DEFAULT_RERANK_RULES:
+        conn.execute(
+            """
+            INSERT INTO rerank_rules (rule_key, scope, rule_type, weight, params, priority, status, source)
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s, 'active', 'default_seed')
+            ON CONFLICT (rule_key) DO NOTHING
+            """,
+            (item["rule_key"], item["scope"], item.get("rule_type", "weight"), item.get("weight", 0), jsonb_text(item.get("params", {})), item.get("priority", 100)),
+        )
+    for item in DEFAULT_SHEET_MAPPING_RULES:
+        conn.execute(
+            """
+            INSERT INTO sheet_mapping_rules (
+              rule_key, match_type, pattern, sheet_kind, collection_slug,
+              collection_name, collection_type, metadata, priority, status, source
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, 'active', 'default_seed')
+            ON CONFLICT (rule_key) DO NOTHING
+            """,
+            (
+                item["rule_key"],
+                item.get("match_type", "exact"),
+                item["pattern"],
+                item.get("sheet_kind", "review_required"),
+                item.get("collection_slug", ""),
+                item.get("collection_name", ""),
+                item.get("collection_type", "domain"),
+                jsonb_text(item.get("metadata", {})),
+                item.get("priority", 100),
+            ),
+        )
+    for item in DEFAULT_RELATION_PATTERNS:
+        conn.execute(
+            """
+            INSERT INTO relation_patterns (pattern_key, pattern, relation_type, relation_source, language, priority, status, source)
+            VALUES (%s, %s, %s, %s, %s, %s, 'active', 'default_seed')
+            ON CONFLICT (pattern_key) DO NOTHING
+            """,
+            (item["pattern_key"], item["pattern"], item["relation_type"], item.get("relation_source", "configured_pattern"), item.get("language", "vi"), item.get("priority", 100)),
+        )
+    for label_type, labels in DEFAULT_DISPLAY_LABELS.items():
+        for label_key, payload in labels.items():
+            conn.execute(
+                """
+                INSERT INTO display_labels (label_type, label_key, label, sort_order, metadata, status, source)
+                VALUES (%s, %s, %s, %s, %s::jsonb, 'active', 'default_seed')
+                ON CONFLICT (label_type, label_key) DO NOTHING
+                """,
+                (
+                    label_type,
+                    label_key,
+                    str(payload.get("label") or label_key),
+                    int(payload.get("sort_order", 100)),
+                    jsonb_text({key: value for key, value in payload.items() if key not in {"label", "sort_order"}}),
+                ),
+            )
+
+
 def cleanup_synonym_normalized_terms(conn: Connection[Any]) -> None:
     rows = conn.execute("SELECT id::text, group_id::text, term FROM search_synonym_terms").fetchall()
     keep_by_key: dict[tuple[str, str], str] = {}
@@ -682,6 +959,430 @@ def cleanup_synonym_normalized_terms(conn: Connection[Any]) -> None:
             "UPDATE search_synonym_terms SET normalized_term = %s WHERE id = %s",
             (normalized, term_id),
         )
+
+
+def clear_domain_config_cache() -> None:
+    _domain_config_cache.clear()
+
+
+def json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def active_domain_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if str(row.get("status") or "active") == "active"]
+
+
+def cached_domain_config(key: str, loader: Any, fallback: Any) -> Any:
+    now = time.time()
+    cached = _domain_config_cache.get(key)
+    if cached and now - cached[0] < DOMAIN_CONFIG_CACHE_SECONDS:
+        return cached[1]
+    try:
+        value = loader()
+    except Exception:
+        value = None
+    if not value:
+        value = fallback
+    _domain_config_cache[key] = (now, value)
+    return value
+
+
+def load_active_taxonomy_terms() -> list[dict[str, Any]]:
+    with domain_config_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT term_key,
+                   term_type,
+                   COALESCE(NULLIF(canonical_label, ''), display_name) AS canonical_label,
+                   display_name,
+                   aliases,
+                   normalized_aliases,
+                   language,
+                   metadata,
+                   status,
+                   source,
+                   version,
+                   updated_at
+            FROM taxonomy_terms
+            WHERE status = 'active'
+            ORDER BY term_type, term_key
+            """
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "aliases": json_list(row.get("aliases")),
+            "normalized_aliases": json_list(row.get("normalized_aliases")) or [normalize_phrase(alias) for alias in json_list(row.get("aliases")) if normalize_phrase(alias)],
+            "metadata": json_dict(row.get("metadata")),
+        }
+        for row in rows
+    ]
+
+
+def active_taxonomy_terms() -> list[dict[str, Any]]:
+    return cached_domain_config(
+        "taxonomy_terms",
+        load_active_taxonomy_terms,
+        [dict(item) for item in DEFAULT_TAXONOMY_TERMS],
+    )
+
+
+def load_active_taxonomy_groups() -> list[dict[str, Any]]:
+    with domain_config_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT g.group_key,
+                   g.group_type,
+                   g.display_name,
+                   g.metadata,
+                   g.status,
+                   g.source,
+                   g.version,
+                   COALESCE(jsonb_agg(
+                     jsonb_build_object('term_key', gt.term_key, 'weight', gt.weight)
+                     ORDER BY gt.weight DESC, gt.term_key
+                   ) FILTER (WHERE gt.status = 'active'), '[]'::jsonb) AS terms
+            FROM taxonomy_groups g
+            LEFT JOIN taxonomy_group_terms gt ON gt.group_id = g.id
+            WHERE g.status = 'active'
+            GROUP BY g.id
+            ORDER BY g.group_type, g.group_key
+            """
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "metadata": json_dict(row.get("metadata")),
+            "terms": json_list(row.get("terms")),
+            "term_keys": [str(item.get("term_key")) for item in json_list(row.get("terms")) if isinstance(item, dict) and item.get("term_key")],
+        }
+        for row in rows
+    ]
+
+
+def active_taxonomy_groups() -> list[dict[str, Any]]:
+    return cached_domain_config(
+        "taxonomy_groups",
+        load_active_taxonomy_groups,
+        [dict(item) for item in DEFAULT_TAXONOMY_GROUPS],
+    )
+
+
+def load_active_extraction_signals() -> list[dict[str, Any]]:
+    with domain_config_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT signal_key,
+                   signal_type,
+                   phrase,
+                   normalized_phrase,
+                   language,
+                   risk_level,
+                   unit_type_hint,
+                   metadata,
+                   priority,
+                   status,
+                   source,
+                   version,
+                   updated_at
+            FROM extraction_signals
+            WHERE status = 'active'
+            ORDER BY priority, signal_key
+            """
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "metadata": json_dict(row.get("metadata")),
+            "normalized_phrase": str(row.get("normalized_phrase") or normalize_phrase(row.get("phrase"))),
+        }
+        for row in rows
+    ]
+
+
+def active_extraction_signals() -> list[dict[str, Any]]:
+    return cached_domain_config(
+        "extraction_signals",
+        load_active_extraction_signals,
+        [
+            {
+                **dict(item),
+                "normalized_phrase": normalize_phrase(item.get("phrase")),
+                "language": item.get("language", "vi"),
+                "status": "active",
+                "source": item.get("source", "default_seed"),
+            }
+            for item in DEFAULT_EXTRACTION_SIGNALS
+        ],
+    )
+
+
+def load_active_relation_patterns() -> list[dict[str, Any]]:
+    with domain_config_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT pattern_key, pattern, relation_type, relation_source, language, priority, status, source, version, updated_at
+            FROM relation_patterns
+            WHERE status = 'active'
+            ORDER BY priority, pattern_key
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def active_relation_patterns() -> list[dict[str, Any]]:
+    return cached_domain_config(
+        "relation_patterns",
+        load_active_relation_patterns,
+        [dict(item) for item in DEFAULT_RELATION_PATTERNS],
+    )
+
+
+def load_active_sheet_mapping_rules() -> list[dict[str, Any]]:
+    with domain_config_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT rule_key, match_type, pattern, sheet_kind, collection_slug,
+                   collection_name, collection_type, metadata, priority, status, source, version, updated_at
+            FROM sheet_mapping_rules
+            WHERE status = 'active'
+            ORDER BY priority, rule_key
+            """
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "metadata": json_dict(row.get("metadata")),
+        }
+        for row in rows
+    ]
+
+
+def active_sheet_mapping_rules() -> list[dict[str, Any]]:
+    return cached_domain_config(
+        "sheet_mapping_rules",
+        load_active_sheet_mapping_rules,
+        [dict(item) for item in DEFAULT_SHEET_MAPPING_RULES],
+    )
+
+
+def load_active_rerank_rules() -> list[dict[str, Any]]:
+    with domain_config_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT rule_key, scope, rule_type, weight, params, priority, status, source, version, updated_at
+            FROM rerank_rules
+            WHERE status = 'active'
+            ORDER BY scope, priority, rule_key
+            """
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "weight": float(row.get("weight") or 0),
+            "params": json_dict(row.get("params")),
+        }
+        for row in rows
+    ]
+
+
+def active_rerank_rules() -> list[dict[str, Any]]:
+    return cached_domain_config(
+        "rerank_rules",
+        load_active_rerank_rules,
+        [dict(item) for item in DEFAULT_RERANK_RULES],
+    )
+
+
+def load_active_display_labels() -> dict[str, dict[str, Any]]:
+    with domain_config_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT label_type, label_key, label, sort_order, metadata, status, source, version, updated_at
+            FROM display_labels
+            WHERE status = 'active'
+            ORDER BY label_type, sort_order, label_key
+            """
+        ).fetchall()
+    labels: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        label_type = str(row.get("label_type") or "")
+        label_key = str(row.get("label_key") or "")
+        if not label_type or not label_key:
+            continue
+        payload = {"label": str(row.get("label") or label_key), "sort_order": int(row.get("sort_order") or 100)}
+        payload.update(json_dict(row.get("metadata")))
+        labels.setdefault(label_type, {})[label_key] = payload
+    return labels
+
+
+def active_display_labels() -> dict[str, dict[str, Any]]:
+    labels = cached_domain_config(
+        "display_labels",
+        load_active_display_labels,
+        DEFAULT_DISPLAY_LABELS,
+    )
+    merged = {
+        label_type: {label_key: dict(payload) for label_key, payload in entries.items()}
+        for label_type, entries in DEFAULT_DISPLAY_LABELS.items()
+    }
+    for label_type, entries in (labels or {}).items():
+        merged.setdefault(str(label_type), {})
+        for label_key, payload in entries.items():
+            merged[str(label_type)][str(label_key)] = dict(payload) if isinstance(payload, dict) else {"label": str(payload)}
+    return merged
+
+
+def rerank_rule_weights(scope: str) -> dict[str, dict[str, Any]]:
+    rules = [rule for rule in active_rerank_rules() if str(rule.get("scope") or "") == scope]
+    return {
+        str(rule.get("rule_key")): {
+            "weight": float(rule.get("weight") or 0),
+            "params": json_dict(rule.get("params")),
+            "rule_type": str(rule.get("rule_type") or "weight"),
+            "priority": int(rule.get("priority") or 100),
+        }
+        for rule in rules
+        if rule.get("rule_key")
+    }
+
+
+def rerank_weight(scope: str, rule_key: str, default: float) -> float:
+    try:
+        return float(rerank_rule_weights(scope).get(rule_key, {}).get("weight", default))
+    except (TypeError, ValueError):
+        return default
+
+
+UNSAFE_CONFIG_REGEX_RE = re.compile(r"\([^)]*[+*][^)]*\)\s*[+*?]")
+
+
+def is_safe_config_regex(pattern_text: str, *, requires_title_group: bool = False) -> bool:
+    if not pattern_text or len(pattern_text) > 1000:
+        return False
+    if requires_title_group and "?P<title>" not in pattern_text:
+        return False
+    if UNSAFE_CONFIG_REGEX_RE.search(pattern_text):
+        return False
+    try:
+        re.compile(pattern_text, re.IGNORECASE)
+    except re.error:
+        return False
+    return True
+
+
+def configured_relation_patterns() -> tuple[tuple[re.Pattern[str], str, str], ...]:
+    compiled: list[tuple[re.Pattern[str], str, str]] = []
+    for item in active_relation_patterns():
+        pattern_text = str(item.get("pattern") or "")
+        relation_type = str(item.get("relation_type") or "")
+        relation_source = str(item.get("relation_source") or "configured_pattern")
+        if relation_type not in RELATION_TYPES or not is_safe_config_regex(pattern_text, requires_title_group=True):
+            continue
+        compiled.append((re.compile(pattern_text, re.IGNORECASE), relation_type, relation_source))
+    return tuple(compiled) or TEXT_RELATION_PATTERNS
+
+
+def match_extraction_signals(text: str, signal_types: set[str] | None = None) -> list[dict[str, Any]]:
+    normalized = normalize_phrase(text)
+    if not normalized:
+        return []
+    matches: list[dict[str, Any]] = []
+    for signal in active_extraction_signals():
+        signal_type = str(signal.get("signal_type") or "")
+        if signal_types and signal_type not in signal_types:
+            continue
+        normalized_phrase = str(signal.get("normalized_phrase") or normalize_phrase(signal.get("phrase")))
+        if normalized_phrase and normalized_phrase in normalized:
+            matches.append(
+                {
+                    "signal_key": str(signal.get("signal_key") or ""),
+                    "signal_type": signal_type,
+                    "phrase": str(signal.get("phrase") or ""),
+                    "normalized_phrase": normalized_phrase,
+                    "risk_level": str(signal.get("risk_level") or ""),
+                    "unit_type_hint": str(signal.get("unit_type_hint") or ""),
+                    "source": str(signal.get("source") or ""),
+                    "version": signal.get("version"),
+                }
+            )
+    return sorted(matches, key=lambda item: (len(item["normalized_phrase"]), item["signal_key"]), reverse=True)
+
+
+def match_taxonomy_terms(text: str, term_types: set[str] | None = None) -> list[dict[str, Any]]:
+    normalized = normalize_phrase(text)
+    if not normalized:
+        return []
+    matches: list[dict[str, Any]] = []
+    for term in active_taxonomy_terms():
+        term_type = str(term.get("term_type") or "")
+        if term_types and term_type not in term_types:
+            continue
+        aliases = [str(alias) for alias in (term.get("normalized_aliases") or []) if str(alias).strip()]
+        if not aliases:
+            aliases = [normalize_phrase(alias) for alias in (term.get("aliases") or []) if normalize_phrase(alias)]
+        matched_aliases = [alias for alias in aliases if alias and alias in normalized]
+        if matched_aliases:
+            matches.append(
+                {
+                    "term_key": str(term.get("term_key") or ""),
+                    "term_type": term_type,
+                    "canonical_label": str(term.get("canonical_label") or term.get("display_name") or term.get("term_key") or ""),
+                    "matched_aliases": matched_aliases,
+                    "source": str(term.get("source") or ""),
+                    "version": term.get("version"),
+                }
+            )
+    return sorted(matches, key=lambda item: (len(item["matched_aliases"][0]), item["term_key"]), reverse=True)
+
+
+def match_relation_patterns_preview(text: str) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for pattern, relation_type, relation_source in configured_relation_patterns():
+        for match in pattern.finditer(text or ""):
+            title = clean_relation_title(match.groupdict().get("title", ""))
+            if title:
+                matches.append(
+                    {
+                        "relation_type": relation_type,
+                        "relation_source": relation_source,
+                        "target_title": title,
+                        "evidence_text": clean_relation_title(match.group(0))[:500],
+                    }
+                )
+    return matches
+
+
+def vietnamese_config_match_preview(text: str) -> dict[str, Any]:
+    return {
+        "signals": match_extraction_signals(text),
+        "terms": match_taxonomy_terms(text),
+        "relation_patterns": match_relation_patterns_preview(text),
+        "active_only": True,
+    }
 
 
 def create_document_version(
@@ -1172,7 +1873,7 @@ def relation_items_from_text(heading: str, content: str) -> list[dict[str, Any]]
         return []
     output: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    for pattern, relation_type, relation_source in TEXT_RELATION_PATTERNS:
+    for pattern, relation_type, relation_source in configured_relation_patterns():
         for match in pattern.finditer(text):
             target_title = clean_relation_title(match.group("title"))
             if not target_title:
@@ -1681,6 +2382,9 @@ def has_required_source_ref(document_type: str, metadata: dict[str, Any]) -> boo
     refs = metadata.get("source_refs")
     if not isinstance(refs, list):
         refs = []
+    if metadata_has_synthetic_source_ref(metadata):
+        return False
+    refs = [ref for ref in refs if isinstance(ref, dict) and not source_ref_is_synthetic(ref)]
     if document_type == "policy_table":
         return bool(metadata.get("source_sheet")) or any(
             isinstance(ref, dict)
@@ -1710,6 +2414,23 @@ def has_required_source_ref(document_type: str, metadata: dict[str, Any]) -> boo
             for ref in refs
         )
     return True
+
+
+def source_ref_is_synthetic(ref: dict[str, Any]) -> bool:
+    return bool(
+        ref.get("source_ref_synthetic") is True
+        or ref.get("source_ref_quality") == "synthetic_missing"
+        or not str(ref.get("source_file") or "").strip()
+    )
+
+
+def metadata_has_synthetic_source_ref(metadata: dict[str, Any]) -> bool:
+    refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    return bool(
+        metadata.get("source_ref_synthetic") is True
+        or metadata.get("source_ref_quality") == "synthetic_missing"
+        or any(isinstance(ref, dict) and source_ref_is_synthetic(ref) for ref in refs)
+    )
 
 
 def is_high_risk_metadata(metadata: dict[str, Any], normalized_text: str) -> bool:
@@ -3178,6 +3899,8 @@ def list_search_filter_options() -> dict[str, list[str]]:
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_synthetic', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_quality', '') <> 'synthetic_missing'
             """,
             (["structured", "manually_curated"],),
         ).fetchall()
@@ -3330,6 +4053,8 @@ def list_issue_router(
         "COALESCE(c.metadata->>'review_status', '') = 'approved'",
         "COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)",
         "COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'",
+        "COALESCE(c.metadata->>'source_ref_synthetic', 'false') <> 'true'",
+        "COALESCE(c.metadata->>'source_ref_quality', '') <> 'synthetic_missing'",
         "COALESCE(c.metadata->>'unit_type', '') = ANY(%s)",
     ]
     params: list[Any] = [["structured", "manually_curated"], ["issue_router_unit", "vip_overlay_rule", "product_update_note"]]
@@ -4178,6 +4903,10 @@ def rerank_structural_matches(query: str, rows: list[dict[str, Any]]) -> list[di
     query_tokens = [token for token in normalized_query.split() if len(token) >= 4]
     if not query_tokens and not normalized_query:
         return rows
+    rules = rerank_rule_weights("repository_structural")
+    sheet_phrase_weight = float(rules.get("repository_structural_sheet_phrase", {}).get("weight", 3.0))
+    heading_phrase_weight = float(rules.get("repository_structural_heading_phrase", {}).get("weight", 2.0))
+    token_weight = float(rules.get("repository_structural_token_match", {}).get("weight", 0.75))
     for row in rows:
         metadata = row.get("metadata") or {}
         sheet = normalize_phrase(str(metadata.get("sheet_name") or ""))
@@ -4188,14 +4917,21 @@ def rerank_structural_matches(query: str, rows: list[dict[str, Any]]) -> list[di
         structural_text = " ".join([sheet, heading, section])
         matched = sum(1 for token in query_tokens if token in structural_text)
         phrase_boost = 0.0
+        trace: list[dict[str, Any]] = []
         if sheet and (sheet in normalized_query or normalized_query in sheet):
-            phrase_boost += 3.0
+            phrase_boost += sheet_phrase_weight
+            trace.append({"rule_key": "repository_structural_sheet_phrase", "delta": sheet_phrase_weight})
         if heading and (heading in normalized_query or normalized_query in heading):
-            phrase_boost += 2.0
+            phrase_boost += heading_phrase_weight
+            trace.append({"rule_key": "repository_structural_heading_phrase", "delta": heading_phrase_weight})
         if matched:
-            row["score"] = float(row.get("score") or 0) + matched * 0.75 + phrase_boost
+            token_boost = matched * token_weight
+            row["score"] = float(row.get("score") or 0) + token_boost + phrase_boost
+            trace.append({"rule_key": "repository_structural_token_match", "matched_tokens": matched, "delta": token_boost})
         elif phrase_boost:
             row["score"] = float(row.get("score") or 0) + phrase_boost
+        if trace:
+            row["rerank_trace"] = [*(row.get("rerank_trace") or []), *trace]
     return sorted(rows, key=lambda row: float(row.get("score") or 0), reverse=True)
 
 
@@ -5286,6 +6022,8 @@ def approved_relation_target_rows(source_document_ids: list[str], exclude_chunk_
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_synthetic', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_quality', '') <> 'synthetic_missing'
               AND NOT (c.id::text = ANY(%s))
             ORDER BY c.id, CASE WHEN COALESCE(c.metadata->>'retrieval_scope', '') = 'document' THEN 0 ELSE 1 END, c.chunk_index
             LIMIT %s
@@ -5349,6 +6087,8 @@ def approved_relation_target_rows_for_chunks(source_chunk_ids: list[str], exclud
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_synthetic', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_quality', '') <> 'synthetic_missing'
               AND NOT (c.id::text = ANY(%s))
             ORDER BY c.id, CASE WHEN COALESCE(c.metadata->>'retrieval_scope', '') = 'document' THEN 0 ELSE 1 END, c.chunk_index
             LIMIT %s
@@ -5393,6 +6133,8 @@ def published_chunk_rows_by_ids(chunk_ids: list[str], exclude_chunk_ids: list[st
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_synthetic', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_quality', '') <> 'synthetic_missing'
               AND NOT (c.id::text = ANY(%s))
             ORDER BY array_position(%s::text[], c.id::text)
             LIMIT %s
@@ -5443,6 +6185,8 @@ def parent_sop_context_rows(chunk_ids: list[str], exclude_chunk_ids: list[str], 
               AND COALESCE(c.metadata->>'review_status', '') = 'approved'
               AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
               AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_synthetic', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_ref_quality', '') <> 'synthetic_missing'
               AND COALESCE(c.metadata->>'unit_type', c.section) = 'full_sop'
               AND NOT (c.id::text = ANY(%s))
             ORDER BY c.id, CASE WHEN COALESCE(c.metadata->>'retrieval_scope', '') = 'document' THEN 0 ELSE 1 END, c.chunk_index
@@ -5469,6 +6213,8 @@ def filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
         clauses.append("COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)")
         params.append(["structured", "manually_curated"])
         clauses.append("COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'")
+        clauses.append("COALESCE(c.metadata->>'source_ref_synthetic', 'false') <> 'true'")
+        clauses.append("COALESCE(c.metadata->>'source_ref_quality', '') <> 'synthetic_missing'")
 
     if filters.document_ids:
         clauses.append("c.document_id = ANY(%s)")

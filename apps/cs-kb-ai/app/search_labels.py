@@ -4,39 +4,33 @@ import re
 import unicodedata
 from typing import Any
 
+from app.vietnamese_defaults import DEFAULT_DISPLAY_LABELS
+
 
 STEP_CODE_ONLY_RE = re.compile(r"^\s*(?:bước\s*)?\d{1,3}(?:\.\d{1,3})*\.?\s*$", re.IGNORECASE)
 LEADING_STEP_RE = re.compile(r"^\s*(?:bước\s*)?(\d{1,3}(?:\.\d{1,3})*)[.)]?\s*", re.IGNORECASE)
 BAD_LABELS = {"", "yes", "no", "start", "end", "row", "dong", "dòng", "link", "na", "n/a"}
 
 UNIT_TYPE_LABELS = {
-    "decision_point": "Điều kiện",
-    "decision_rule": "Điều kiện",
-    "workflow_step": "Bước xử lý",
-    "operational_instruction": "Hướng dẫn",
-    "routing_rule": "Điều hướng",
-    "policy_rule": "Quy định",
-    "exception_rule": "Ngoại lệ",
-    "handling_rule": "Xử lý",
-    "sla_rule": "SLA",
-    "escalation_rule": "Escalation",
-    "case_creation_rule": "Tạo case",
-    "handoff_rule": "Handoff",
-    "macro_script": "Macro",
-    "operational_note": "Lưu ý",
-    "security_note": "Bảo mật",
-    "compliance_note": "Compliance",
-    "warning": "Cảnh báo",
-    "related_document": "Tài liệu liên quan",
-    "issue_router_unit": "Issue router",
-    "quick_action_rule": "Quick action",
-    "sop_reference": "SOP reference",
-    "tool_link": "Tool",
-    "vip_overlay_rule": "VIP overlay",
-    "product_update_note": "Product update",
-    "workflow_graph": "Workflow graph",
-    "full_sop": "SOP",
+    key: str(payload.get("label") or key)
+    for key, payload in DEFAULT_DISPLAY_LABELS.get("unit_type", {}).items()
+    if isinstance(payload, dict)
 }
+
+
+def active_unit_type_labels() -> dict[str, str]:
+    try:
+        from app import repository
+
+        labels = repository.active_display_labels().get("unit_type", {})
+        output = {
+            str(key): str(payload.get("label") or key)
+            for key, payload in labels.items()
+            if isinstance(payload, dict)
+        }
+        return output or UNIT_TYPE_LABELS
+    except Exception:
+        return UNIT_TYPE_LABELS
 
 
 def normalize_label_text(value: Any) -> str:
@@ -94,7 +88,7 @@ def embedding_text_for_unit(label: Any, content: Any, unit_type: str = "") -> st
 
 def generated_search_label(content: str, unit_type: str = "") -> str:
     clean_content = normalize_display_text(content)
-    prefix = UNIT_TYPE_LABELS.get(unit_type, readable_unit_type(unit_type))
+    prefix = active_unit_type_labels().get(unit_type, readable_unit_type(unit_type))
     if not clean_content:
         return prefix or "Search label"
     step_code, body = split_leading_step(clean_content)

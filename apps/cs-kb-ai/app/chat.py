@@ -47,70 +47,6 @@ INDEX_UNIT_TYPES = {
     "quick_action_rule",
 }
 POLICY_SOURCE_ROLES = {"direct_sop", "related_sop"}
-SOURCE_ROLE_ORDER = {
-    "direct_sop": 0,
-    "issue_router": 1,
-    "related_sop": 2,
-    "action_template": 3,
-    "tool_link": 4,
-    "parent_sop": 5,
-}
-SOURCE_GROUP_LABELS = {
-    "direct_sop": "Direct SOP",
-    "issue_router": "Issue router",
-    "related_sop": "Related SOP",
-    "action_template": "Action templates",
-    "tool_link": "Tools",
-    "parent_sop": "Parent SOP",
-}
-FOLLOW_UP_MARKERS = (
-    "cái đó",
-    "cai do",
-    "vậy",
-    "vay",
-    "nó",
-    "no",
-    "tiếp",
-    "tiep",
-    "ở trên",
-    "o tren",
-    "trên",
-    "tren",
-    "khác gì",
-    "khac gi",
-    "thì sao",
-    "thi sao",
-    "còn",
-    "con",
-)
-
-CHANNEL_GROUPS = {"hotline", "chat_social", "call_in_app", "mail"}
-EXCLUSIVE_CONTEXT_GROUPS = {
-    "si_lock",
-    "foreign_customer",
-    "betaxi",
-    "gsm",
-    "taxi_phone",
-}
-INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
-    "tx": ("tx", "tai xe", "tai xế", "tài xế"),
-    "kh": ("kh", "khach hang", "khách hàng"),
-    "hotline": ("hotline", "1900232345"),
-    "chat_social": ("chat social",),
-    "call_in_app": ("call in app", "cia", "non voice", "non-voice", "chat in app"),
-    "mail": ("mail", "email", "ho.tro", "hotro@be.com.vn"),
-    "alternate_number": ("so khac", "sdt khac", "goi sang so", "goi ra so", "lien he ra 1 so", "lien he so dien thoai khac"),
-    "cs_outbound_reflection": ("cs goi tx", "cs lien he tx", "xu ly phan anh", "kh phan anh"),
-    "tx_inbound": ("tx chu dong", "tx lien he", "tai xe lien he", "goi vao"),
-    "si_lock": ("si", "bi khoa", "tam khoa", "khoa tai khoan"),
-    "foreign_customer": ("nuoc ngoai", "ngoai ngu", "tieng anh", "tieng viet"),
-    "betaxi": ("betaxi", "be taxi"),
-    "gsm": ("gsm", "xanh sm"),
-    "taxi_phone": ("so dien thoai hang taxi", "hang taxi", "thanh nga", "van xuan", "thang long"),
-    "email": ("email", "e-mail"),
-    "current_trip": ("chuyen dang loi", "chuyen can ho tro", "trip hien tai", "don dang loi"),
-    "completed_trip": ("chuyen hoan thanh gan nhat", "trip hoan thanh gan nhat", "khong phai chuyen xe can ho tro"),
-}
 
 
 @dataclass(frozen=True)
@@ -127,6 +63,97 @@ class ChatRetrievalBundle:
     retrieval: RetrievalResponse
     source_groups: list[dict[str, Any]]
     trace: dict[str, Any]
+
+
+def active_intent_patterns() -> dict[str, tuple[str, ...]]:
+    patterns: dict[str, tuple[str, ...]] = {}
+    for term in repository.active_taxonomy_terms():
+        if str(term.get("term_type") or "") != "chat_intent":
+            continue
+        term_key = str(term.get("term_key") or "").strip()
+        if not term_key:
+            continue
+        aliases = [
+            term_key,
+            str(term.get("display_name") or ""),
+            *[str(alias) for alias in (term.get("aliases") or [])],
+        ]
+        normalized_aliases = tuple(dict.fromkeys(alias.strip() for alias in aliases if alias.strip()))
+        if normalized_aliases:
+            patterns[term_key] = normalized_aliases
+    return patterns
+
+
+def active_term_metadata() -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for term in repository.active_taxonomy_terms():
+        term_key = str(term.get("term_key") or "").strip()
+        metadata = term.get("metadata") if isinstance(term.get("metadata"), dict) else {}
+        if term_key:
+            output[term_key] = metadata
+    return output
+
+
+def active_follow_up_markers() -> tuple[str, ...]:
+    markers: list[str] = []
+    for term in repository.active_taxonomy_terms():
+        if str(term.get("term_type") or "") == "follow_up_marker":
+            markers.extend(str(alias) for alias in (term.get("aliases") or []) if str(alias).strip())
+    return tuple(dict.fromkeys(markers))
+
+
+def active_group_terms(group_type: str) -> set[str]:
+    output: set[str] = set()
+    for group in repository.active_taxonomy_groups():
+        if str(group.get("group_type") or "") != group_type:
+            continue
+        output.update(str(term_key) for term_key in (group.get("term_keys") or []) if str(term_key).strip())
+        for item in group.get("terms") or []:
+            if isinstance(item, dict) and item.get("term_key"):
+                output.add(str(item["term_key"]))
+    return output
+
+
+def active_channel_terms() -> set[str]:
+    return active_group_terms("channel")
+
+
+def active_exclusive_context_terms() -> set[str]:
+    return active_group_terms("exclusive_context")
+
+
+def high_signal_terms() -> set[str]:
+    return {key for key, metadata in active_term_metadata().items() if metadata.get("chat_signal") == "high"}
+
+
+def terms_with_metadata_flag(flag: str) -> set[str]:
+    return {key for key, metadata in active_term_metadata().items() if bool(metadata.get(flag))}
+
+
+def audience_terms(role: str) -> set[str]:
+    return {key for key, metadata in active_term_metadata().items() if str(metadata.get("audience_role") or "") == role}
+
+
+def source_role_order() -> dict[str, int]:
+    labels = repository.active_display_labels().get("source_role", {})
+    return {
+        str(role): int(payload.get("sort_order", 100))
+        for role, payload in labels.items()
+        if isinstance(payload, dict)
+    }
+
+
+def source_role_labels() -> dict[str, str]:
+    labels = repository.active_display_labels().get("source_role", {})
+    return {
+        str(role): str(payload.get("label") or role)
+        for role, payload in labels.items()
+        if isinstance(payload, dict)
+    }
+
+
+def chat_rerank_weight(rule_key: str, default: float) -> float:
+    return repository.rerank_weight("chat_stage", rule_key, default)
 
 
 def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
@@ -542,7 +569,7 @@ def should_use_recent_context(question: str, recent_user_context: list[str]) -> 
     if not recent_user_context:
         return False
     normalized = question.lower()
-    return any(marker in normalized for marker in FOLLOW_UP_MARKERS) or len(normalized.split()) <= 5
+    return any(marker in normalized for marker in active_follow_up_markers()) or len(normalized.split()) <= 5
 
 
 def updated_session_summary(current_summary: str, question: str, filters: dict[str, object]) -> str:
@@ -599,10 +626,15 @@ def assistant_context_chunk_ids(rows: list[dict[str, Any]]) -> list[str]:
 
 def chat_context_limit(query: str, requested_limit: int) -> int:
     intent = query_intent(query)
-    if "taxi_phone" in intent:
-        return min(requested_limit, 6)
-    if intent & {"alternate_number", "current_trip", "si_lock", "email", "completed_trip"}:
-        return min(requested_limit, 8)
+    limits = []
+    metadata_by_term = active_term_metadata()
+    for term in intent:
+        try:
+            limits.append(int(metadata_by_term.get(term, {}).get("chat_context_limit")))
+        except (TypeError, ValueError):
+            continue
+    if limits:
+        return min(requested_limit, max(1, min(limits)))
     return min(requested_limit, 7)
 
 
@@ -649,10 +681,11 @@ def source_role(result: RetrievalResult) -> str:
 
 
 def rank_chat_results(results: list[RetrievalResult], limit: int) -> list[RetrievalResult]:
+    role_order = source_role_order()
     return sorted(
         semantic_dedupe_results(results),
         key=lambda result: (
-            SOURCE_ROLE_ORDER.get(source_role(result), 99),
+            role_order.get(source_role(result), 99),
             -chat_adjusted_score(result),
             -float(result.lexical_score or 0),
             -float(result.vector_score or 0),
@@ -764,39 +797,46 @@ def rerank_stage_results(query: str, results: list[RetrievalResult]) -> list[Ret
 def annotate_match_metadata(result: RetrievalResult, query_terms: set[str]) -> RetrievalResult:
     metadata = dict(result.metadata or {})
     candidate_terms = query_intent(candidate_match_text(result))
+    channel_terms = active_channel_terms()
+    exclusive_context_terms = active_exclusive_context_terms()
+    high_signal = high_signal_terms()
     boosts: list[str] = []
     penalties: list[str] = []
     boost = 0.0
     penalty = 0.0
 
     if metadata.get("chat_retrieval_reason") == "session_context_source":
-        boost += 0.28
+        boost += chat_rerank_weight("chat_previous_cited_source", 0.28)
         boosts.append("previous_cited_source")
 
     for term in sorted(query_terms & candidate_terms):
-        weight = 0.025
-        if term in {"alternate_number", "cs_outbound_reflection", "tx_inbound", "completed_trip", "current_trip"}:
-            weight = 0.055
-        if term in CHANNEL_GROUPS:
-            weight = 0.045
+        weight = chat_rerank_weight("chat_term_match_default", 0.025)
+        if term in high_signal:
+            weight = chat_rerank_weight("chat_term_match_high_signal", 0.055)
+        if term in channel_terms:
+            weight = chat_rerank_weight("chat_term_match_channel", 0.045)
         boost += weight
         boosts.append(term)
 
-    query_channels = query_terms & CHANNEL_GROUPS
-    candidate_channels = candidate_terms & CHANNEL_GROUPS
+    query_channels = query_terms & channel_terms
+    candidate_channels = candidate_terms & channel_terms
     if query_channels and candidate_channels and not (query_channels & candidate_channels):
-        penalty += 0.09
+        penalty += chat_rerank_weight("chat_channel_mismatch_penalty", 0.09)
         penalties.append("channel_mismatch")
 
-    for term in sorted((candidate_terms & EXCLUSIVE_CONTEXT_GROUPS) - query_terms):
-        penalty += 0.07
+    for term in sorted((candidate_terms & exclusive_context_terms) - query_terms):
+        penalty += chat_rerank_weight("chat_context_mismatch_penalty", 0.07)
         penalties.append(f"context_mismatch:{term}")
 
-    if "cs_outbound_reflection" in query_terms and "si_lock" in candidate_terms and "si_lock" not in query_terms:
-        penalty += 0.1
+    outbound_terms = terms_with_metadata_flag("outbound_reflection")
+    lock_terms = terms_with_metadata_flag("lock_sensitive")
+    if (query_terms & outbound_terms) and (candidate_terms & lock_terms) and not (query_terms & lock_terms):
+        penalty += chat_rerank_weight("chat_si_lock_not_asked_penalty", 0.1)
         penalties.append("si_lock_not_asked")
-    if "tx" in query_terms and "kh" in candidate_terms and "tx" not in candidate_terms:
-        penalty += 0.04
+    driver_terms = audience_terms("driver")
+    customer_terms = audience_terms("customer")
+    if (query_terms & driver_terms) and (candidate_terms & customer_terms) and not (candidate_terms & driver_terms):
+        penalty += chat_rerank_weight("chat_audience_mismatch_penalty", 0.04)
         penalties.append("audience_mismatch")
 
     adjusted_score = max(0.0, float(result.score or 0.0) + boost - penalty)
@@ -816,10 +856,11 @@ def chat_adjusted_score(result: RetrievalResult) -> float:
 
 
 def relation_seed_candidates(results: list[RetrievalResult], context_limit: int) -> list[RetrievalResult]:
+    role_order = source_role_order()
     ranked = sorted(
         semantic_dedupe_results(results),
         key=lambda result: (
-            SOURCE_ROLE_ORDER.get(source_role(result), 99),
+            role_order.get(source_role(result), 99),
             -chat_adjusted_score(result),
         ),
     )
@@ -830,7 +871,7 @@ def query_intent(text: str) -> set[str]:
     normalized = normalize_for_match(text)
     return {
         key
-        for key, patterns in INTENT_PATTERNS.items()
+        for key, patterns in active_intent_patterns().items()
         if any(normalize_for_match(pattern) in normalized for pattern in patterns)
     }
 
@@ -907,13 +948,14 @@ def is_exact_lookup(question: str, cited_results: list[RetrievalResult]) -> bool
 
 def source_groups(results: list[RetrievalResult]) -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
-    for role in SOURCE_ROLE_ORDER:
+    labels = source_role_labels()
+    for role in source_role_order():
         sources = [result for result in results if source_role(result) == role]
         if sources:
             groups.append(
                 {
                     "role": role,
-                    "label": SOURCE_GROUP_LABELS.get(role, role),
+                    "label": labels.get(role, role),
                     "sources": [source.model_dump() for source in sources],
                 }
             )
@@ -927,24 +969,21 @@ def has_policy_source(results: list[RetrievalResult]) -> bool:
 def select_chat_model(request: GroundedChatRequest, retrieval: object) -> ChatModelSelection:
     route = "simple" if request.model_route == "auto" else request.model_route
     reason = "auto_route_disabled_simple_default" if request.model_route == "auto" else "manual_route"
+    if route not in {"simple", "policy", "high_risk", "complex"}:
+        route = "simple"
+        reason = "legacy_or_unknown_route_coerced_simple"
     model = model_for_route(route)
     fallback = settings.openrouter_chat_fallback_model or settings.openrouter_chat_complex_model
     return ChatModelSelection(
         route=route,
         model=model,
         reason=reason,
-        strict_grounding=route in {"policy", "high_risk", "complex", "google/gemini-3-flash-preview", "anthropic/claude-3.5-haiku"},
+        strict_grounding=route in {"policy", "high_risk", "complex"},
         fallback_model=fallback,
     )
 
 
 def model_for_route(route: str) -> str:
-    if route == "google/gemini-2.5-flash":
-        return settings.openrouter_chat_gemini_25_flash_model or route
-    if route == "google/gemini-3-flash-preview":
-        return settings.openrouter_chat_gemini_3_flash_model or route
-    if route == "anthropic/claude-3.5-haiku":
-        return settings.openrouter_chat_claude_35_haiku_model or route
     if route == "high_risk":
         return settings.openrouter_chat_high_risk_model or settings.openrouter_chat_policy_model or settings.openrouter_chat_model
     if route == "policy":

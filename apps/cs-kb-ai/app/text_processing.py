@@ -17,30 +17,44 @@ from openpyxl import load_workbook
 from pypdf import PdfReader
 
 from app.config import settings
+from app.vietnamese_defaults import (
+    DEFAULT_TEXT_PROCESSING_PROHIBITION_MARKERS,
+    VI_ACTION_CONNECTORS,
+    VI_CONDITION_CONNECTORS,
+    VI_INCOMPLETE_CONNECTORS,
+    VI_INLINE_BULLET_STARTERS,
+    VI_NOTE_MARKERS,
+)
 
 
 WORD_RE = re.compile(r"[\w]+", re.UNICODE)
 HEADING_RE = re.compile(r"^\s*(#{1,6}\s+|[A-Z][A-Z0-9 _/-]{5,}:)\s*(.+?)\s*$")
 BULLET_RE = re.compile(r"^\s*(?:[-*•‣▪]|\d+[.)]|[a-zA-Z][.)])\s+")
 SENTENCE_END_RE = re.compile(r"(?<=[.!?。！？])\s+")
+
+
+def regex_terms(terms: tuple[str, ...]) -> str:
+    return "|".join(re.escape(term).replace(r"\ ", r"\s+") for term in sorted(set(terms), key=len, reverse=True))
+
+
 INCOMPLETE_CONNECTOR_RE = re.compile(
-    r"(?:^|\s)(nếu|neu|thì|thi|đối với|doi voi|trường hợp|truong hop|bao gồm|bao gom|và|va|hoặc|hoac|or|and)\s*$",
+    rf"(?:^|\s)({regex_terms(VI_INCOMPLETE_CONNECTORS)})\s*$",
     re.IGNORECASE,
 )
-CONDITION_RE = re.compile(r"(?:^|\s)(nếu|neu|trường hợp|truong hop|đối với|doi voi|khi|when|if)\b", re.IGNORECASE)
+CONDITION_RE = re.compile(rf"(?:^|\s)({regex_terms(VI_CONDITION_CONNECTORS)})\b", re.IGNORECASE)
 ACTION_RE = re.compile(
-    r"(?:^|\s)(thì|thi|cần|can|phải|phai|xử lý|xu ly|chuyển|chuyen|kiểm tra|kiem tra|gửi|gui|tạo|tao|thực hiện|thuc hien|không được|khong duoc|được phép|duoc phep|must|should|do not)\b",
+    rf"(?:^|\s)({regex_terms(VI_ACTION_CONNECTORS)})\b",
     re.IGNORECASE,
 )
-NOTE_RE = re.compile(r"^\s*(lưu ý|luu y|note|warning|cảnh báo|canh bao|script|sla|zt)\b", re.IGNORECASE)
+NOTE_RE = re.compile(rf"^\s*({regex_terms((*VI_NOTE_MARKERS, 'script', 'sla', 'zt'))})\b", re.IGNORECASE)
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
 DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 ROMAN_SECTION_RE = re.compile(r"^\s*([IVXLCDM]+)[.)]\s+(.+?)\s*$", re.IGNORECASE)
 NUMBERED_SECTION_RE = re.compile(r"^\s*(\d{1,2})[.)]\s*(.+?)\s*$")
 DOCX_TEXT_HEADING_RE = re.compile(r"^\s*(?:đối với|doi voi)\s+(.+?)\s*$", re.IGNORECASE)
-DOCX_PROHIBITION_RE = re.compile(r"(tuyệt\s+đối\s+không|không\s+chủ\s+động\s+cung\s+cấp|quy\s+trình\s+xử\s+lý\s+nội\s+bộ|chế\s+tài|chấm\s+lỗi)", re.IGNORECASE)
+DOCX_PROHIBITION_RE = re.compile(regex_terms(DEFAULT_TEXT_PROCESSING_PROHIBITION_MARKERS), re.IGNORECASE)
 INLINE_BULLET_MARKER_RE = re.compile(
-    r"(^|\s)([-*•‣▪])\s+(?=(?:nếu|neu|kh|tx|cs|không|khong|chỉ|chi|trường hợp|truong hop)\b)",
+    rf"(^|\s)([-*•‣▪])\s+(?=(?:{regex_terms(VI_INLINE_BULLET_STARTERS)})\b)",
     re.IGNORECASE,
 )
 
@@ -1197,6 +1211,8 @@ def ai_units_to_chunks(units: list[dict[str, Any]], filename: str, source_type: 
         if not content:
             continue
         metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+        source_refs = unit.get("source_refs") if isinstance(unit.get("source_refs"), list) else metadata.get("source_refs")
+        source_refs = source_refs if isinstance(source_refs, list) else []
         unit_type = slugify(str(unit.get("unit_type") or metadata.get("unit_type") or "text_section")) or "text_section"
         confidence = unit.get("confidence", metadata.get("confidence", 0.72))
         try:
@@ -1218,6 +1234,7 @@ def ai_units_to_chunks(units: list[dict[str, Any]], filename: str, source_type: 
                     "confidence": max(0.0, min(confidence_value, 1.0)),
                     "retrieval_scope": metadata.get("retrieval_scope") or ("document" if unit_type == "full_sop" else "unit"),
                     **metadata,
+                    "source_refs": source_refs or metadata.get("source_refs", []),
                 },
             )
         )

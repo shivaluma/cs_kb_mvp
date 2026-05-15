@@ -12,16 +12,25 @@ Every upload goes through the same outer stages:
      - spreadsheet sheets/rows/cells/hyperlinks
      - DOCX paragraphs/tables
      - PDF text lines
-   - Output is persisted as `map/source_blocks`.
+   - Output is persisted as legacy `map/source_blocks` and canonical `map/source_evidence`.
+   - `map/source_evidence` is the evidence-first contract. Each block has `evidence_type`, `text`, `source_ref`, `section_path`, `confidence`, optional `geometry`, and source-specific metadata.
 
 2. **Document classification**
    - Classify `document_type`, `source_type`, confidence, risk, and review requirement.
+   - Select a lightweight processor wrapper for the current document family:
+     - `PolicyTableProcessor`
+     - `MixedDocxPolicyProcessor`
+     - `WorkflowDiagramProcessor`
+     - `KBIndexWorkbookProcessor`
+     - `TextSOPProcessor`
+     - `MacroScriptProcessor`
    - Main structured document types are:
      - `policy_rule`
      - `policy_table`
      - `workflow_diagram`
      - `kb_index_workbook`
    - Output is persisted as `classify/classification_result`.
+   - Processor choice is persisted as `classify/processor_selection`.
 
 3. **Visual mapping, only when needed**
    - For PDF workflow diagrams, render pages and extract visual layout candidates.
@@ -41,6 +50,8 @@ Every upload goes through the same outer stages:
 5. **AI or deterministic structuring**
    - Branches by `document_type`.
    - Produces reviewable chunks/units, never published content directly.
+   - The parser/layout layer is the source of structural evidence.
+   - The AI layer proposes semantic units, metadata, relations, and action cards only from grounded evidence.
    - Persist:
      - `ai_structure/ai_structured_payload`
      - `ai_structure/ai_breakdown`
@@ -57,20 +68,38 @@ Every upload goes through the same outer stages:
      - `plan/structuring_plan`
      - `reduce/reconcile_suggestions`
 
-8. **Review normalization and refinement**
+8. **Semantic refinement and delivery refinement**
    - Normalize unit shapes, source refs, metadata, and review status.
    - Ensure a full SOP layer exists.
+   - Add `unit_state` separately from `unit_type`:
+     - `final_draft`
+     - `candidate`
+     - `degraded_evidence`
+     - `manual_curated`
+     - `published_unit`
+   - Run `semantic_refine` to merge duplicate/fragmented units, attach examples/notes to parents, normalize actor/audience/channel/risk metadata, extract relation candidates, and generate `action_card` metadata when supported by evidence.
    - Apply deterministic delivery refinements.
    - Persist:
+     - `semantic_refine/semantic_refinement_report`
      - `refine/refinement_report`
      - `refine/draft_units`
 
-9. **Verification and publish gate**
+9. **Grounding validation, verification, and publish gate**
+   - Run `verify/source_grounding_validator` before publish readiness checks.
+   - Every unit must have a real source ref. Synthetic fallback refs are marked with `source_ref_synthetic=true` or `source_ref_quality=synthetic_missing` and never count as grounding.
+   - Unsupported units are marked `review_status=needs_review`, `publish_blocked=true`, and `publish_blocked_reason=source_grounding_validation_failed`.
    - Evaluate hard blockers and warnings.
    - For high-risk structured docs, publish requires explicit review.
    - Persist:
-     - `verify/verification_report`
-     - `verify/publish_readiness_report`
+    - `verify/verification_report`
+    - `verify/publish_readiness_report`
+
+## Provider And Schema Behavior
+
+- Providers/models that support strict JSON schema can be enabled with `OPENROUTER_STRICT_JSON_SCHEMA=true`.
+- Workflow extraction and extraction refinement use strict schema response format when enabled.
+- Other extraction flows keep JSON-object mode and are still guarded by JSON parse, repair retry, Pydantic validation, deterministic normalization, and source grounding validation.
+- Structured Outputs only enforce shape. Grounding correctness is enforced separately by `verify/source_grounding_validator`.
 
 ## Branches By Document Type
 
@@ -100,7 +129,13 @@ Flow:
 1. Render PDF pages to images.
 2. Extract visual layout and graph candidates.
 3. Build deterministic semantic refinement from visual candidates.
-4. Run **Workflow V3 graph primary**:
+4. Route through `ai_direct_visual_extraction`:
+   - rendered page images are source of truth
+   - parser/OCR text is hint-only
+   - graph edges must come from visible arrows/connectors or visual graph candidates
+   - OCR line order must not create topology
+   - unclear topology must produce `uncertain_edges`, warnings, and review reasons
+5. Run **Workflow V3 graph primary**:
    - AI transcribes canvas into nodes, arrows, notes, lanes, relations.
    - Deterministic compiler normalizes graph by step code, typed node model, source refs, annotations.
    - Graph repair handles repairable defects before selection:
@@ -114,7 +149,7 @@ Flow:
      - `workflow_graph_draft`
      - `workflow_fidelity_report`
      - `workflow_graph_repair_report`
-5. Candidate flow selection scores V3/V2/legacy/semantic candidates by:
+6. Candidate flow selection scores V3/V2/legacy/semantic candidates by:
    - schema validity
    - repairability
    - source step coverage
@@ -124,10 +159,10 @@ Flow:
    - source ref coverage
    - graph integrity score
    - overall fidelity score
-6. If V3 is high-fidelity after deterministic repair, select it without falling back for minor repairable issues.
-7. If V3 has unrepairable fidelity blockers, try V2 vision-primary workflow extraction.
-8. If V2 does not pass quality/fidelity, try legacy workflow extraction.
-9. If legacy does not pass quality/fidelity, use semantic workflow candidates as degraded/review-only draft.
+7. If V3 is high-fidelity after deterministic repair, select it without falling back for minor repairable issues.
+8. If V3 has unrepairable fidelity blockers, try V2 vision-primary workflow extraction.
+9. If V2 does not pass quality/fidelity, try legacy workflow extraction.
+10. If legacy does not pass quality/fidelity, use semantic workflow candidates as degraded/review-only draft.
 
 Important governance:
 
@@ -167,6 +202,14 @@ Flow:
 4. Convert plan candidates into review chunks.
 5. Approved review items materialize later into first-class KB index tables.
 
+### DOCX / XLSX Structure Contract
+
+- DOCX body order is deterministic: headings, paragraphs, list items, table headers, and table rows preserve source order.
+- DOCX list items become `list_item` evidence, including inline bullets split from paragraph text when possible.
+- DOCX table rows and cells become `table_row` and `table_cell` evidence with table, row, column, cell text, and heading path metadata.
+- XLSX sheets, rows, columns, cell text, and hyperlinks become `table_row` and `table_cell` evidence.
+- AI can enrich semantics, but must not reorder deterministic DOCX/XLSX structure or invent missing rows/columns.
+
 Expected units:
 
 - `issue_router_unit`
@@ -193,23 +236,29 @@ For any extraction issue, inspect these artifacts in order:
 1. `classify/classification_result`
    - Confirms whether the document took the intended branch.
 2. `map/source_blocks`
-   - Shows what raw evidence the pipeline saw.
-3. `map/visual_graph_candidates`
+   - Shows legacy parser blocks for compatibility.
+3. `map/source_evidence`
+   - Shows canonical evidence blocks with normalized source refs, hierarchy, geometry, and metadata.
+4. `map/visual_graph_candidates`
    - For workflow PDFs, shows detector candidates before AI.
-4. `workflow_semantic_refine/workflow_canvas_transcription`
+5. `workflow_semantic_refine/workflow_canvas_transcription`
    - For Workflow V3, shows AI canvas transcription before compiler normalization.
-5. `workflow_semantic_refine/workflow_graph_draft`
+6. `workflow_semantic_refine/workflow_graph_draft`
    - Shows normalized graph candidate.
-6. `workflow_semantic_refine/workflow_fidelity_report`
+7. `workflow_semantic_refine/workflow_fidelity_report`
    - Shows why V3 passed or failed.
-7. `workflow_semantic_refine/workflow_graph_repair_report`
+8. `workflow_semantic_refine/workflow_graph_repair_report`
    - Shows deterministic repairs, remaining missing terminal edges, orphan annotations, and unresolved relations.
-8. `ai_structure/ai_breakdown`
+9. `ai_structure/ai_breakdown`
    - Shows every attempted flow and the final selected flow.
    - `flow_selection_matrix` explains why the selected flow won.
-9. `refine/draft_units`
+10. `semantic_refine/semantic_refinement_report`
+   - Shows unit state counts, metadata normalization, action card generation, and relation candidate extraction.
+11. `verify/source_grounding_validator`
+   - Shows missing, synthetic, or wrong-type source refs and which units were blocked.
+12. `refine/draft_units`
    - Shows the actual units sent to human review.
-10. `verify/verification_report`
+13. `verify/verification_report`
    - Shows publish blockers.
 
 ## Common Failure Modes

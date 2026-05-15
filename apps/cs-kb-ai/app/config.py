@@ -70,6 +70,7 @@ class Settings:
             "anthropic/claude-3.5-haiku",
         ).strip()
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
+        self.openrouter_strict_json_schema = os.getenv("OPENROUTER_STRICT_JSON_SCHEMA", "").strip().lower() in {"1", "true", "yes", "on"}
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()
         self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "").strip()

@@ -11,6 +11,14 @@ For `workflow_diagram` documents, the AI extraction must produce:
 - `atomic_units`: quick-answer units for retrieval, such as `sla_rule`, `decision_rule`, `escalation_rule`, `case_creation_rule`, `handoff_rule`, `macro_script`, and `operational_note`.
 - `source_refs`: source trace per unit. PDF units must at least include `source_file` and `page`.
 
+Workflow PDFs use `ai_direct_visual_extraction` mode:
+
+- rendered page images are the source of truth
+- OCR/parser text is hint-only evidence
+- graph edges must come from visible arrows/connectors or visual graph candidates
+- OCR line order must not create workflow topology
+- unclear topology must be represented as `uncertain_edges`, warnings, and review reasons
+
 PDF workflow extraction requires rendered page images. Install AI dependencies with:
 
 ```bash
@@ -40,6 +48,17 @@ If a PDF unit only has page-level trace and no bbox, it is marked:
 
 CS Ops must verify and acknowledge those units in the review UI before publish.
 
+If the pipeline has to synthesize a fallback source ref, it is marked:
+
+```json
+{
+  "source_ref_synthetic": true,
+  "source_ref_quality": "synthetic_missing"
+}
+```
+
+Synthetic refs never count as valid grounding. `verify/source_grounding_validator` marks those units as `needs_review`, sets `publish_blocked=true`, and blocks publish readiness.
+
 ## Publish Gate
 
 Publishing is blocked when:
@@ -48,6 +67,7 @@ Publishing is blocked when:
 - Any extraction unit still needs review.
 - Owner team is missing.
 - Required source refs are missing.
+- Any source ref is synthetic, missing source file/type, or inappropriate for the source document family.
 - Workflow graph is missing, unreviewed, low-confidence, or has no edges.
 - Page-only PDF source refs are not acknowledged.
 - High-risk policy/workflow content has no effective date.
@@ -69,3 +89,4 @@ After publishing a workflow SOP, create a small golden query set that matches th
 - Each golden query returns the expected `unit_type` in top-5.
 - Result citations point to the published SOP version and source page/sheet/row.
 - Draft, archived, and failed extraction units are not returned.
+- Candidate, degraded, unreviewed, publish-blocked, and synthetic-source units are not returned.

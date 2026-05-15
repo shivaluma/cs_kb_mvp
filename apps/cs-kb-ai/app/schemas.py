@@ -58,9 +58,59 @@ ChatModelRoute = Literal[
     "policy",
     "high_risk",
     "complex",
-    "google/gemini-2.5-flash",
-    "google/gemini-3-flash-preview",
-    "anthropic/claude-3.5-haiku",
+]
+FinalExtractionUnitType = Literal[
+    "full_sop",
+    "routing_rule",
+    "operational_instruction",
+    "policy_rule",
+    "validation_rule",
+    "handling_rule",
+    "exception_rule",
+    "threshold_rule",
+    "macro_table",
+    "wording_rule",
+    "workflow_overview",
+    "workflow_graph",
+    "workflow_step",
+    "decision_point",
+    "decision_rule",
+    "sla_rule",
+    "escalation_rule",
+    "case_creation_rule",
+    "handoff_rule",
+    "macro_script",
+    "operational_note",
+    "security_note",
+    "compliance_note",
+    "compliance_rule",
+    "warning",
+    "example",
+    "related_document",
+    "follow_up_rule",
+    "text_section",
+]
+IndexUnitType = Literal[
+    "issue_router_unit",
+    "quick_action_rule",
+    "sop_reference",
+    "tool_link",
+    "vip_overlay_rule",
+    "product_update_note",
+]
+CandidateExtractionUnitType = Literal[
+    "candidate_section",
+    "candidate_rule",
+    "candidate_warning",
+    "candidate_table_row",
+    "candidate_workflow_text",
+    "candidate_step",
+    "candidate_action",
+    "candidate_decision",
+    "candidate_annotation",
+    "candidate_sla",
+    "candidate_audit_rule",
+    "candidate_queue_rule",
 ]
 ExtractionUnitType = Literal[
     "full_sop",
@@ -114,6 +164,23 @@ ExtractionUnitType = Literal[
 SynonymType = Literal["regular", "one_way", "typo_correction", "placeholder"]
 SynonymStatus = Literal["draft", "in_review", "active", "archived", "rejected"]
 SuggestionStatus = Literal["pending", "accepted", "rejected", "archived"]
+EvidenceType = Literal[
+    "heading",
+    "paragraph",
+    "list_item",
+    "table_row",
+    "table_cell",
+    "image_region",
+    "workflow_shape",
+    "connector",
+]
+UnitState = Literal[
+    "final_draft",
+    "candidate",
+    "degraded_evidence",
+    "manual_curated",
+    "published_unit",
+]
 
 
 class SOPMetadata(BaseModel):
@@ -190,6 +257,8 @@ class SourceRef(BaseModel):
     line_start: int | None = Field(default=None, ge=1)
     line_end: int | None = Field(default=None, ge=1)
     bbox: list[float] = Field(default_factory=list)
+    source_ref_synthetic: bool = False
+    source_ref_quality: str = ""
 
     @field_validator("bbox", mode="before")
     @classmethod
@@ -215,6 +284,35 @@ class SourceRef(BaseModel):
                     continue
             return output
         return []
+
+
+class SourceEvidenceBlock(BaseModel):
+    id: str = Field(min_length=1, max_length=180)
+    evidence_type: EvidenceType
+    text: str = ""
+    source_ref: SourceRef
+    section_path: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    geometry: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceGroundingIssue(BaseModel):
+    unit_index: int = Field(ge=0)
+    unit_type: str = ""
+    title: str = ""
+    reason: str
+    severity: str = "blocker"
+    source_ref_quality: str = "none"
+
+
+class SourceGroundingReport(BaseModel):
+    status: str = "completed"
+    checked_unit_count: int = 0
+    grounded_unit_count: int = 0
+    blocked_unit_count: int = 0
+    issues: list[SourceGroundingIssue] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ExtractedUnit(BaseModel):
@@ -737,7 +835,8 @@ def ensure_unit_source_refs(unit: dict[str, Any]) -> dict[str, Any]:
     if not source_refs:
         source_refs = metadata.get("source_refs")
     if not source_refs:
-        source_refs = [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": []}]
+        source_refs = [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": [], "source_ref_synthetic": True, "source_ref_quality": "synthetic_missing"}]
+        metadata = {**metadata, "source_ref_synthetic": True, "source_ref_quality": "synthetic_missing"}
     return {
         **unit,
         "unit_type": unit_type,
@@ -763,7 +862,7 @@ def ensure_workflow_annotation(annotation: dict[str, Any], index: int) -> dict[s
     if not source_refs:
         source_refs = annotation.get("metadata", {}).get("source_refs") if isinstance(annotation.get("metadata"), dict) else None
     if not source_refs:
-        source_refs = [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": []}]
+        source_refs = [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": [], "source_ref_synthetic": True, "source_ref_quality": "synthetic_missing"}]
     annotation_id = str(annotation.get("id") or stable_node_id(title or annotation_type, index)).strip()
     return {
         **annotation,
@@ -784,13 +883,14 @@ def synthesize_full_sop_unit(value: dict[str, Any], units: list[dict[str, Any]])
         if str(unit.get("content") or unit.get("summary") or "").strip()
     ]
     content = "\n".join(content_parts) or "Model không trả full_sop. Backend giữ bản nháp này để CS Ops review lại từ source."
-    source_refs = first_source_refs(units) or [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": []}]
+    source_refs = first_source_refs(units) or [{"source_type": "pdf_diagram", "source_file": "", "page": 1, "bbox": [], "source_ref_synthetic": True, "source_ref_quality": "synthetic_missing"}]
+    source_ref_quality = "synthetic_missing" if any(isinstance(ref, dict) and ref.get("source_ref_synthetic") for ref in source_refs) else "page_only"
     return {
         "unit_type": "full_sop",
         "title": title,
         "content": content,
         "confidence": min(float_or_default(metadata.get("extraction_confidence"), 0.45), 0.55),
-        "metadata": {"retrieval_scope": "document", "source_ref_quality": "page_only"},
+        "metadata": {"retrieval_scope": "document", "source_ref_quality": source_ref_quality, "source_ref_synthetic": source_ref_quality == "synthetic_missing"},
         "source_refs": source_refs,
     }
 

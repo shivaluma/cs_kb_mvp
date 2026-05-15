@@ -12,6 +12,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.config import settings
+from app.vietnamese_defaults import DEFAULT_KB_COLLECTIONS
 from app.search_labels import meaningful_search_label
 from app.schemas import (
     ExtractionRefinementPayload,
@@ -31,23 +32,7 @@ from app.workflow_v3 import (
 MAX_AI_BREAKDOWN_PROMPT_CHARS = 24000
 MAX_AI_BREAKDOWN_RESPONSE_CHARS = 60000
 MAX_AI_BREAKDOWN_JSON_CHARS = 60000
-COLLECTION_HINTS = {
-    "cs-core-operating-rules": ("CS Core Operating Rules", "domain"),
-    "customer-rider-operations": ("Customer / Rider Operations", "audience"),
-    "driver-operations": ("Driver Operations", "audience"),
-    "merchant-mcu-operations": ("Merchant / MCU Operations", "audience"),
-    "cleaner-operations": ("Cleaner Operations", "audience"),
-    "payment-refund": ("Payment & Refund", "task"),
-    "account-verification": ("Account & Verification", "task"),
-    "trip-order-issues": ("Trip / Order Issues", "task"),
-    "promotion-voucher": ("Promotion / Voucher", "task"),
-    "social-call-email-handling": ("Social / Call / Email Handling", "channel"),
-    "tech-bpla-msc-handoff": ("Tech / BPLA / MSC Handoff", "owner"),
-    "qa-zt-compliance": ("QA / ZT / Compliance", "risk"),
-    "vip-customer-handling": ("VIP Customer Handling", "risk"),
-    "tool-directory": ("Tool Directory", "tool"),
-    "product-updates": ("Product Updates", "domain"),
-}
+COLLECTION_HINTS = {slug: (name, collection_type) for slug, name, collection_type in DEFAULT_KB_COLLECTIONS}
 
 _AI_BREAKDOWN_BUFFER: ContextVar[list[dict[str, Any]] | None] = ContextVar("ai_breakdown_buffer", default=None)
 
@@ -260,11 +245,35 @@ def base_ai_breakdown(
         "model": model,
         "prompt": ai_prompt_preview(prompt),
         "raw_text_chars": len(raw_text or ""),
-        "response_format": "json_object",
+        "response_format": "json_schema_strict" if settings.openrouter_strict_json_schema else "json_object",
         "temperature": temperature,
         "visual_context_chars": len(visual_context_json),
         "image_count": len(page_images or []),
         "images_supplied": bool(page_images),
+    }
+
+
+def response_format_for_schema(name: str, schema_model: Any | None = None) -> dict[str, Any]:
+    if settings.openrouter_strict_json_schema and schema_model is not None:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": name,
+                "strict": True,
+                "schema": schema_model.model_json_schema(),
+            },
+        }
+    return {"type": "json_object"}
+
+
+def synthetic_missing_source_ref(source_type: str = "pdf_diagram") -> dict[str, Any]:
+    return {
+        "source_type": source_type,
+        "source_file": "",
+        "page": 1 if source_type in {"pdf", "pdf_diagram"} else None,
+        "bbox": [] if source_type in {"pdf", "pdf_diagram"} else [],
+        "source_ref_synthetic": True,
+        "source_ref_quality": "synthetic_missing",
     }
 
 
@@ -628,7 +637,7 @@ def extract_workflow_units(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": response_format_for_schema("workflow_extraction_payload", WorkflowExtractionPayload),
         "temperature": 0.1,
     }
     breakdown = base_ai_breakdown(
@@ -778,7 +787,7 @@ def extract_workflow_units_v2(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": response_format_for_schema("workflow_extraction_payload", WorkflowExtractionPayload),
         "temperature": 0.05,
     }
     breakdown = base_ai_breakdown(
@@ -1005,7 +1014,7 @@ def extract_workflow_units_v3(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": response_format_for_schema("workflow_extraction_payload", WorkflowExtractionPayload),
         "temperature": 0.02,
     }
     breakdown = base_ai_breakdown(
@@ -1294,7 +1303,7 @@ def format_source_evidence_view(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": formatting_prompt},
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": response_format_for_schema("source_evidence_view_payload"),
         "temperature": 0.05,
     }
     breakdown = base_ai_breakdown(
@@ -1410,7 +1419,7 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
                 "content": extraction_prompt,
             },
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": response_format_for_schema("rule_table_payload"),
         "temperature": 0.05,
     }
     breakdown = base_ai_breakdown(
@@ -1515,7 +1524,7 @@ def extract_mixed_docx_policy_units(filename: str, raw_text: str, structured_blo
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": extraction_prompt},
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": response_format_for_schema("mixed_docx_policy_payload"),
         "temperature": 0.03,
     }
     breakdown = base_ai_breakdown(
@@ -1638,7 +1647,7 @@ def refine_extracted_units(
                 ),
             },
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": response_format_for_schema("extraction_refinement_payload", ExtractionRefinementPayload),
         "temperature": 0.05,
     }
     headers = {
@@ -2069,6 +2078,8 @@ def normalize_display_text(value: str) -> str:
 def infer_source_ref_quality(source_refs: Any) -> str:
     if not isinstance(source_refs, list) or not source_refs:
         return "missing"
+    if any(isinstance(ref, dict) and (ref.get("source_ref_synthetic") is True or ref.get("source_ref_quality") == "synthetic_missing") for ref in source_refs):
+        return "synthetic_missing"
     has_pdf = False
     has_bbox = False
     for ref in source_refs:
@@ -2218,6 +2229,9 @@ def source_ref_validation_errors(units: list[dict[str, Any]], filename: str) -> 
         for ref in refs:
             if not isinstance(ref, dict):
                 errors.append(f"source_ref_invalid:unit_{index}")
+                continue
+            if ref.get("source_ref_synthetic") is True or ref.get("source_ref_quality") == "synthetic_missing":
+                errors.append(f"source_ref_synthetic_missing:unit_{index}")
                 continue
             if lower_name.endswith((".xlsx", ".xlsm", ".xls")) and not ref.get("sheet"):
                 errors.append(f"source_ref_missing_sheet:unit_{index}")

@@ -170,10 +170,11 @@ def rerank_by_query_intent(normalized_query: str, rows: list[dict[str, Any]]) ->
     output = []
     for row in rows:
         item = dict(row)
-        boost = intent_boost(normalized_query, item)
+        boost, trace = intent_boost_details(normalized_query, item)
         if boost:
             item["score"] = float(item.get("score") or 0) + boost
             item["intent_boost"] = round(boost, 4)
+            item["intent_boost_trace"] = trace
         output.append(item)
     return sorted(
         output,
@@ -189,6 +190,10 @@ def rerank_by_query_intent(normalized_query: str, rows: list[dict[str, Any]]) ->
 
 
 def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
+    return intent_boost_details(normalized_query, row)[0]
+
+
+def intent_boost_details(normalized_query: str, row: dict[str, Any]) -> tuple[float, list[dict[str, Any]]]:
     metadata = row.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
@@ -196,6 +201,30 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
     heading = "" if is_bad_search_label(row.get("heading") or "", row.get("content") or "") else str(row.get("heading") or "")
     text = normalize_phrase(" ".join([heading, str(row.get("content") or "")]))
     boost = 0.0
+    trace: list[dict[str, Any]] = []
+    rules = repository.rerank_rule_weights("retrieval_intent")
+
+    def add(rule_key: str, delta: float, **details: Any) -> None:
+        nonlocal boost
+        if not delta:
+            return
+        boost += delta
+        trace.append({"rule_key": rule_key, "delta": round(delta, 6), **details})
+
+    def weight(rule_key: str, default: float) -> float:
+        try:
+            return float(rules.get(rule_key, {}).get("weight", default))
+        except (TypeError, ValueError):
+            return default
+
+    def cap(rule_key: str, default: float) -> float:
+        params = rules.get(rule_key, {}).get("params") or {}
+        if not isinstance(params, dict):
+            return default
+        try:
+            return float(params.get("cap", default))
+        except (TypeError, ValueError):
+            return default
 
     query_tokens = set(token for token in normalized_query.split() if len(token) >= 3)
     metadata_text = normalize_phrase(" ".join(flatten_metadata_terms(metadata)))
@@ -205,9 +234,17 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
     metadata_overlap = len(query_tokens & metadata_tokens)
     text_overlap = len(query_tokens & text_tokens)
     if metadata_overlap:
-        boost += min(0.12, metadata_overlap * 0.018)
+        add(
+            "retrieval_metadata_overlap",
+            min(cap("retrieval_metadata_overlap", 0.12), metadata_overlap * weight("retrieval_metadata_overlap", 0.018)),
+            overlap=metadata_overlap,
+        )
     if text_overlap:
-        boost += min(0.05, text_overlap * 0.006)
+        add(
+            "retrieval_text_overlap",
+            min(cap("retrieval_text_overlap", 0.05), text_overlap * weight("retrieval_text_overlap", 0.006)),
+            overlap=text_overlap,
+        )
 
     action_unit_types = {
         "validation_rule",
@@ -240,35 +277,43 @@ def intent_boost(normalized_query: str, row: dict[str, Any]) -> float:
         "example",
     }
     if unit_type in action_unit_types and metadata_overlap:
-        boost += 0.025
+        add("retrieval_action_metadata_bonus", weight("retrieval_action_metadata_bonus", 0.025), unit_type=unit_type)
         if unit_type in {"issue_router_unit", "quick_action_rule", "tool_link"}:
-            boost += 0.08
+            add("retrieval_index_unit_bonus", weight("retrieval_index_unit_bonus", 0.08), unit_type=unit_type)
 
     if unit_type in action_unit_types and text_overlap:
         coverage = text_overlap / max(1, len(query_tokens))
-        boost += min(0.18, coverage * 0.12)
+        add(
+            "retrieval_text_coverage",
+            min(cap("retrieval_text_coverage", 0.18), coverage * weight("retrieval_text_coverage", 0.12)),
+            coverage=round(coverage, 4),
+        )
         if unit_type == "issue_router_unit":
-            boost += min(0.16, coverage * 0.14)
+            add(
+                "retrieval_issue_router_coverage",
+                min(cap("retrieval_issue_router_coverage", 0.16), coverage * weight("retrieval_issue_router_coverage", 0.14)),
+                coverage=round(coverage, 4),
+            )
 
     if normalized_query and normalized_query in text:
-        boost += 0.18
+        add("retrieval_exact_phrase", weight("retrieval_exact_phrase", 0.18))
 
     if unit_type == "sop_reference" and metadata_overlap:
-        boost += 0.04
+        add("retrieval_sop_reference_metadata", weight("retrieval_sop_reference_metadata", 0.04))
 
     if has_prohibition_intent(normalized_query) and has_prohibition_answer(text):
-        boost += 0.28
+        add("retrieval_prohibition_match", weight("retrieval_prohibition_match", 0.28))
         if unit_type in {"security_note", "compliance_note", "compliance_rule", "warning", "operational_note", "policy_rule", "exception_rule"}:
-            boost += 0.08
+            add("retrieval_prohibition_high_risk_unit", weight("retrieval_prohibition_high_risk_unit", 0.08), unit_type=unit_type)
 
     if any(token in query_tokens for token in {"zt", "bao", "mat", "security", "compliance", "khong", "cam"}) and unit_type in {"security_note", "compliance_note", "compliance_rule", "warning", "operational_note"}:
-        boost += 0.06
+        add("retrieval_security_query_note", weight("retrieval_security_query_note", 0.06), unit_type=unit_type)
 
     risk_level = normalize_phrase(str(metadata.get("risk_level") or ""))
     if risk_level in {"high", "critical"} and any(token in query_tokens for token in {"risk", "rui", "ro", "bao", "mat", "security", "compliance", "tuan", "thu"}):
-        boost += 0.025
+        add("retrieval_high_risk_query", weight("retrieval_high_risk_query", 0.025), risk_level=risk_level)
 
-    return boost
+    return boost, trace
 
 
 def has_prohibition_intent(normalized_query: str) -> bool:

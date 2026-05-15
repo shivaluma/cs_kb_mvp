@@ -5,6 +5,13 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
+from app import repository
+from app.vietnamese_defaults import (
+    DEFAULT_KB_COLLECTIONS,
+    VI_ACTION_CONNECTORS,
+    VI_CONDITION_CONNECTORS,
+    VI_NOTE_MARKERS,
+)
 from app.embedding import embed_texts, embedding_runtime_metadata
 from app.openrouter import (
     extract_rule_table_units,
@@ -18,7 +25,7 @@ from app.openrouter import (
     start_ai_breakdown_capture,
     suggest_document_metadata,
 )
-from app.schemas import DocumentMetadata
+from app.schemas import DocumentMetadata, SourceEvidenceBlock
 from app.search_labels import embedding_text_for_unit, meaningful_search_label
 from app.text_processing import (
     Chunk,
@@ -50,96 +57,183 @@ from app.workflow_v3 import extract_step_code as workflow_v3_extract_step_code
 from app.workflow_v3 import visible_step_codes_from_sources as workflow_v3_visible_step_codes_from_sources
 
 
-CONDITION_ACTION_SIGNALS = [
-    "nếu",
-    "neu",
-    "trường hợp",
-    "truong hop",
-    "đối với",
-    "doi voi",
-    "thì",
-    "thi",
-    "không được",
-    "khong duoc",
-    "được phép",
-    "duoc phep",
-    "bắt buộc",
-    "bat buoc",
-    "cần",
-    "can",
-    "phải",
-    "phai",
-    "xử lý",
-    "xu ly",
-    "chuyển",
-    "chuyen",
-    "kiểm tra",
-    "kiem tra",
-]
-
-WARNING_SIGNALS = [
-    "lưu ý",
-    "luu y",
-    "zt",
-    "rủi ro",
-    "rui ro",
-    "không cung cấp",
-    "khong cung cap",
-    "bảo mật",
-    "bao mat",
-    "compliance",
-    "qa chấm lỗi",
-    "qa cham loi",
-]
-
 AI_STRUCTURED_DOCUMENT_TYPES = {"policy_rule", "policy_table", "workflow_diagram", "kb_index_workbook"}
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
 
-KB_INDEX_SHEET_KINDS = {
-    "overal": "collection_summary",
-    "quy dinh lam viec ccu pcu": "core_sop_index",
-    "quy dinh chung": "general_sop_index",
-    "driver rider": "cross_audience_issue_router",
-    "driver cleaner": "driver_cleaner_issue_router",
-    "rider": "rider_issue_router",
-    "cleaner": "cleaner_issue_router",
-    "mcu": "merchant_issue_router",
-    "link lam viec": "tool_directory",
-    "vip": "vip_overlay_policy",
-    "tinh nang san pham moi": "product_update_index",
-}
 
-KB_INDEX_COLLECTION_BY_SHEET = {
-    "overal": ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
-    "quy dinh lam viec ccu pcu": ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
-    "quy dinh chung": ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
-    "driver rider": ("trip-order-issues", "Trip / Order Issues", "task"),
-    "driver cleaner": ("driver-operations", "Driver Operations", "audience"),
-    "rider": ("customer-rider-operations", "Customer / Rider Operations", "audience"),
-    "cleaner": ("cleaner-operations", "Cleaner Operations", "audience"),
-    "mcu": ("merchant-mcu-operations", "Merchant / MCU Operations", "audience"),
-    "link lam viec": ("tool-directory", "Tool Directory", "tool"),
-    "vip": ("vip-customer-handling", "VIP Customer Handling", "risk"),
-    "tinh nang san pham moi": ("product-updates", "Product Updates", "domain"),
-}
+def extraction_signal_phrases(signal_types: set[str]) -> list[str]:
+    phrases: list[str] = []
+    for signal in repository.active_extraction_signals():
+        if str(signal.get("signal_type") or "") not in signal_types:
+            continue
+        phrase = str(signal.get("phrase") or "").strip()
+        if phrase:
+            phrases.append(phrase)
+    return list(dict.fromkeys(phrases))
 
-DEFAULT_KB_COLLECTIONS = [
-    ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
-    ("customer-rider-operations", "Customer / Rider Operations", "audience"),
-    ("driver-operations", "Driver Operations", "audience"),
-    ("merchant-mcu-operations", "Merchant / MCU Operations", "audience"),
-    ("cleaner-operations", "Cleaner Operations", "audience"),
-    ("payment-refund", "Payment & Refund", "task"),
-    ("account-verification", "Account & Verification", "task"),
-    ("trip-order-issues", "Trip / Order Issues", "task"),
-    ("promotion-voucher", "Promotion / Voucher", "task"),
-    ("social-call-email-handling", "Social / Call / Email Handling", "channel"),
-    ("tech-bpla-msc-handoff", "Tech / BPLA / MSC Handoff", "owner"),
-    ("qa-zt-compliance", "QA / ZT / Compliance", "risk"),
-    ("vip-customer-handling", "VIP Customer Handling", "risk"),
-    ("tool-directory", "Tool Directory", "tool"),
-    ("product-updates", "Product Updates", "domain"),
+
+def condition_action_signals() -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *VI_CONDITION_CONNECTORS,
+                *VI_ACTION_CONNECTORS,
+                *extraction_signal_phrases({"condition_signal", "action_signal"}),
+            ]
+        )
+    )
+
+
+def warning_signals() -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                *VI_NOTE_MARKERS,
+                *extraction_signal_phrases({"warning_signal", "risk_signal"}),
+            ]
+        )
+    )
+
+
+def matched_extraction_signals(text: str, signal_types: set[str]) -> list[dict[str, Any]]:
+    return repository.match_extraction_signals(text, signal_types)
+
+
+def sheet_mapping_for_name(sheet_name: str) -> dict[str, Any]:
+    normalized_sheet = normalized_search_text(sheet_name)
+    for rule in repository.active_sheet_mapping_rules():
+        pattern = str(rule.get("pattern") or "").strip()
+        match_type = str(rule.get("match_type") or "exact")
+        normalized_pattern = normalized_search_text(pattern)
+        matched = False
+        if match_type == "contains":
+            matched = bool(normalized_pattern and normalized_pattern in normalized_sheet)
+        elif match_type == "regex":
+            if pattern and len(pattern) <= 300:
+                try:
+                    matched = bool(re.search(pattern, normalized_sheet, re.IGNORECASE))
+                except re.error:
+                    matched = False
+        else:
+            matched = normalized_sheet == normalized_pattern
+        if matched:
+            return dict(rule)
+    slug, name, collection_type = DEFAULT_KB_COLLECTIONS[0]
+    return {
+        "rule_key": "fallback_default",
+        "sheet_kind": "review_required",
+        "collection_slug": slug,
+        "collection_name": name,
+        "collection_type": collection_type,
+        "source": "fallback_default",
+    }
+
+
+class DocumentProcessor:
+    name = "text_sop"
+    document_types: set[str] = set()
+    structure_types: set[str] = set()
+
+    def supports(self, classification: Any) -> bool:
+        document_type = str(getattr(classification, "document_type", "") or "")
+        structure_type = str(getattr(classification, "structure_type", "") or "")
+        return (
+            (not self.document_types or document_type in self.document_types)
+            and (not self.structure_types or structure_type in self.structure_types)
+        )
+
+    def mode(self, classification: Any) -> str:
+        return "deterministic_parser_plus_ai_semantic_extraction"
+
+
+class PolicyTableProcessor(DocumentProcessor):
+    name = "policy_table"
+    document_types = {"policy_table", "policy_rule"}
+
+    def supports(self, classification: Any) -> bool:
+        document_type = str(getattr(classification, "document_type", "") or "")
+        if document_type == "policy_table":
+            return True
+        structure_text = " ".join(
+            str(getattr(classification, field, "") or "")
+            for field in ("structure_type", "sub_type", "source_type")
+        )
+        normalized = normalized_search_text(structure_text)
+        return document_type == "policy_rule" and ("table" in normalized or "matrix" in normalized)
+
+
+class MixedDocxPolicyProcessor(DocumentProcessor):
+    name = "mixed_docx_policy"
+    document_types = {"policy_rule"}
+    structure_types = {"mixed_docx"}
+
+
+class WorkflowDiagramProcessor(DocumentProcessor):
+    name = "workflow_diagram"
+    document_types = {"workflow_diagram"}
+
+    def mode(self, classification: Any) -> str:
+        return "ai_direct_visual_extraction"
+
+
+class KBIndexWorkbookProcessor(DocumentProcessor):
+    name = "kb_index_workbook"
+    document_types = {"kb_index_workbook"}
+
+
+class MacroScriptProcessor(DocumentProcessor):
+    name = "macro_script"
+    document_types = {"macro_script"}
+
+
+class TextSOPProcessor(DocumentProcessor):
+    name = "text_sop"
+    document_types = {"text_sop", "asset_sop", "training_material", "policy_rule", "unknown"}
+
+
+PROCESSOR_REGISTRY: list[DocumentProcessor] = [
+    WorkflowDiagramProcessor(),
+    KBIndexWorkbookProcessor(),
+    MixedDocxPolicyProcessor(),
+    PolicyTableProcessor(),
+    MacroScriptProcessor(),
+    TextSOPProcessor(),
 ]
+
+
+def select_document_processor(classification: Any, blocks: list[dict[str, Any]] | None = None) -> DocumentProcessor:
+    document_type = str(getattr(classification, "document_type", "") or "")
+    structure_type = str(getattr(classification, "structure_type", "") or "")
+    if document_type == "policy_rule" and structure_type != "mixed_docx" and any(
+        isinstance(block, dict)
+        and str(block.get("type") or block.get("block_type") or "") in {"docx_table_header", "docx_table_row", "sheet"}
+        for block in (blocks or [])
+    ):
+        return PolicyTableProcessor()
+    for processor in PROCESSOR_REGISTRY:
+        if processor.supports(classification):
+            return processor
+    return TextSOPProcessor()
+
+
+def processor_selection_payload(processor: DocumentProcessor, classification: Any) -> dict[str, Any]:
+    deterministic_structure_source = "parser_layout"
+    if str(getattr(classification, "document_type", "") or "") == "workflow_diagram":
+        deterministic_structure_source = "rendered_page_images"
+    elif str(getattr(classification, "source_type", "") or "").startswith("excel"):
+        deterministic_structure_source = "workbook_sheet_rows"
+    elif str(getattr(classification, "source_type", "") or "").startswith("docx"):
+        deterministic_structure_source = "docx_body_order"
+    return {
+        "processor": processor.name,
+        "mode": processor.mode(classification),
+        "document_type": getattr(classification, "document_type", ""),
+        "source_type": getattr(classification, "source_type", ""),
+        "structure_type": getattr(classification, "structure_type", ""),
+        "semantic_layer_role": "extract_or_enrich_meaning_only",
+        "deterministic_structure_source": deterministic_structure_source,
+        "review_authority": "human_review_publish_gate",
+    }
 
 
 def prepare_document_version(
@@ -152,6 +246,7 @@ def prepare_document_version(
     raw_text, warnings, raw_context = extract_raw_evidence(filename, content_type, data)
     blocks = parse_document_blocks(filename, content_type, raw_text, raw_context)
     classification = classify_document(filename, content_type, raw_text)
+    processor = select_document_processor(classification, blocks)
     warnings.extend(classification.warnings)
     visual_layout: dict[str, Any] = {}
     if classification.document_type == "workflow_diagram" and is_pdf_file(filename, content_type):
@@ -160,6 +255,17 @@ def prepare_document_version(
         if visual_layout:
             raw_context["visual_layout"] = visual_layout
             blocks.extend(visual_blocks_for_map(visual_layout))
+            raw_context["ai_direct_visual_extraction"] = {
+                "enabled": True,
+                "rules": [
+                    "rendered_page_images_are_source_of_truth",
+                    "parser_text_is_hint_only",
+                    "do_not_infer_workflow_from_ocr_line_order",
+                ],
+            }
+            warnings.append("ai_direct_visual_extraction_mode")
+    source_evidence = build_source_evidence(filename, content_type, blocks, raw_context, visual_layout)
+    raw_context["source_evidence"] = [block.model_dump(mode="json") for block in source_evidence]
     pipeline_artifacts = [
         stage_artifact(
             "map",
@@ -167,9 +273,19 @@ def prepare_document_version(
             source_blocks_payload(filename, content_type, raw_text, blocks, raw_context, warnings),
         ),
         stage_artifact(
+            "map",
+            "source_evidence",
+            source_evidence_payload(filename, content_type, source_evidence, raw_context, warnings),
+        ),
+        stage_artifact(
             "classify",
             "classification_result",
             classification_payload(classification),
+        ),
+        stage_artifact(
+            "classify",
+            "processor_selection",
+            processor_selection_payload(processor, classification),
         ),
     ]
     if visual_layout:
@@ -208,14 +324,25 @@ def prepare_document_version(
         finally:
             source_view_breakdowns = finish_ai_breakdown_capture(source_view_token)
         warnings.extend(source_view_warnings)
+        if not source_view_payload:
+            source_view_payload = local_source_evidence_view_payload(
+                filename=filename,
+                raw_text=raw_text,
+                blocks=blocks,
+                classification=classification,
+                formatter_warnings=source_view_warnings,
+                formatter_error=source_view_error,
+            )
+            warnings.append("local_source_evidence_view_used")
         if source_view_payload:
+            source_view_artifact_error = "" if source_view_payload.get("formatter") == "local_source_evidence_view" else source_view_error
             pipeline_artifacts.append(
                 stage_artifact(
                     "map",
                     "source_evidence_view",
                     source_view_payload,
-                    status="failed" if source_view_error else "completed",
-                    error=source_view_error,
+                    status="failed" if source_view_artifact_error else "completed",
+                    error=source_view_artifact_error,
                 )
             )
         if source_view_breakdowns:
@@ -322,6 +449,15 @@ def prepare_document_version(
         classification.document_type,
     )
     source_chunks = normalize_units(source_chunks)
+    source_chunks, semantic_refinement_report, semantic_refinement_warnings = semantic_refine_units(source_chunks, classification.document_type)
+    warnings.extend(semantic_refinement_warnings)
+    pipeline_artifacts.append(
+        stage_artifact(
+            "semantic_refine",
+            "semantic_refinement_report",
+            semantic_refinement_report,
+        )
+    )
 
     source_chunks, refinement_report, refinement_warnings, refinement_error = refine_units_for_delivery(
         filename=filename,
@@ -331,6 +467,25 @@ def prepare_document_version(
         source_chunks=source_chunks,
     )
     warnings.extend(refinement_warnings)
+    source_chunks = normalize_units(source_chunks)
+    source_chunks, grounding_report = validate_source_grounding(
+        source_chunks,
+        filename=filename,
+        content_type=content_type,
+        document_type=classification.document_type,
+        source_evidence=source_evidence,
+    )
+    if grounding_report["blocked_unit_count"]:
+        warnings.append("source_grounding_validation_failed")
+    pipeline_artifacts.append(
+        stage_artifact(
+            "verify",
+            "source_grounding_validator",
+            grounding_report,
+            status="failed" if grounding_report["blocked_unit_count"] else "completed",
+            error="source_grounding_validation_failed" if grounding_report["blocked_unit_count"] else "",
+        )
+    )
     pipeline_artifacts.append(
         stage_artifact(
             "refine",
@@ -343,7 +498,7 @@ def prepare_document_version(
 
     extraction_status = "degraded" if any(chunk.metadata.get("extraction_status") == "degraded" for chunk in source_chunks) else "structured"
     lifecycle_status = "degraded_structured_draft" if extraction_status == "degraded" else "structured_draft"
-    publish_blocked = extraction_status == "degraded"
+    publish_blocked = extraction_status == "degraded" or any(chunk.metadata.get("publish_blocked") for chunk in source_chunks)
     publish_blocked_reason = ""
     if publish_blocked:
         publish_blocked_reason = next(
@@ -1352,12 +1507,11 @@ def build_kb_index_plan(filename: str, raw_context: dict[str, Any]) -> dict[str,
     collection_slugs = {item["slug"] for item in plan["collections"]}
 
     for sheet_name, rows in sheets:
-        normalized_sheet = normalized_search_text(sheet_name)
-        sheet_kind = KB_INDEX_SHEET_KINDS.get(normalized_sheet, "review_required")
-        collection_slug, collection_name, collection_type = KB_INDEX_COLLECTION_BY_SHEET.get(
-            normalized_sheet,
-            ("cs-core-operating-rules", "CS Core Operating Rules", "domain"),
-        )
+        sheet_rule = sheet_mapping_for_name(sheet_name)
+        sheet_kind = str(sheet_rule.get("sheet_kind") or "review_required")
+        collection_slug = str(sheet_rule.get("collection_slug") or DEFAULT_KB_COLLECTIONS[0][0])
+        collection_name = str(sheet_rule.get("collection_name") or DEFAULT_KB_COLLECTIONS[0][1])
+        collection_type = str(sheet_rule.get("collection_type") or DEFAULT_KB_COLLECTIONS[0][2])
         if collection_slug not in collection_slugs:
             plan["collections"].append(
                 {
@@ -2865,8 +3019,8 @@ def build_degraded_policy_text_draft(filename: str, content_type: str, raw_text:
         if not text:
             continue
         unit_type = "candidate_section"
-        has_warning = contains_signal(text, WARNING_SIGNALS)
-        has_rule = contains_signal(text, CONDITION_ACTION_SIGNALS)
+        has_warning = contains_signal(text, warning_signals())
+        has_rule = contains_signal(text, condition_action_signals())
         if starts_warning_block(text):
             unit_type = "candidate_warning"
         elif has_rule:
@@ -3326,11 +3480,11 @@ def is_annotation_like_text(text: str) -> bool:
 
 
 def is_audit_text(normalized: str) -> bool:
-    return "quy dinh audit" in normalized or "audit" in normalized or "zt" in normalized
+    return "quy dinh audit" in normalized or "audit" in normalized or bool(matched_extraction_signals(normalized, {"risk_signal"}))
 
 
 def is_warning_text(normalized: str) -> bool:
-    return any(signal in normalized for signal in ["canh bao", "rủi ro", "rui ro", "loi zt", "khong duoc"])
+    return bool(matched_extraction_signals(normalized, {"warning_signal", "risk_signal", "action_signal"}))
 
 
 def is_macro_text(normalized: str) -> bool:
@@ -3930,7 +4084,7 @@ def build_degraded_workflow_draft(filename: str, raw_text: str, blocks: list[dic
             chunks.append(visual_chunk)
         step_candidates = workflow_step_candidates(raw_text)
         for index, text in enumerate(step_candidates, start=1):
-            unit_type = "candidate_warning" if contains_signal(text, [*WARNING_SIGNALS, "script", "sla"]) else "candidate_step"
+            unit_type = "candidate_warning" if contains_signal(text, [*warning_signals(), "script", "sla"]) else "candidate_step"
             chunks.append(
                 degraded_chunk(
                     len(chunks),
@@ -4178,19 +4332,185 @@ def mark_degraded_chunks(chunks: list[Any], classification: Any, ai_error: str, 
 
 
 def normalize_units(chunks: list[Any]) -> list[Any]:
-    normalized = [
-        replace_chunk_metadata(
-            chunk,
-            {
-                **chunk.metadata,
-                "source_refs": chunk.metadata.get("source_refs") or source_refs_from_chunk(chunk),
-                "source_ref_quality": chunk.metadata.get("source_ref_quality") or source_ref_quality_from_refs(chunk.metadata.get("source_refs") or source_refs_from_chunk(chunk)),
-            },
-        )
-        for chunk in chunks
-        if str(chunk.content or "").strip()
-    ]
+    normalized = []
+    for chunk in chunks:
+        if not str(chunk.content or "").strip():
+            continue
+        refs = chunk.metadata.get("source_refs") or source_refs_from_chunk(chunk)
+        metadata = {
+            **chunk.metadata,
+            "source_refs": refs,
+            "source_ref_quality": chunk.metadata.get("source_ref_quality") or source_ref_quality_from_refs(refs),
+        }
+        metadata["unit_state"] = metadata.get("unit_state") or infer_unit_state(metadata, str(metadata.get("unit_type") or chunk.section or "text_section"))
+        normalized.append(replace_chunk_metadata(chunk, metadata))
     return attach_notes_to_nearest_parent(normalized)
+
+
+def infer_unit_state(metadata: dict[str, Any], unit_type: str) -> str:
+    extraction_status = str(metadata.get("extraction_status") or "")
+    review_status = str(metadata.get("review_status") or "")
+    if extraction_status == "manually_curated" or metadata.get("manual_curation_status") == "converted":
+        return "manual_curated"
+    if review_status == "approved" and metadata.get("publish_state") == "published":
+        return "published_unit"
+    if extraction_status == "degraded" or metadata.get("source_evidence_only") is True:
+        return "degraded_evidence"
+    if unit_type.startswith("candidate_"):
+        return "candidate"
+    return "final_draft"
+
+
+def semantic_refine_units(chunks: list[Any], document_type: str) -> tuple[list[Any], dict[str, Any], list[str]]:
+    output: list[Any] = []
+    action_card_count = 0
+    normalized_metadata_count = 0
+    relation_candidate_count = 0
+    state_counts: dict[str, int] = {}
+    for chunk in chunks:
+        metadata = normalize_semantic_unit_metadata(dict(chunk.metadata or {}), chunk, document_type)
+        if metadata.get("action_card"):
+            action_card_count += 1
+        relation_candidates = semantic_relation_candidates(chunk, metadata)
+        if relation_candidates and not metadata.get("relation_candidates"):
+            metadata["relation_candidates"] = relation_candidates
+            relation_candidate_count += len(relation_candidates)
+        if metadata != chunk.metadata:
+            normalized_metadata_count += 1
+        state = str(metadata.get("unit_state") or "final_draft")
+        state_counts[state] = state_counts.get(state, 0) + 1
+        output.append(replace_chunk_metadata(chunk, metadata))
+    report = {
+        "status": "completed",
+        "document_type": document_type,
+        "input_unit_count": len(chunks),
+        "output_unit_count": len(output),
+        "unit_state_counts": state_counts,
+        "normalized_metadata_count": normalized_metadata_count,
+        "action_card_count": action_card_count,
+        "relation_candidate_count": relation_candidate_count,
+        "operations": [
+            "merge_duplicate_fragmented_units",
+            "attach_examples_to_parent_rules",
+            "attach_notes_to_parent_units",
+            "normalize_actor_audience_channel_risk",
+            "extract_relation_candidates",
+            "generate_action_card_metadata",
+        ],
+        "deterministic_pass": "semantic_refine",
+    }
+    return output, report, []
+
+
+def normalize_semantic_unit_metadata(metadata: dict[str, Any], chunk: Any, document_type: str) -> dict[str, Any]:
+    unit_type = str(metadata.get("unit_type") or chunk.section or "text_section")
+    metadata["unit_state"] = metadata.get("unit_state") or infer_unit_state(metadata, unit_type)
+    metadata["document_type"] = metadata.get("document_type") or document_type
+    actor = str(metadata.get("actor") or "").strip()
+    if actor:
+        metadata["actor"] = normalize_actor_value(actor)
+    audience = metadata.get("audience") or metadata.get("affected_audience")
+    if isinstance(audience, str):
+        metadata["audience"] = [normalize_audience_value(audience)]
+    elif isinstance(audience, list):
+        metadata["audience"] = list(dict.fromkeys(normalize_audience_value(str(item)) for item in audience if str(item).strip()))
+    channel = metadata.get("channel")
+    if isinstance(channel, str):
+        metadata["channel"] = [normalize_channel_value(channel)]
+    elif isinstance(channel, list):
+        metadata["channel"] = list(dict.fromkeys(normalize_channel_value(str(item)) for item in channel if str(item).strip()))
+    risk_level = str(metadata.get("risk_level") or "").lower().strip()
+    if risk_level:
+        metadata["risk_level"] = normalize_risk_level(risk_level)
+    if should_generate_action_card(unit_type, metadata, chunk.content):
+        metadata["action_card"] = metadata.get("action_card") or action_card_for_chunk(chunk, metadata, unit_type)
+    return metadata
+
+
+def normalize_actor_value(value: str) -> str:
+    normalized = normalize_for_signal(value)
+    if normalized in {"cs", "cskh", "customer service"}:
+        return "cs"
+    if normalized in {"tx", "driver", "tai xe"}:
+        return "driver"
+    if normalized in {"kh", "customer", "khach hang"}:
+        return "customer"
+    return normalized.replace(" ", "_")[:80]
+
+
+def normalize_audience_value(value: str) -> str:
+    normalized = normalize_for_signal(value)
+    if normalized in {"tx", "driver", "tai xe"}:
+        return "driver"
+    if normalized in {"kh", "customer", "khach hang"}:
+        return "customer"
+    if normalized in {"cs", "customer service", "cskh"}:
+        return "cs"
+    return normalized.replace(" ", "_")[:80]
+
+
+def normalize_channel_value(value: str) -> str:
+    normalized = normalize_for_signal(value)
+    if "email" in normalized or "mail" in normalized:
+        return "email"
+    if "call" in normalized or "hotline" in normalized:
+        return "call"
+    if "chat" in normalized:
+        return "chat"
+    if "social" in normalized:
+        return "social"
+    return normalized.replace(" ", "_")[:80]
+
+
+def normalize_risk_level(value: str) -> str:
+    normalized = normalize_for_signal(value)
+    if normalized in {"critical", "high", "medium", "low"}:
+        return normalized
+    if normalized in {"zt", "blocker", "nghiem trong"}:
+        return "critical"
+    return "medium"
+
+
+def should_generate_action_card(unit_type: str, metadata: dict[str, Any], content: str) -> bool:
+    if unit_type in {"full_sop", "workflow_graph", "related_document", "tool_link"}:
+        return False
+    if metadata.get("action") or metadata.get("condition") or unit_type.endswith("_rule") or unit_type in {"workflow_step", "operational_instruction", "macro_script"}:
+        return True
+    return bool(re.search(r"\b(phải|cần|kiểm tra|xử lý|gửi|chuyển|resolve|escalate)\b", content, re.IGNORECASE))
+
+
+def action_card_for_chunk(chunk: Any, metadata: dict[str, Any], unit_type: str) -> dict[str, Any]:
+    return {
+        "title": str(chunk.heading or metadata.get("title") or unit_type).strip()[:160],
+        "unit_type": unit_type,
+        "condition": metadata.get("condition") or "",
+        "action": metadata.get("action") or first_sentence(chunk.content)[:240],
+        "actor": metadata.get("actor") or "",
+        "audience": metadata.get("audience") or metadata.get("affected_audience") or [],
+        "channel": metadata.get("channel") or [],
+        "risk_level": metadata.get("risk_level") or "",
+        "source_refs": metadata.get("source_refs") or source_refs_from_chunk(chunk),
+    }
+
+
+def first_sentence(value: str) -> str:
+    first = re.split(r"(?<=[.!?。])\s+", str(value or "").strip(), maxsplit=1)[0]
+    return first or str(value or "").strip()
+
+
+def semantic_relation_candidates(chunk: Any, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    related_documents = metadata.get("related_documents")
+    if isinstance(related_documents, list):
+        for relation in related_documents[:8]:
+            if isinstance(relation, dict):
+                candidates.append({"relation_type": "references", "target_title": relation.get("target_title") or relation.get("title") or "", "source": "semantic_refine"})
+    tool_name = metadata.get("tool") or metadata.get("system")
+    if tool_name:
+        candidates.append({"relation_type": "uses_tool", "target_title": str(tool_name), "source": "semantic_refine"})
+    if str(metadata.get("attached_to") or "").strip():
+        candidates.append({"relation_type": "child_of", "target_id": str(metadata.get("attached_to")), "source": "semantic_refine"})
+    return [candidate for candidate in candidates if candidate.get("target_title") or candidate.get("target_id")]
 
 
 def refine_units_for_delivery(
@@ -4976,6 +5296,8 @@ def default_pdf_source_ref(filename: str) -> dict[str, Any]:
 def source_ref_quality_from_refs(refs: Any) -> str:
     if not isinstance(refs, list) or not refs:
         return "none"
+    if any(is_synthetic_source_ref(ref) for ref in refs):
+        return "synthetic_missing"
     if any(isinstance(ref, dict) and ref.get("bbox") for ref in refs):
         return "bbox"
     if any(isinstance(ref, dict) and ref.get("sheet") and (ref.get("row_start") or ref.get("row_end")) for ref in refs):
@@ -5002,10 +5324,134 @@ def source_refs_from_chunk(chunk: Any) -> list[dict[str, Any]]:
 
 def aggregate_source_ref_quality(chunks: list[Any]) -> str:
     qualities = [str(chunk.metadata.get("source_ref_quality") or source_ref_quality_from_refs(chunk.metadata.get("source_refs"))) for chunk in chunks]
+    if "synthetic_missing" in qualities:
+        return "synthetic_missing"
     for candidate in ("bbox", "sheet_row", "table_row", "paragraph_only", "page_only", "none"):
         if candidate in qualities:
             return candidate
     return "none"
+
+
+def is_synthetic_source_ref(ref: Any) -> bool:
+    if not isinstance(ref, dict):
+        return False
+    return bool(
+        ref.get("source_ref_synthetic") is True
+        or ref.get("source_ref_quality") == "synthetic_missing"
+        or (not str(ref.get("source_file") or "").strip() and ref.get("source_type") in {"pdf_diagram", "pdf", "docx", "docx_table", "excel", "text"})
+    )
+
+
+def validate_source_grounding(
+    chunks: list[Any],
+    *,
+    filename: str,
+    content_type: str,
+    document_type: str,
+    source_evidence: list[SourceEvidenceBlock],
+) -> tuple[list[Any], dict[str, Any]]:
+    grounded_chunks: list[Any] = []
+    issues: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        refs = chunk.metadata.get("source_refs") or source_refs_from_chunk(chunk)
+        reasons = source_grounding_errors(refs, filename=filename, content_type=content_type, document_type=document_type, chunk=chunk)
+        metadata = {
+            **chunk.metadata,
+            "source_refs": refs,
+            "source_ref_quality": source_ref_quality_from_refs(refs),
+        }
+        if reasons:
+            metadata.update(
+                {
+                    "source_grounding_status": "failed",
+                    "source_grounding_errors": reasons,
+                    "review_status": "needs_review",
+                    "publish_blocked": True,
+                    "publish_blocked_reason": "source_grounding_validation_failed",
+                    "source_ref_real": False,
+                    "source_ref_synthetic": any(is_synthetic_source_ref(ref) for ref in refs),
+                    "index_eligible": False,
+                    "unit_state": "degraded_evidence" if metadata.get("source_ref_quality") == "synthetic_missing" else metadata.get("unit_state") or "candidate",
+                }
+            )
+            for reason in reasons:
+                issues.append(
+                    {
+                        "unit_index": index,
+                        "unit_type": str(metadata.get("unit_type") or chunk.section or ""),
+                        "title": str(chunk.heading or "")[:180],
+                        "reason": reason,
+                        "severity": "blocker",
+                        "source_ref_quality": metadata.get("source_ref_quality") or "none",
+                    }
+                )
+        else:
+            metadata.update(
+                {
+                    "source_grounding_status": "grounded",
+                    "source_grounding_errors": [],
+                    "source_ref_real": True,
+                    "source_ref_synthetic": False,
+                    "source_ref_quality": source_ref_quality_from_refs(refs),
+                }
+            )
+        grounded_chunks.append(replace_chunk_metadata(chunk, metadata))
+    report = {
+        "status": "failed" if issues else "completed",
+        "checked_unit_count": len(chunks),
+        "grounded_unit_count": len(chunks) - len({issue["unit_index"] for issue in issues}),
+        "blocked_unit_count": len({issue["unit_index"] for issue in issues}),
+        "evidence_block_count": len(source_evidence),
+        "evidence_types": sorted({block.evidence_type for block in source_evidence}),
+        "issues": issues[:120],
+        "warnings": [] if not issues else ["unsupported_units_marked_needs_review_publish_blocked"],
+    }
+    return grounded_chunks, report
+
+
+def source_grounding_errors(
+    refs: Any,
+    *,
+    filename: str,
+    content_type: str,
+    document_type: str,
+    chunk: Any,
+) -> list[str]:
+    if not isinstance(refs, list) or not refs:
+        return ["source_refs_missing"]
+    errors: list[str] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            errors.append("source_ref_invalid")
+            continue
+        if is_synthetic_source_ref(ref):
+            errors.append("source_ref_synthetic_missing")
+            continue
+        source_type = str(ref.get("source_type") or "").lower()
+        if not source_type:
+            errors.append("source_ref_missing_type")
+        if not str(ref.get("source_file") or "").strip():
+            errors.append("source_ref_missing_file")
+        if is_spreadsheet_file(filename.lower(), content_type) or document_type in {"policy_table", "kb_index_workbook"}:
+            if source_type == "excel" and not ref.get("sheet"):
+                errors.append("excel_source_ref_missing_sheet")
+            if source_type == "excel" and not (ref.get("row_start") or ref.get("row_end")) and str(chunk.metadata.get("unit_type") or "") != "full_sop":
+                errors.append("excel_source_ref_missing_row")
+        if is_docx_file(filename.lower(), content_type):
+            if source_type == "docx_table":
+                if ref.get("table_index") is None or ref.get("row_index") is None:
+                    errors.append("docx_table_source_ref_missing_row")
+            elif source_type == "docx":
+                if ref.get("paragraph_index") is None and not ref.get("heading_path"):
+                    errors.append("docx_source_ref_missing_anchor")
+            else:
+                errors.append("docx_source_ref_wrong_type")
+        if is_pdf_file(filename, content_type):
+            if source_type not in {"pdf", "pdf_diagram"}:
+                errors.append("pdf_source_ref_wrong_type")
+            if not ref.get("page"):
+                errors.append("pdf_source_ref_missing_page")
+    return list(dict.fromkeys(errors))[:10]
 
 
 def stage_artifact(stage: str, artifact_type: str, payload: dict[str, Any], status: str = "completed", error: str = "") -> dict[str, Any]:
@@ -5016,6 +5462,150 @@ def stage_artifact(stage: str, artifact_type: str, payload: dict[str, Any], stat
         "stage": stage,
         "status": status,
     }
+
+
+def local_source_evidence_view_payload(
+    *,
+    filename: str,
+    raw_text: str,
+    blocks: list[dict[str, Any]],
+    classification: Any,
+    formatter_warnings: list[str],
+    formatter_error: str,
+) -> dict[str, Any]:
+    markdown = local_source_evidence_markdown(filename, raw_text, blocks)
+    sections = local_source_evidence_sections(markdown, blocks, filename)
+    fallback_warnings = [
+        "local_source_evidence_view_used",
+        *[str(warning) for warning in formatter_warnings if warning],
+        *([f"ai_formatter_error:{formatter_error}"] if formatter_error else []),
+    ]
+    return {
+        "title": path_title(filename),
+        "format": "markdown",
+        "formatter": "local_source_evidence_view",
+        "model": "local/source-evidence-fallback",
+        "markdown": markdown[:120000],
+        "markdown_truncated": len(markdown) > 120000,
+        "raw_text_chars": len(raw_text),
+        "sections": sections[:80],
+        "warnings": list(dict.fromkeys(fallback_warnings)),
+        "coverage_report": {
+            "raw_text_chars": len(raw_text),
+            "formatted_chars": len(markdown),
+            "section_count": len(sections),
+            "document_type": getattr(classification, "document_type", ""),
+            "source_type": getattr(classification, "source_type", ""),
+            "source_preservation_notes": ["AI formatter unavailable; rendered from extracted source blocks."],
+        },
+    }
+
+
+def local_source_evidence_markdown(filename: str, raw_text: str, blocks: list[dict[str, Any]]) -> str:
+    if not blocks:
+        return local_raw_text_markdown(filename, raw_text)
+
+    lines: list[str] = [f"# {path_title(filename)}"]
+    current_table_index: int | None = None
+    rendered_table_headers: set[int] = set()
+    for block in blocks[:800]:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("block_type") or block.get("type") or "")
+        text = str(block.get("text") or "").strip()
+        if not text and not block_type.startswith("docx_table"):
+            continue
+
+        if block_type == "heading":
+            current_table_index = None
+            level = 2 if len(block.get("section_path") or []) <= 1 else 3
+            lines.extend(["", f"{'#' * level} {text}"])
+            continue
+
+        if block_type == "docx_table_header":
+            table_index = int(block.get("table_index") or 0)
+            headers = [str(header).strip() for header in block.get("headers") or block.get("columns") or [] if str(header).strip()]
+            if headers:
+                current_table_index = table_index
+                rendered_table_headers.add(table_index)
+                lines.extend(["", "| " + " | ".join(markdown_table_cell(header) for header in headers) + " |"])
+                lines.append("| " + " | ".join("---" for _ in headers) + " |")
+            continue
+
+        if block_type == "docx_table_row":
+            table_index = int(block.get("table_index") or 0)
+            headers = [str(header).strip() for header in block.get("headers") or block.get("columns") or [] if str(header).strip()]
+            cells = block.get("cells") if isinstance(block.get("cells"), dict) else {}
+            if current_table_index != table_index:
+                lines.append("")
+                current_table_index = table_index
+            if headers and table_index not in rendered_table_headers:
+                rendered_table_headers.add(table_index)
+                lines.append("| " + " | ".join(markdown_table_cell(header) for header in headers) + " |")
+                lines.append("| " + " | ".join("---" for _ in headers) + " |")
+            if headers and cells:
+                values = [markdown_table_cell(str(cells.get(header) or "")) for header in headers]
+                lines.append("| " + " | ".join(values) + " |")
+            elif text:
+                lines.append(text)
+            continue
+
+        current_table_index = None
+        if block_type == "list_group":
+            lines.extend(["", f"**{text}**"])
+        elif block_type == "list_item":
+            lines.append(f"- {text}")
+        else:
+            lines.extend(["", text])
+
+    markdown = "\n".join(line.rstrip() for line in lines).strip()
+    return markdown or local_raw_text_markdown(filename, raw_text)
+
+
+def local_raw_text_markdown(filename: str, raw_text: str) -> str:
+    lines = [f"# {path_title(filename)}"]
+    for line in str(raw_text or "").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if re.match(r"^[IVXLCDM]+[.)]\s+", text, re.IGNORECASE):
+            lines.extend(["", f"## {text}"])
+        elif re.match(r"^\d{1,2}[.)]\s+", text) or re.match(r"^(Đối với|Doi voi)\s+", text, re.IGNORECASE):
+            lines.extend(["", f"### {text}"])
+        elif re.match(r"^[-*•‣▪]\s+", text):
+            lines.append(text)
+        else:
+            lines.extend(["", text])
+    return "\n".join(lines).strip()
+
+
+def markdown_table_cell(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace("|", "\\|")).strip()
+
+
+def local_source_evidence_sections(markdown: str, blocks: list[dict[str, Any]], filename: str) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for block in blocks:
+        if not isinstance(block, dict) or str(block.get("block_type") or block.get("type") or "") != "heading":
+            continue
+        title = str(block.get("text") or "").strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        sections.append({"title": title[:240], "source_hint": "docx_heading", "confidence": 0.74})
+    for line in markdown.splitlines():
+        match = re.match(r"^#{1,4}\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        title = match.group(1).strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        sections.append({"title": title[:240], "source_hint": "markdown_heading", "confidence": 0.68})
+    if not sections:
+        sections.append({"title": path_title(filename), "source_hint": "raw_text", "confidence": 0.5})
+    return sections
 
 
 def visual_blocks_for_map(visual_layout: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5076,6 +5666,303 @@ def visual_layout_payload(visual_layout: dict[str, Any]) -> dict[str, Any]:
 
 def visual_graph_payload(visual_layout: dict[str, Any]) -> dict[str, Any]:
     return compact_visual_context(visual_layout)
+
+
+def build_source_evidence(
+    filename: str,
+    content_type: str,
+    blocks: list[dict[str, Any]],
+    raw_context: dict[str, Any],
+    visual_layout: dict[str, Any] | None = None,
+) -> list[SourceEvidenceBlock]:
+    evidence: list[SourceEvidenceBlock] = []
+    for index, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("block_type") or block.get("type") or "")
+        if block_type == "sheet":
+            evidence.extend(source_evidence_from_sheet_block(filename, block, len(evidence)))
+            continue
+        evidence_type = evidence_type_for_block(block)
+        source_ref = source_ref_for_evidence_block(filename, content_type, block)
+        metadata = evidence_metadata_from_block(block, order_index=index)
+        geometry = {"bbox": block.get("bbox")} if block.get("bbox") else {}
+        text = str(block.get("text") or block.get("cell_text") or "").strip()
+        if not text and evidence_type not in {"connector", "table_row", "table_cell"}:
+            continue
+        evidence.append(
+            SourceEvidenceBlock(
+                id=str(block.get("block_id") or f"ev_{index}"),
+                evidence_type=evidence_type,
+                text=text,
+                source_ref=source_ref,
+                section_path=[str(item) for item in block.get("section_path", []) if str(item).strip()],
+                confidence=evidence_confidence(filename, content_type, evidence_type, block),
+                geometry=geometry,
+                metadata=metadata,
+            )
+        )
+        if evidence_type == "table_row":
+            evidence.extend(source_evidence_cells_from_table_block(filename, block, len(evidence)))
+    return evidence
+
+
+def source_evidence_from_sheet_block(filename: str, block: dict[str, Any], start_index: int) -> list[SourceEvidenceBlock]:
+    sheet_name = str(block.get("sheet") or "")
+    rows = block.get("rows") if isinstance(block.get("rows"), list) else []
+    headers: list[str] = []
+    output: list[SourceEvidenceBlock] = []
+    for row_offset, item in enumerate(rows):
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            continue
+        try:
+            row_number = int(item[0])
+        except (TypeError, ValueError):
+            continue
+        values = [str(value or "").strip() for value in (item[1] if isinstance(item[1], list) else [])]
+        if not any(values):
+            continue
+        if not headers:
+            headers = [value or f"Column {index + 1}" for index, value in enumerate(values)]
+        row_headers = headers or [f"Column {index + 1}" for index in range(len(values))]
+        row_ref = {
+            "source_type": "excel",
+            "source_file": filename,
+            "sheet": sheet_name,
+            "row_start": row_number,
+            "row_end": row_number,
+            "column_names": row_headers,
+        }
+        hyperlinks = spreadsheet_hyperlinks_from_row(values, row_headers)
+        row_text = " | ".join(value for value in values if value)
+        output.append(
+            SourceEvidenceBlock(
+                id=f"ev_sheet_{start_index}_{row_offset}",
+                evidence_type="table_row",
+                text=row_text,
+                source_ref=row_ref,
+                section_path=[sheet_name] if sheet_name else [],
+                confidence=0.96,
+                metadata={
+                    "order_index": start_index + row_offset,
+                    "sheet": sheet_name,
+                    "row_number": row_number,
+                    "columns": row_headers,
+                    "hyperlinks": hyperlinks,
+                    "source_parser": "deterministic_xlsx",
+                },
+            )
+        )
+        for column_index, value in enumerate(values):
+            if not value:
+                continue
+            column_name = row_headers[column_index] if column_index < len(row_headers) else f"Column {column_index + 1}"
+            cell_ref = {
+                **row_ref,
+                "column_names": [column_name],
+                "cell_text": value,
+            }
+            output.append(
+                SourceEvidenceBlock(
+                    id=f"ev_sheet_{start_index}_{row_offset}_c{column_index}",
+                    evidence_type="table_cell",
+                    text=value,
+                    source_ref=cell_ref,
+                    section_path=[sheet_name] if sheet_name else [],
+                    confidence=0.96,
+                    metadata={
+                        "order_index": start_index + row_offset,
+                        "sheet": sheet_name,
+                        "row_number": row_number,
+                        "column_index": column_index + 1,
+                        "column_name": column_name,
+                        "hyperlinks": [link for link in hyperlinks if link.get("cell_text") == value],
+                        "source_parser": "deterministic_xlsx",
+                    },
+                )
+            )
+    return output
+
+
+def source_evidence_cells_from_table_block(filename: str, block: dict[str, Any], start_index: int) -> list[SourceEvidenceBlock]:
+    cells = block.get("cells") if isinstance(block.get("cells"), dict) else {}
+    columns = [str(column) for column in block.get("columns", []) if str(column).strip()]
+    section_path = [str(item) for item in block.get("section_path", []) if str(item).strip()]
+    output: list[SourceEvidenceBlock] = []
+    for column_index, column_name in enumerate(columns or list(cells.keys())):
+        value = str(cells.get(column_name) or "").strip()
+        if not value:
+            continue
+        source_ref = {
+            "source_type": "docx_table",
+            "source_file": filename,
+            "table_index": block.get("table_index"),
+            "row_index": block.get("row_index"),
+            "column_names": [column_name],
+            "cell_text": value,
+            "heading_path": section_path,
+        }
+        output.append(
+            SourceEvidenceBlock(
+                id=f"{block.get('block_id') or 'table_row'}_c{column_index}",
+                evidence_type="table_cell",
+                text=value,
+                source_ref=source_ref,
+                section_path=section_path,
+                confidence=0.98,
+                metadata={
+                    "order_index": start_index + column_index,
+                    "table_index": block.get("table_index"),
+                    "row_index": block.get("row_index"),
+                    "column_index": column_index,
+                    "column_name": column_name,
+                    "source_parser": "deterministic_docx",
+                },
+            )
+        )
+    return output
+
+
+def evidence_type_for_block(block: dict[str, Any]) -> str:
+    block_type = str(block.get("block_type") or block.get("type") or "")
+    if block_type == "heading":
+        return "heading"
+    if block_type == "list_item":
+        return "list_item"
+    if block_type in {"docx_table_header", "docx_table_row"}:
+        return "table_row"
+    if block_type == "visual_shape":
+        return "workflow_shape"
+    if block_type == "visual_connector":
+        return "connector"
+    if block_type == "image_region":
+        return "image_region"
+    return "paragraph"
+
+
+def source_ref_for_evidence_block(filename: str, content_type: str, block: dict[str, Any]) -> dict[str, Any]:
+    refs = block.get("source_refs") if isinstance(block.get("source_refs"), list) else []
+    if refs and isinstance(refs[0], dict):
+        return {**refs[0], "source_file": refs[0].get("source_file") or filename}
+    if isinstance(block.get("source_ref"), dict):
+        return {**block["source_ref"], "source_file": block["source_ref"].get("source_file") or filename}
+    block_type = str(block.get("block_type") or block.get("type") or "")
+    if block_type in {"docx_table_header", "docx_table_row"}:
+        return {
+            "source_type": "docx_table",
+            "source_file": filename,
+            "table_index": block.get("table_index"),
+            "row_index": block.get("row_index"),
+            "column_names": block.get("columns") or block.get("headers") or [],
+            "cell_text": block.get("cell_text") or block.get("text") or "",
+            "heading_path": block.get("section_path") or [],
+        }
+    if is_docx_file(filename.lower(), content_type):
+        return {
+            "source_type": "docx",
+            "source_file": filename,
+            "paragraph_index": block.get("paragraph_index") if block.get("paragraph_index") is not None else int(block.get("index") or 0),
+            "heading_path": block.get("section_path") or block.get("heading_path") or [],
+        }
+    if is_spreadsheet_file(filename.lower(), content_type):
+        return {
+            "source_type": "excel",
+            "source_file": filename,
+            "sheet": block.get("sheet") or "",
+            "row_start": block.get("row_start") or block.get("row_number") or 1,
+            "row_end": block.get("row_end") or block.get("row_number") or 1,
+            "column_names": block.get("columns") or [],
+        }
+    if is_pdf_file(filename, content_type):
+        return {
+            "source_type": "pdf_diagram" if block_type.startswith("visual_") else "pdf",
+            "source_file": filename,
+            "page": block.get("page") or 1,
+            "bbox": block.get("bbox") or [],
+        }
+    return {
+        "source_type": "text",
+        "source_file": filename,
+        "line_start": block.get("line_start") or int(block.get("index") or 0) + 1,
+        "line_end": block.get("line_end") or int(block.get("index") or 0) + 1,
+    }
+
+
+def evidence_metadata_from_block(block: dict[str, Any], *, order_index: int) -> dict[str, Any]:
+    metadata_keys = {
+        "block_id",
+        "block_type",
+        "type",
+        "index",
+        "paragraph_index",
+        "table_index",
+        "row_index",
+        "columns",
+        "headers",
+        "cells",
+        "cell_values",
+        "sheet",
+        "style",
+        "numbering",
+        "list_group",
+    }
+    metadata = {key: block.get(key) for key in metadata_keys if key in block}
+    metadata["order_index"] = order_index
+    metadata["source_parser"] = "visual_layout" if str(block.get("type") or "").startswith("visual_") else "deterministic_parser"
+    return metadata
+
+
+def evidence_confidence(filename: str, content_type: str, evidence_type: str, block: dict[str, Any]) -> float:
+    if evidence_type in {"workflow_shape", "connector", "image_region"}:
+        return float(block.get("confidence") or 0.64)
+    if is_docx_file(filename.lower(), content_type) or is_spreadsheet_file(filename.lower(), content_type):
+        return 0.98
+    if is_pdf_file(filename, content_type):
+        return 0.76
+    return 0.9
+
+
+def source_evidence_payload(
+    filename: str,
+    content_type: str,
+    source_evidence: list[SourceEvidenceBlock],
+    raw_context: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    evidence_types = [block.evidence_type for block in source_evidence]
+    return {
+        "block_count": len(source_evidence),
+        "content_type": content_type,
+        "filename": filename,
+        "evidence_types": sorted(set(evidence_types)),
+        "preview_evidence": [block.model_dump(mode="json") for block in source_evidence[:80]],
+        "quality_checks": source_evidence_quality_checks(source_evidence),
+        "source_ref_quality": source_ref_quality_from_refs([block.source_ref.model_dump() for block in source_evidence]),
+        "spreadsheet_sheet_count": len(raw_context.get("sheets", [])) if isinstance(raw_context.get("sheets"), list) else 0,
+        "warnings": warnings[:20],
+    }
+
+
+def source_evidence_quality_checks(source_evidence: list[SourceEvidenceBlock]) -> dict[str, bool]:
+    evidence_types = [block.evidence_type for block in source_evidence]
+    docx_table_rows = [block for block in source_evidence if block.evidence_type == "table_row" and block.source_ref.source_type == "docx_table"]
+    list_items = [block for block in source_evidence if block.evidence_type == "list_item"]
+    return {
+        "table_order_preserved": all(
+            int(left.metadata.get("order_index") or 0) <= int(right.metadata.get("order_index") or 0)
+            for left, right in zip(docx_table_rows, docx_table_rows[1:])
+        ) if docx_table_rows else True,
+        "section_path_present": all(isinstance(block.section_path, list) for block in source_evidence),
+        "table_rows_have_source_refs": all(
+            block.source_ref.source_type in {"docx_table", "excel"}
+            and (block.source_ref.row_index is not None or block.source_ref.row_start is not None)
+            for block in source_evidence
+            if block.evidence_type == "table_row"
+        ),
+        "table_cells_available": "table_cell" in evidence_types,
+        "bullet_items_split": bool(list_items),
+        "visual_topology_evidence_available": "workflow_shape" in evidence_types or "connector" in evidence_types,
+    }
 
 
 def source_blocks_payload(filename: str, content_type: str, raw_text: str, blocks: list[dict[str, Any]], raw_context: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
@@ -5273,6 +6160,15 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
         hard_blockers.append("unreviewed_units")
     if any(metadata.get("source_ref_quality") == "page_only" and metadata.get("source_ref_acknowledged") is not True for metadata in metadata_items):
         hard_blockers.append("weak_source_refs_unacknowledged")
+    if any(metadata.get("source_grounding_status") == "failed" for metadata in metadata_items):
+        hard_blockers.append("source_grounding_failed")
+    if any(
+        metadata.get("source_ref_synthetic") is True
+        or metadata.get("source_ref_quality") == "synthetic_missing"
+        or any(is_synthetic_source_ref(ref) for ref in metadata.get("source_refs", []) if isinstance(ref, dict))
+        for metadata in metadata_items
+    ):
+        hard_blockers.append("synthetic_source_refs")
     hard_blockers.extend(policy_table_verification_blockers(metadata_items, document_type))
     if any(metadata.get("extraction_status") == "degraded" for metadata in metadata_items):
         hard_blockers.append("degraded_units_require_manual_curation")
@@ -5525,7 +6421,7 @@ def workflow_step_candidates(raw_text: str) -> list[str]:
     candidates = [line for line in blocks if re.match(r"^(\d+(?:\.\d+)*[.)]?|bước\s+\d+|buoc\s+\d+)", line, re.IGNORECASE)]
     if candidates:
         return candidates[:80]
-    return [block for block in blocks if contains_signal(block, ["lưu ý", "luu y", "script", "sla", "zt"])][:80]
+    return [block for block in blocks if contains_signal(block, [*warning_signals(), "script", "sla"])][:80]
 
 
 def preview_document_metadata(

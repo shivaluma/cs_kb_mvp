@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.domain_defaults import (
+    DEFAULT_DISPLAY_LABELS,
+    DEFAULT_KB_COLLECTIONS,
+    DEFAULT_RELATION_PATTERNS,
+    DEFAULT_RERANK_RULES,
+    DEFAULT_SHEET_MAPPING_RULES,
+    DEFAULT_TAXONOMY_GROUPS,
+    DEFAULT_TAXONOMY_TERMS,
+)
+
+
+VI_CONDITION_CONNECTORS: tuple[str, ...] = (
+    "nếu",
+    "neu",
+    "trường hợp",
+    "truong hop",
+    "đối với",
+    "doi voi",
+    "khi",
+    "when",
+    "if",
+)
+
+VI_ACTION_CONNECTORS: tuple[str, ...] = (
+    "thì",
+    "thi",
+    "cần",
+    "can",
+    "phải",
+    "phai",
+    "xử lý",
+    "xu ly",
+    "chuyển",
+    "chuyen",
+    "kiểm tra",
+    "kiem tra",
+    "gửi",
+    "gui",
+    "tạo",
+    "tao",
+    "thực hiện",
+    "thuc hien",
+    "không được",
+    "khong duoc",
+    "được phép",
+    "duoc phep",
+    "must",
+    "should",
+    "do not",
+)
+
+VI_INCOMPLETE_CONNECTORS: tuple[str, ...] = (
+    *VI_CONDITION_CONNECTORS,
+    "thì",
+    "thi",
+    "bao gồm",
+    "bao gom",
+    "và",
+    "va",
+    "hoặc",
+    "hoac",
+    "or",
+    "and",
+)
+
+VI_NOTE_MARKERS: tuple[str, ...] = (
+    "lưu ý",
+    "luu y",
+    "ghi chú",
+    "ghi chu",
+    "note",
+    "warning",
+    "cảnh báo",
+    "canh bao",
+)
+
+VI_INLINE_BULLET_STARTERS: tuple[str, ...] = (
+    "nếu",
+    "neu",
+    "kh",
+    "tx",
+    "cs",
+    "không",
+    "khong",
+    "chỉ",
+    "chi",
+    "trường hợp",
+    "truong hop",
+)
+
+DEFAULT_TEXT_PROCESSING_PROHIBITION_MARKERS: tuple[str, ...] = (
+    "tuyệt đối không",
+    "không chủ động cung cấp",
+    "quy trình xử lý nội bộ",
+    "chế tài",
+    "chấm lỗi",
+)
+
+DEFAULT_EXTRACTION_SIGNALS: tuple[dict[str, Any], ...] = (
+    {
+        "signal_key": "condition_connector",
+        "signal_type": "condition_signal",
+        "phrase": "nếu",
+        "risk_level": "",
+        "unit_type_hint": "decision_rule",
+        "metadata": {"grammar_fallback": True},
+        "priority": 10,
+    },
+    {
+        "signal_key": "condition_case",
+        "signal_type": "condition_signal",
+        "phrase": "trường hợp",
+        "risk_level": "",
+        "unit_type_hint": "decision_rule",
+        "metadata": {"grammar_fallback": True},
+        "priority": 20,
+    },
+    {
+        "signal_key": "condition_audience_scope",
+        "signal_type": "condition_signal",
+        "phrase": "đối với",
+        "risk_level": "",
+        "unit_type_hint": "policy_rule",
+        "metadata": {"grammar_fallback": True},
+        "priority": 30,
+    },
+    {
+        "signal_key": "required_action",
+        "signal_type": "action_signal",
+        "phrase": "bắt buộc",
+        "risk_level": "",
+        "unit_type_hint": "policy_rule",
+        "metadata": {},
+        "priority": 40,
+    },
+    {
+        "signal_key": "forbidden_action",
+        "signal_type": "action_signal",
+        "phrase": "không được",
+        "risk_level": "high",
+        "unit_type_hint": "compliance_rule",
+        "metadata": {},
+        "priority": 50,
+    },
+    {
+        "signal_key": "note_marker",
+        "signal_type": "warning_signal",
+        "phrase": "lưu ý",
+        "risk_level": "",
+        "unit_type_hint": "operational_note",
+        "metadata": {"grammar_fallback": True},
+        "priority": 60,
+    },
+    {
+        "signal_key": "do_not_disclose",
+        "signal_type": "risk_signal",
+        "phrase": "không cung cấp",
+        "risk_level": "high",
+        "unit_type_hint": "compliance_rule",
+        "metadata": {},
+        "priority": 70,
+    },
+    {
+        "signal_key": "do_not_proactively_disclose",
+        "signal_type": "risk_signal",
+        "phrase": "không chủ động cung cấp",
+        "risk_level": "critical",
+        "unit_type_hint": "compliance_rule",
+        "metadata": {},
+        "priority": 80,
+    },
+    {
+        "signal_key": "internal_process_disclosure",
+        "signal_type": "risk_signal",
+        "phrase": "quy trình xử lý nội bộ",
+        "risk_level": "critical",
+        "unit_type_hint": "security_note",
+        "metadata": {},
+        "priority": 90,
+    },
+    {
+        "signal_key": "qa_error",
+        "signal_type": "risk_signal",
+        "phrase": "QA chấm lỗi",
+        "risk_level": "high",
+        "unit_type_hint": "warning",
+        "metadata": {},
+        "priority": 100,
+    },
+    {
+        "signal_key": "zt",
+        "signal_type": "risk_signal",
+        "phrase": "ZT",
+        "risk_level": "high",
+        "unit_type_hint": "compliance_note",
+        "metadata": {},
+        "priority": 110,
+    },
+    {
+        "signal_key": "security",
+        "signal_type": "risk_signal",
+        "phrase": "bảo mật",
+        "risk_level": "high",
+        "unit_type_hint": "security_note",
+        "metadata": {},
+        "priority": 120,
+    },
+)
+

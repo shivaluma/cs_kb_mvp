@@ -243,6 +243,32 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertIn("Dòng nguồn đã được format", source_view["payload"]["markdown"])
         self.assertEqual(breakdown["payload"]["selected_flow"], "source_evidence_view")
 
+    def test_source_evidence_view_falls_back_to_local_markdown_when_formatter_is_empty(self) -> None:
+        ingestion.format_source_evidence_view = lambda **_kwargs: (
+            {},
+            ["openrouter_source_evidence_formatter_disabled"],
+            "openrouter_disabled",
+        )
+        ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_disabled"])
+
+        _raw, _digest, _chunks, warnings, enrichment = ingestion.prepare_document_version(
+            filename="Quy định nội dung phản hồi TX, KH.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=communication_guideline_docx_bytes(),
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        source_view = next(
+            artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_evidence_view"
+        )
+        payload = source_view["payload"]
+        self.assertEqual(payload["formatter"], "local_source_evidence_view")
+        self.assertEqual(payload["model"], "local/source-evidence-fallback")
+        self.assertGreater(len(payload["markdown"]), 0)
+        self.assertGreaterEqual(len(payload["sections"]), 1)
+        self.assertIn("Mẫu câu chào mở đầu", payload["markdown"])
+        self.assertIn("local_source_evidence_view_used", warnings)
+
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
         data = workbook_bytes(
@@ -299,6 +325,15 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertTrue(all(relation.get("source_url", "").startswith("https://") for chunk in related_rows for relation in chunk["metadata"]["related_documents"]))
         self.assertTrue(any(chunk["metadata"].get("hyperlinks") for chunk in related_rows))
         self.assertTrue(all("cell_text" in link for chunk in related_rows for link in chunk["metadata"].get("hyperlinks", [])))
+        source_evidence = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_evidence")
+        excel_cells = [
+            block for block in source_evidence["payload"]["preview_evidence"]
+            if block["evidence_type"] == "table_cell" and block["source_ref"]["source_type"] == "excel"
+        ]
+        self.assertTrue(excel_cells)
+        self.assertTrue(any(block["source_ref"].get("sheet") == "Quy trình xác minh từ 02072025" for block in excel_cells))
+        self.assertTrue(any(block["source_ref"].get("row_start") == 3 for block in excel_cells))
+        self.assertTrue(any(block["metadata"].get("hyperlinks") for block in source_evidence["payload"]["preview_evidence"]))
 
     def test_successful_ai_spreadsheet_structuring_keeps_related_document_units(self) -> None:
         def fake_rule_extractor(_filename: str, _raw_text: str):
@@ -452,6 +487,18 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         source_blocks = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_blocks")
         self.assertEqual(source_blocks["payload"]["source_ref_quality"], "table_row")
         self.assertTrue(any(block["type"] == "docx_table_row" for block in source_blocks["payload"]["preview_blocks"]))
+        source_evidence = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_evidence")
+        self.assertIn("table_row", source_evidence["payload"]["evidence_types"])
+        self.assertIn("table_cell", source_evidence["payload"]["evidence_types"])
+        table_evidence = [
+            block for block in source_evidence["payload"]["preview_evidence"]
+            if block["evidence_type"] == "table_row" and block["source_ref"]["source_type"] == "docx_table"
+        ]
+        self.assertTrue(table_evidence)
+        self.assertEqual(table_evidence[0]["section_path"], ["QUY ĐỊNH LÀM TRÒN SỐ TIỀN"])
+        self.assertTrue(source_evidence["payload"]["quality_checks"]["table_order_preserved"])
+        processor = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "processor_selection")
+        self.assertEqual(processor["payload"]["processor"], "policy_table")
         verification = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "verification_report")
         self.assertNotIn("missing_atomic_units", verification["payload"]["hard_blockers"])
         self.assertNotIn("degraded_units_require_manual_curation", verification["payload"]["hard_blockers"])
@@ -480,6 +527,16 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         )
         self.assertEqual(email_open_block["section_path"], ["Mẫu câu chào mở đầu, chào kết và cách xưng hô", "Đối với Email"])
         self.assertLess(raw.index("Open | Xin chào Quý khách hàng"), raw.index("IV. Kiểm soát chất lượng"))
+        source_evidence = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_evidence")
+        list_item_evidence = [
+            block for block in source_evidence["payload"]["preview_evidence"]
+            if block["evidence_type"] == "list_item"
+        ]
+        self.assertGreaterEqual(len(list_item_evidence), 4)
+        self.assertTrue(any("Đối với Call/Chat" in block["section_path"] for block in list_item_evidence))
+        processor = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "processor_selection")
+        self.assertEqual(processor["payload"]["processor"], "mixed_docx_policy")
+        self.assertEqual(processor["payload"]["mode"], "deterministic_parser_plus_ai_semantic_extraction")
 
         macro_table = next(chunk for chunk in chunks if chunk["metadata"].get("unit_type") == "macro_table")
         self.assertEqual(macro_table["metadata"]["section_path"], ["Mẫu câu chào mở đầu, chào kết và cách xưng hô", "Đối với Email"])
@@ -1199,6 +1256,53 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertTrue(all(chunk["metadata"]["extraction_status"] == "structured" for chunk in chunks))
         self.assertTrue(all(chunk["metadata"]["index_eligible"] is False for chunk in chunks))
         self.assertTrue(any(artifact["artifact_type"] == "ai_structured_payload" for artifact in enrichment["pipeline_artifacts"]))
+
+    def test_synthetic_source_refs_block_publish_and_review(self) -> None:
+        def fake_rule_extractor(_filename: str, _raw_text: str):
+            return (
+                [
+                    {
+                        "unit_type": "policy_rule",
+                        "title": "Rule without real source",
+                        "content": "Nếu có điều kiện A thì xử lý theo nguồn.",
+                        "confidence": 0.9,
+                        "metadata": {},
+                        "source_refs": [
+                            {
+                                "source_type": "docx",
+                                "source_file": "",
+                                "paragraph_index": 1,
+                                "source_ref_synthetic": True,
+                                "source_ref_quality": "synthetic_missing",
+                            }
+                        ],
+                    }
+                ],
+                [],
+            )
+
+        ingestion.extract_rule_table_units = fake_rule_extractor
+        data = docx_bytes(["Quy định xử lý", "Nếu có điều kiện A thì xử lý theo nguồn."])
+
+        _raw, _digest, chunks, warnings, enrichment = ingestion.prepare_document_version(
+            filename="policy.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=data,
+            metadata=DocumentMetadata(owner_team="CS Ops"),
+        )
+
+        self.assertTrue(enrichment["publish_blocked"])
+        self.assertEqual(enrichment["publish_blocked_reason"], "source_grounding_validation_failed")
+        self.assertIn("source_grounding_validation_failed", warnings)
+        self.assertTrue(all(chunk["metadata"]["publish_blocked"] for chunk in chunks))
+        self.assertTrue(all(chunk["metadata"]["review_status"] == "needs_review" for chunk in chunks))
+        grounding = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "source_grounding_validator")
+        self.assertEqual(grounding["status"], "failed")
+        self.assertGreaterEqual(grounding["payload"]["blocked_unit_count"], 1)
+        self.assertTrue(any(issue["reason"] == "source_ref_synthetic_missing" for issue in grounding["payload"]["issues"]))
+        verification = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "verification_report")
+        self.assertIn("source_grounding_failed", verification["payload"]["hard_blockers"])
+        self.assertIn("synthetic_source_refs", verification["payload"]["hard_blockers"])
 
 
 def docx_bytes(paragraphs: list[str]) -> bytes:

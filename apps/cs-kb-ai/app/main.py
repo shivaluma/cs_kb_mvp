@@ -130,45 +130,27 @@ def chat_model_routes() -> dict[str, Any]:
         "routes": [
             {
                 "route": "simple",
-                "label": "Gemini Flash Lite",
+                "label": "Simple",
                 "model": settings.openrouter_chat_simple_model,
                 "description": "Simple factual SOP Q&A.",
             },
             {
                 "route": "policy",
-                "label": "Kimi K2.5 Policy",
+                "label": "Policy",
                 "model": settings.openrouter_chat_policy_model,
                 "description": "Policy, decision, and exception Q&A.",
             },
             {
                 "route": "high_risk",
-                "label": "Kimi K2.5 High Risk",
+                "label": "High risk",
                 "model": settings.openrouter_chat_high_risk_model,
                 "description": "Refund, payment, account, privacy, ZT, and stricter citation-gated answers.",
             },
             {
                 "route": "complex",
-                "label": "Kimi K2.6 Complex",
+                "label": "Complex",
                 "model": settings.openrouter_chat_complex_model,
                 "description": "Multi-SOP synthesis and polished macro drafting from published sources.",
-            },
-            {
-                "route": "google/gemini-2.5-flash",
-                "label": "Gemini 2.5 Flash",
-                "model": settings.openrouter_chat_gemini_25_flash_model,
-                "description": "Manual model override for balanced speed and quality on grounded SOP chat.",
-            },
-            {
-                "route": "google/gemini-3-flash-preview",
-                "label": "Gemini 3 Flash Preview",
-                "model": settings.openrouter_chat_gemini_3_flash_model,
-                "description": "Manual model override for newer Gemini reasoning on multi-source SOP questions.",
-            },
-            {
-                "route": "anthropic/claude-3.5-haiku",
-                "label": "Claude 3.5 Haiku",
-                "model": settings.openrouter_chat_claude_35_haiku_model,
-                "description": "Manual model override for concise grounded answers and quick policy checks.",
             },
         ],
         "fallback_model": settings.openrouter_chat_fallback_model,
@@ -1066,6 +1048,11 @@ def create_chat_session_message(session_id: str, payload: ChatSessionMessageRequ
 @app.get("/ai/v1/search/taxonomy/intents")
 def list_taxonomy_intents(status: str = "active") -> list[dict[str, Any]]:
     return repository.list_taxonomy_intents(status)
+
+
+@app.get("/ai/v1/config/vietnamese/match")
+def vietnamese_config_match(text: str) -> dict[str, Any]:
+    return repository.vietnamese_config_match_preview(text)
 
 
 @app.get("/ai/v1/search/synonyms", response_model=list[SynonymGroup])

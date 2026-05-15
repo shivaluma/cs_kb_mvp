@@ -50,6 +50,8 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertIn("COALESCE(c.metadata->>'extraction_status', '') = ANY", where_sql)
         self.assertIn(["structured", "manually_curated"], params)
         self.assertIn("COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'", where_sql)
+        self.assertIn("COALESCE(c.metadata->>'source_ref_synthetic', 'false') <> 'true'", where_sql)
+        self.assertIn("COALESCE(c.metadata->>'source_ref_quality', '') <> 'synthetic_missing'", where_sql)
 
     def test_policy_table_requires_structured_table_or_sheet_refs(self) -> None:
         self.assertFalse(
@@ -61,13 +63,30 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertTrue(
             repository.has_required_source_ref(
                 "policy_table",
-                {"source_refs": [{"source_type": "docx_table", "table_index": 0, "row_index": 1, "column_names": ["Case", "Action"]}]},
+                {"source_refs": [{"source_type": "docx_table", "source_file": "rules.docx", "table_index": 0, "row_index": 1, "column_names": ["Case", "Action"]}]},
             )
         )
         self.assertTrue(
             repository.has_required_source_ref(
                 "policy_table",
-                {"source_refs": [{"source_type": "excel", "sheet": "Rules", "row_start": 2, "row_end": 2}]},
+                {"source_refs": [{"source_type": "excel", "source_file": "rules.xlsx", "sheet": "Rules", "row_start": 2, "row_end": 2}]},
+            )
+        )
+        self.assertFalse(
+            repository.has_required_source_ref(
+                "policy_table",
+                {
+                    "source_ref_quality": "synthetic_missing",
+                    "source_refs": [
+                        {
+                            "source_type": "excel",
+                            "sheet": "Rules",
+                            "row_start": 2,
+                            "row_end": 2,
+                            "source_ref_synthetic": True,
+                        }
+                    ],
+                },
             )
         )
 
