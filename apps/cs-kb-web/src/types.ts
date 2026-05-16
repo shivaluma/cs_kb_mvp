@@ -228,11 +228,19 @@ export type OpsAnalyticsMetric = {
   tone: "default" | "warning" | string;
 };
 
+export type OpsAnalyticsQuery = {
+  query: string;
+  count: number;
+  last_seen: string;
+};
+
 export type OpsAnalyticsResponse = {
   window_days: number;
   generated_at: string;
   events: Record<string, number>;
   metrics: OpsAnalyticsMetric[];
+  popular_queries?: OpsAnalyticsQuery[];
+  recent_queries?: OpsAnalyticsQuery[];
 };
 
 export type RetrievalResult = {

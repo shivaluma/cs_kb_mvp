@@ -12,6 +12,7 @@ import { StatusMessage } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useOpsAnalytics } from "@/hooks/api/kb-index";
 import {
 	Sidebar,
 	SidebarContent,
@@ -117,7 +118,6 @@ function MainSidebar({ workspace }: { workspace: Workspace }) {
 
 export function AppShell({
 	children,
-	documentCount,
 	error,
 	notice,
 	onCommandSearch,
@@ -126,11 +126,9 @@ export function AppShell({
 	onWorkspaceChange,
 	query,
 	setQuery,
-	synonymCount,
 	workspace,
 }: {
 	children: ReactNode;
-	documentCount: number;
 	error: string;
 	notice: string;
 	onCommandSearch: (query: string) => void;
@@ -139,16 +137,31 @@ export function AppShell({
 	onWorkspaceChange: (workspace: Workspace) => void;
 	query: string;
 	setQuery: (query: string) => void;
-	synonymCount: number;
 	workspace: Workspace;
 }) {
 	const current = navItems.find((item) => item.id === workspace) ?? navItems[0];
 	const [commandOpen, setCommandOpen] = useState(false);
 	const [darkMode, setDarkMode] = useState(getInitialDarkMode);
-	const quickQueries = useMemo(
-		() => ["gmai.com thì làm gì", "lỗi ZT email", "KH không nhận được email", "email sai định dạng khác"],
-		[],
-	);
+	const analyticsQuery = useOpsAnalytics(14);
+	const quickQueries = useMemo(() => {
+		const recent = (analyticsQuery.data?.recent_queries ?? []).map((item) => ({
+			label: item.query,
+			meta: "recent",
+		}));
+		const popular = (analyticsQuery.data?.popular_queries ?? []).map((item) => ({
+			label: item.query,
+			meta: `${item.count}x`,
+		}));
+		const seen = new Set<string>();
+		return [...recent, ...popular].filter((item) => {
+			const key = item.label.trim().toLowerCase();
+			if (!key || seen.has(key)) {
+				return false;
+			}
+			seen.add(key);
+			return true;
+		}).slice(0, 6);
+	}, [analyticsQuery.data]);
 
 	useEffect(() => {
 		const root = document.documentElement;
@@ -197,10 +210,7 @@ export function AppShell({
 							<div className="flex min-w-0 gap-3">
 								<SidebarTrigger className="mt-1 shrink-0" />
 								<div className="min-w-0">
-									<div className="text-xs text-muted-foreground">
-										CS Knowledge Base
-									</div>
-									<h1 className="mt-0.5 text-xl font-semibold tracking-tight">
+									<h1 className="text-xl font-semibold tracking-tight">
 										{current.label}
 									</h1>
 									<p className="mt-1 max-w-[72ch] text-sm text-muted-foreground">
@@ -210,8 +220,6 @@ export function AppShell({
 							</div>
 
 							<div className="flex flex-wrap items-center gap-2">
-								<Badge variant="outline">{documentCount} docs</Badge>
-								<Badge variant="outline">{synonymCount} synonym groups</Badge>
 								<div className="flex h-9 items-center gap-2 rounded-full border bg-background px-2.5">
 									<Sun
 										aria-hidden="true"
@@ -306,23 +314,28 @@ export function AppShell({
 						</div>
 						<div className="grid gap-4 p-4 md:grid-cols-[1fr_0.9fr]">
 							<section>
-								<div className="mb-2 text-xs font-medium text-muted-foreground">Quick searches</div>
+								<div className="mb-2 text-xs font-medium text-muted-foreground">Recent and popular</div>
 								<div className="space-y-1">
 									{quickQueries.map((item) => (
 										<button
 											className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-											key={item}
+											key={item.label}
 											onClick={() => {
-												setQuery(item);
-												onCommandSearch(item);
+												setQuery(item.label);
+												onCommandSearch(item.label);
 												setCommandOpen(false);
 											}}
 											type="button"
 										>
-											<span>{item}</span>
-											<Badge variant="outline">search</Badge>
+											<span>{item.label}</span>
+											<Badge variant="outline">{item.meta}</Badge>
 										</button>
 									))}
+									{quickQueries.length === 0 ? (
+										<div className="rounded-lg border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+											Search history appears after agents use Lookup.
+										</div>
+									) : null}
 								</div>
 							</section>
 							<section>

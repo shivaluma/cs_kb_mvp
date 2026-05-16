@@ -1268,11 +1268,19 @@ class OpsAnalyticsMetric(BaseModel):
     tone: str = "default"
 
 
+class OpsAnalyticsQuery(BaseModel):
+    query: str
+    count: int = 0
+    last_seen: datetime
+
+
 class OpsAnalyticsResponse(BaseModel):
     window_days: int
     generated_at: datetime
     events: dict[str, int] = Field(default_factory=dict)
     metrics: list[OpsAnalyticsMetric] = Field(default_factory=list)
+    popular_queries: list[OpsAnalyticsQuery] = Field(default_factory=list)
+    recent_queries: list[OpsAnalyticsQuery] = Field(default_factory=list)
 
 
 class RetrievalRequest(BaseModel):

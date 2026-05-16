@@ -8,6 +8,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SearchBar } from "@/components/search-bar";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyPanel, EmptyResults, FilterGrid } from "@/components/common";
 import type { FilterOption, FilterState, RetrievalResponse, RetrievalResult } from "@/types";
@@ -50,18 +51,17 @@ export function RetrievalWorkspace({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4 pt-4">
-            <div className="grid gap-2">
-              <label className="text-xs font-medium text-muted-foreground" htmlFor="retrieval-query">
-                Natural-language query
-              </label>
-              <textarea
-                className="min-h-28 rounded-xl border bg-background px-3 py-2 text-sm leading-6 shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-3 focus-visible:ring-ring/40"
-                id="retrieval-query"
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Ask a natural-language retrieval question"
-                value={query}
-              />
-            </div>
+            <SearchBar
+              actionLabel="Run"
+              className="lg:block"
+              id="retrieval-query"
+              loading={busy}
+              multiline
+              onChange={setQuery}
+              onSearch={onRetrieve}
+              placeholder="Ask a natural-language retrieval question"
+              value={query}
+            />
 
             <div className="grid gap-2">
               <div className="grid gap-1.5">
@@ -88,7 +88,7 @@ export function RetrievalWorkspace({
 
             <Button className="w-full justify-center" disabled={busy || !canRetrieve} onClick={onRetrieve} type="button">
               {busy ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Sparkles data-icon="inline-start" className="size-4" />}
-              Run grounded retrieval
+              Run query
             </Button>
           </CardContent>
         </Card>

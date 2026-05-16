@@ -36,6 +36,91 @@ export function KpiCard({
   );
 }
 
+export type StatItem = {
+  hint?: string;
+  key: string;
+  label: string;
+  statusLabel?: string;
+  tone?: "default" | "warning" | "danger";
+  value: number | string;
+};
+
+export function StatStrip({
+  className,
+  items,
+}: {
+  className?: string;
+  items: StatItem[];
+}) {
+  if (!items.length) {
+    return null;
+  }
+  return (
+    <dl
+      className={cn(
+        "flex flex-wrap items-baseline gap-x-8 gap-y-3 border-b pb-3",
+        className,
+      )}
+    >
+      {items.map((item) => (
+        <Stat
+          hint={item.hint}
+          key={item.key}
+          label={item.label}
+          statusLabel={item.statusLabel}
+          tone={item.tone}
+          value={item.value}
+        />
+      ))}
+    </dl>
+  );
+}
+
+export function Stat({
+  hint,
+  label,
+  statusLabel,
+  tone = "default",
+  value,
+}: {
+  hint?: string;
+  label: string;
+  statusLabel?: string;
+  tone?: "default" | "warning" | "danger";
+  value: number | string;
+}) {
+  const valueClass =
+    tone === "danger"
+      ? "text-destructive"
+      : tone === "warning"
+        ? "text-foreground"
+        : "text-foreground";
+  return (
+    <div className="min-w-[6rem]">
+      <dt className="text-xs font-medium text-muted-foreground">
+        {label}
+        {tone === "warning" || tone === "danger" ? (
+          <span
+            aria-label={statusLabel ?? (tone === "danger" ? "Needs immediate attention" : "Needs review")}
+            title={statusLabel ?? (tone === "danger" ? "Needs immediate attention" : "Needs review")}
+            className={cn(
+              "ms-1.5 inline-block size-1.5 rounded-full align-middle",
+              tone === "danger" ? "bg-destructive" : "bg-amber-500",
+            )}
+            role="img"
+          />
+        ) : null}
+      </dt>
+      <dd className={cn("mt-0.5 text-xl font-semibold tabular-nums leading-7", valueClass)}>
+        {value}
+      </dd>
+      {hint ? (
+        <p className="mt-0.5 text-[11px] text-muted-foreground">{hint}</p>
+      ) : null}
+    </div>
+  );
+}
+
 export function ActionItem({
   action,
   icon: Icon,

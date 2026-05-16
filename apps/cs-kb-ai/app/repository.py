@@ -3652,6 +3652,8 @@ def ops_analytics(window_days: int = 7) -> dict[str, Any]:
     search_events: dict[str, datetime] = {}
     useful_deltas_ms: list[float] = []
     feedback_counts: dict[str, int] = {}
+    query_counts: dict[str, int] = {}
+    query_last_seen: dict[str, datetime] = {}
     useful_actions = {"quick_answer_open", "action_template_copy", "macro_copy"}
     click_actions = {"search_result_click", "quick_answer_open", "full_sop_open", "action_template_copy", "macro_copy"}
     for row in audit_rows:
@@ -3665,6 +3667,10 @@ def ops_analytics(window_days: int = 7) -> dict[str, Any]:
             event_id = str(metadata.get("search_event_id") or "")
             if event_id:
                 search_events[event_id] = row["created_at"]
+            query = str(metadata.get("query") or "").strip()
+            if query:
+                query_counts[query] = query_counts.get(query, 0) + 1
+                query_last_seen[query] = row["created_at"]
         if action in click_actions:
             rank = metadata.get("rank")
             if isinstance(rank, (int, float)) and rank > 0:
@@ -3685,6 +3691,14 @@ def ops_analytics(window_days: int = 7) -> dict[str, Any]:
     median_time_ms = median_from_sorted(useful_sorted)
     quick_action_count = sum(action_counts.get(action, 0) for action in useful_actions)
     wrong_outdated = feedback_counts.get("wrong", 0) + feedback_counts.get("outdated", 0) + feedback_counts.get("search_result_wrong", 0)
+    popular_queries = [
+        {"query": query, "count": count, "last_seen": query_last_seen[query]}
+        for query, count in sorted(query_counts.items(), key=lambda item: (item[1], query_last_seen[item[0]], item[0]), reverse=True)[:6]
+    ]
+    recent_queries = [
+        {"query": query, "count": query_counts[query], "last_seen": last_seen}
+        for query, last_seen in sorted(query_last_seen.items(), key=lambda item: item[1], reverse=True)[:6]
+    ]
     events = {
         **action_counts,
         "retrieval_total": retrieval_total,
@@ -3695,6 +3709,8 @@ def ops_analytics(window_days: int = 7) -> dict[str, Any]:
         "window_days": window,
         "generated_at": datetime.now(timezone.utc),
         "events": events,
+        "popular_queries": popular_queries,
+        "recent_queries": recent_queries,
         "metrics": [
             {
                 "key": "median_time_to_useful_sop",

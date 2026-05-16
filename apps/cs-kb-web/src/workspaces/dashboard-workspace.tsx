@@ -1,29 +1,25 @@
 import {
   IconAlertTriangle as AlertTriangle,
   IconArrowRight as ArrowRight,
-  IconBook as BookOpen,
   IconCircleCheck as CheckCircle2,
   IconDatabase as Database,
   IconFileTime as FileClock,
   IconFileText as FileText,
-  IconGitPullRequest as GitPullRequest,
   IconDeviceDesktop as HardDrive,
   IconLayersIntersect as Layers3,
   IconMessageReport as MessageReport,
   IconRefresh as RefreshCw,
   IconSearch as Search,
   IconServer as Server,
-  IconShieldCheck as ShieldCheck,
-  IconSparkles as Sparkles,
   IconWand as WandSparkles
 } from "@tabler/icons-react";
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
-import { ActionItem, HealthPill, KpiCard } from "@/components/operations";
+import { ActionItem, HealthPill, StatStrip } from "@/components/operations";
+import { SearchBar } from "@/components/search-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatDate } from "@/lib/format";
 import type { DocumentSummary, FeedbackQueueItem, OpsAnalyticsResponse, ServiceHealth, SystemHealth } from "@/types";
@@ -75,49 +71,48 @@ export function DashboardWorkspace({
 
   return (
     <div className="space-y-4">
-      <Card className="rounded-xl">
-        <CardHeader className="border-b pb-4">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="secondary">Operational dashboard</Badge>
-                <Badge variant="outline">Live document state</Badge>
-              </div>
-              <CardTitle className="mt-3 text-2xl">SOP operations cockpit</CardTitle>
-              <CardDescription className="mt-2 max-w-[76ch] leading-6">
-                Action-first view for lookup health, content quality, extraction review, and governance risk.
-              </CardDescription>
-            </div>
-            <div className="flex w-full flex-col gap-2 sm:flex-row xl:max-w-xl">
-              <div className="relative min-w-0 flex-1">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  className="pl-8"
-                  onChange={(event) => setQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      runLookup();
-                    }
-                  }}
-                  placeholder="Search SOP, rule, macro, case reason..."
-                  value={query}
-                />
-              </div>
-              <Button onClick={runLookup} type="button">
-                Search
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="pt-4">
-          <div className="grid gap-3 md:grid-cols-4">
-            <KpiCard icon={GitPullRequest} label="Review queue" tone={reviewDocuments.length ? "warning" : "default"} value={reviewDocuments.length} />
-            <KpiCard icon={ShieldCheck} label="Published ready" value={publishedReadyDocuments.length} />
-            <KpiCard icon={AlertTriangle} label="High-risk docs" tone={highRiskDocuments.length ? "warning" : "default"} value={highRiskDocuments.length} />
-            <KpiCard icon={MessageReport} label="Feedback groups" tone={feedbackItems.length ? "warning" : "default"} value={feedbackItems.length} />
-          </div>
-        </CardContent>
-      </Card>
+      <SearchBar
+        actionLabel="Open lookup"
+        onChange={setQuery}
+        onSearch={runLookup}
+        placeholder="Search SOP, rule, macro, case reason..."
+        value={query}
+      />
+
+      <StatStrip
+        items={[
+          {
+            hint: "Drafts and unpublished changes",
+            key: "review",
+            label: "Review queue",
+            statusLabel: "Documents need review",
+            tone: reviewDocuments.length ? "warning" : "default",
+            value: reviewDocuments.length,
+          },
+          {
+            hint: "Approved and published",
+            key: "published",
+            label: "Published ready",
+            value: publishedReadyDocuments.length,
+          },
+          {
+            hint: "Compliance or policy risk",
+            key: "high-risk",
+            label: "High-risk docs",
+            statusLabel: "High-risk content exists",
+            tone: highRiskDocuments.length ? "warning" : "default",
+            value: highRiskDocuments.length,
+          },
+          {
+            hint: "User reports to triage",
+            key: "feedback",
+            label: "Feedback groups",
+            statusLabel: "Feedback needs triage",
+            tone: feedbackItems.length ? "warning" : "default",
+            value: feedbackItems.length,
+          },
+        ]}
+      />
 
       <Tabs className="space-y-4" defaultValue="review">
         <TabsList className="grid h-auto grid-cols-2 gap-1 md:inline-grid md:grid-cols-4">
@@ -186,12 +181,28 @@ function UsageSignals({
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(22rem,0.85fr)]">
       <section className="space-y-4">
-        <div className="grid gap-3 md:grid-cols-4">
-          <KpiCard icon={Search} label="SOP searches" value={eventCount("sop_search")} />
-          <KpiCard icon={Sparkles} label="Chat messages" value={eventCount("chat_message_sent")} />
-          <KpiCard icon={MessageReport} label="Feedback reports" tone={feedbackItems.length ? "warning" : "default"} value={feedbackItems.reduce((sum, item) => sum + item.count, 0)} />
-          <KpiCard icon={FileClock} label="Indexing issues" tone={indexingIssueDocuments.length ? "warning" : "default"} value={indexingIssueDocuments.length} />
-        </div>
+        <StatStrip
+          items={[
+            { hint: "Lookup runs", key: "searches", label: "SOP searches", value: eventCount("sop_search") },
+            { hint: "Grounded chat asks", key: "chat", label: "Chat messages", value: eventCount("chat_message_sent") },
+            {
+              hint: "All report counts",
+              key: "reports",
+              label: "Feedback reports",
+              statusLabel: "Feedback needs triage",
+              tone: feedbackItems.length ? "warning" : "default",
+              value: feedbackItems.reduce((sum, item) => sum + item.count, 0),
+            },
+            {
+              hint: "Index sync problems",
+              key: "indexing",
+              label: "Indexing issues",
+              statusLabel: "Published content has indexing issues",
+              tone: indexingIssueDocuments.length ? "warning" : "default",
+              value: indexingIssueDocuments.length,
+            },
+          ]}
+        />
 
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
@@ -317,21 +328,39 @@ function SystemHealthPanel({
               {health?.checked_at ? `Last checked ${formatDate(health.checked_at)}` : "Waiting for first check"}
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3 pt-4">
-            <KpiCard icon={CheckCircle2} label="Healthy" value={healthyCount} />
-            <KpiCard icon={AlertTriangle} label="Needs attention" tone={degradedCount + downCount > 0 ? "warning" : "default"} value={degradedCount + downCount} />
+          <CardContent className="pt-4">
+            <StatStrip
+              className="border-b-0 pb-0"
+              items={[
+                { key: "healthy", label: "Healthy", value: healthyCount },
+                {
+                  key: "attention",
+                  label: "Needs attention",
+                  statusLabel: "Service checks need attention",
+                  tone: degradedCount + downCount > 0 ? "warning" : "default",
+                  value: degradedCount + downCount,
+                },
+              ]}
+            />
           </CardContent>
         </Card>
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
             <CardTitle>Debug order</CardTitle>
-            <CardDescription>Use this order when a deployed page looks like a CORS failure.</CardDescription>
+            <CardDescription>Use this order when search, chat, or publish status looks stale.</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3 pt-4 text-sm leading-6 text-muted-foreground">
-            <p>1. API process and CORS headers.</p>
-            <p>2. API to AI internal URL.</p>
-            <p>3. AI to Postgres pgvector.</p>
-            <p>4. Meilisearch indexing and query health.</p>
+          <CardContent className="grid gap-2 pt-4 text-sm">
+            {[
+              "API health and CORS",
+              "API to AI service",
+              "AI Postgres and pgvector",
+              "Meilisearch index visibility",
+            ].map((item, index) => (
+              <div className="grid grid-cols-[1.75rem_minmax(0,1fr)] items-center gap-2 rounded-lg border bg-muted/15 px-2.5 py-2" key={item}>
+                <span className="text-xs font-semibold tabular-nums text-muted-foreground">{index + 1}</span>
+                <span>{item}</span>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </aside>
@@ -416,13 +445,36 @@ function ContentHealth({
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(22rem,0.8fr)]">
       <section className="space-y-4">
-        <div className="grid gap-3 md:grid-cols-5">
-          <KpiCard icon={BookOpen} label="Active SOP docs" value={activeDocuments.length} />
-          <KpiCard icon={ShieldCheck} label="High-risk" tone={highRiskDocuments.length ? "warning" : "default"} value={highRiskDocuments.length} />
-          <KpiCard icon={AlertTriangle} label="Overdue review" tone={overdueReviewDocuments.length ? "warning" : "default"} value={overdueReviewDocuments.length} />
-          <KpiCard icon={FileClock} label="Stale docs" tone={staleDocuments.length ? "warning" : "default"} value={staleDocuments.length} />
-          <KpiCard icon={CheckCircle2} label="Avg health" value={`${averageHealth(activeDocuments)}%`} />
-        </div>
+        <StatStrip
+          items={[
+            { hint: "Available to agents", key: "active", label: "Active SOPs", value: activeDocuments.length },
+            {
+              hint: "Extra review sensitivity",
+              key: "high-risk",
+              label: "High-risk",
+              statusLabel: "High-risk content exists",
+              tone: highRiskDocuments.length ? "warning" : "default",
+              value: highRiskDocuments.length,
+            },
+            {
+              hint: "Past next review date",
+              key: "overdue",
+              label: "Overdue review",
+              statusLabel: "High-risk review is overdue",
+              tone: overdueReviewDocuments.length ? "warning" : "default",
+              value: overdueReviewDocuments.length,
+            },
+            {
+              hint: "Updated over 60 days ago",
+              key: "stale",
+              label: "Stale docs",
+              statusLabel: "Documents are stale",
+              tone: staleDocuments.length ? "warning" : "default",
+              value: staleDocuments.length,
+            },
+            { hint: "Rule-based score", key: "avg", label: "Avg health", value: `${averageHealth(activeDocuments)}%` },
+          ]}
+        />
 
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
@@ -510,12 +562,35 @@ function ReviewQueue({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 md:grid-cols-4">
-        <KpiCard icon={FileText} label="Uploaded" value={documents.length} />
-        <KpiCard icon={Sparkles} label="Extracted" value={documents.filter((document) => document.latest_document_type && document.latest_document_type !== "unknown").length} />
-        <KpiCard icon={GitPullRequest} label="Need review" tone={reviewDocuments.length ? "warning" : "default"} value={reviewDocuments.length} />
-        <KpiCard icon={AlertTriangle} label="Failed/unknown" tone={failedExtractions.length ? "warning" : "default"} value={failedExtractions.length} />
-      </div>
+      <StatStrip
+        items={[
+          { hint: "All source documents", key: "uploaded", label: "Uploaded", value: documents.length },
+          {
+            hint: "Typed by extraction",
+            key: "extracted",
+            label: "Extracted",
+            value: documents.filter(
+              (document) => document.latest_document_type && document.latest_document_type !== "unknown",
+            ).length,
+          },
+          {
+            hint: "Not approved or unpublished",
+            key: "need-review",
+            label: "Need review",
+            statusLabel: "Documents need review",
+            tone: reviewDocuments.length ? "warning" : "default",
+            value: reviewDocuments.length,
+          },
+          {
+            hint: "Extraction needs repair",
+            key: "failed",
+            label: "Failed or unknown",
+            statusLabel: "Extraction has failed or unknown documents",
+            tone: failedExtractions.length ? "warning" : "default",
+            value: failedExtractions.length,
+          },
+        ]}
+      />
 
       <Card className="rounded-xl">
         <CardHeader className="border-b pb-4">

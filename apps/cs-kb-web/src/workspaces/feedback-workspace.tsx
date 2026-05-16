@@ -1,13 +1,10 @@
 import {
-  IconAlertTriangle as AlertTriangle,
   IconMessageReport as MessageReport,
-  IconRefresh as RefreshCw,
-  IconSearch as Search,
-  IconTrendingUp as TrendingUp
+  IconRefresh as RefreshCw
 } from "@tabler/icons-react";
 
 import { EmptyPanel } from "@/components/common";
-import { KpiCard } from "@/components/operations";
+import { StatStrip } from "@/components/operations";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,34 +28,51 @@ export function FeedbackWorkspace({
 
   return (
     <div className="space-y-4">
-      <Card className="rounded-xl">
-        <CardHeader className="border-b pb-4">
-          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="secondary">Feedback loop</Badge>
-                <Badge variant="outline">Last {analytics?.window_days ?? 7} days</Badge>
-              </div>
-              <CardTitle className="mt-3 text-2xl">CS Ops feedback queue</CardTitle>
-              <CardDescription className="mt-2 max-w-[76ch] leading-6">
-                Reports from quick answers, chat sources, macros, and search results. Agent suggestions stay as triage signals, never direct SOP edits.
-              </CardDescription>
-            </div>
-            <Button onClick={onRefresh} type="button" variant="outline">
-              <RefreshCw data-icon="inline-start" className="size-4" />
-              Refresh
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="pt-4">
-          <div className="grid gap-3 md:grid-cols-4">
-            <KpiCard icon={MessageReport} label="Open report groups" tone={feedbackItems.length ? "warning" : "default"} value={feedbackItems.length} />
-            <KpiCard icon={AlertTriangle} label="High severity" tone={highSeverity.length ? "warning" : "default"} value={highSeverity.length} />
-            <KpiCard icon={Search} label="Wrong/outdated" tone={Number(wrongOutdated?.value ?? 0) ? "warning" : "default"} value={wrongOutdated?.value ?? "0"} />
-            <KpiCard icon={TrendingUp} label="Action usage" value={northStar?.value ?? "0"} />
-          </div>
-        </CardContent>
-      </Card>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">Last {analytics?.window_days ?? 7} days</Badge>
+          <span className="text-sm text-muted-foreground">Triage repeated reports before they become SOP edits.</span>
+        </div>
+        <Button onClick={onRefresh} type="button" variant="outline">
+          <RefreshCw data-icon="inline-start" className="size-4" />
+          Refresh
+        </Button>
+      </div>
+
+      <StatStrip
+        items={[
+          {
+            hint: "Grouped repeat issues",
+            key: "open",
+            label: "Open report groups",
+            statusLabel: "Feedback groups need review",
+            tone: feedbackItems.length ? "warning" : "default",
+            value: feedbackItems.length,
+          },
+          {
+            hint: "Wrong, outdated, missing-step",
+            key: "high",
+            label: "High severity",
+            statusLabel: "High severity feedback needs immediate attention",
+            tone: highSeverity.length ? "danger" : "default",
+            value: highSeverity.length,
+          },
+          {
+            hint: "Policy trust issues",
+            key: "wrong",
+            label: "Wrong or outdated",
+            statusLabel: "Wrong or outdated reports need review",
+            tone: Number(wrongOutdated?.value ?? 0) ? "warning" : "default",
+            value: wrongOutdated?.value ?? "0",
+          },
+          {
+            hint: "Useful answer actions",
+            key: "action-usage",
+            label: "Action usage",
+            value: northStar?.value ?? "0",
+          },
+        ]}
+      />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(22rem,0.7fr)]">
         <Card className="rounded-xl">

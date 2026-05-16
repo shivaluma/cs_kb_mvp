@@ -15,10 +15,10 @@ import {
 
 import { OperationalFeedbackButtons } from "@/components/operational-feedback";
 import { EmptyPanel, FilterGrid, SectionTitle } from "@/components/common";
+import { SearchBar } from "@/components/search-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
@@ -136,52 +136,39 @@ export function CaseAssistWorkspace({
 
   return (
     <div className="space-y-4">
-      <Card className="rounded-xl">
-        <CardContent className="space-y-3 pt-4">
-          <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto]">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                className="h-10 pl-9"
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    onRunSearch();
-                  }
-                }}
-                placeholder="I have an issue: không áp dụng mã khuyến mãi, KH không nhớ email, TX gọi hotline..."
-                value={query}
-              />
-            </div>
-            <Button className="h-10 px-4" disabled={!normalizedQuery || loading} onClick={onRunSearch} type="button">
-              <Search data-icon="inline-start" className="size-4" />
-              Search issue
-            </Button>
+      <div className="space-y-3">
+        <SearchBar
+          actionLabel="Search issue"
+          className="xl:grid-cols-[minmax(0,1fr)_auto]"
+          loading={loading}
+          onChange={setQuery}
+          onSearch={onRunSearch}
+          placeholder="Describe the issue, case reason, customer wording, queue, or policy signal"
+          value={query}
+        />
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px]">
+          <FilterGrid
+            collectionOptions={collectionOptions}
+            filterOptions={{ ...dynamicFilterOptions, contentType: [{ label: "All approved content", value: "all" }] }}
+            filters={filters}
+            onUpdateFilter={onUpdateFilter}
+          />
+          <div className="grid gap-1.5">
+            <label className="text-xs font-medium text-muted-foreground">Risk</label>
+            <Select onValueChange={setRiskLevel} value={riskLevel}>
+              <SelectTrigger>
+                <SelectValue placeholder="Risk" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All risk</SelectItem>
+                <SelectItem value="high">High</SelectItem>
+                <SelectItem value="medium">Medium</SelectItem>
+                <SelectItem value="low">Low</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-          <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px]">
-            <FilterGrid
-              collectionOptions={collectionOptions}
-              filterOptions={{ ...dynamicFilterOptions, contentType: [{ label: "All approved content", value: "all" }] }}
-              filters={filters}
-              onUpdateFilter={onUpdateFilter}
-            />
-            <div className="grid gap-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Risk</label>
-              <Select onValueChange={setRiskLevel} value={riskLevel}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Risk" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All risk</SelectItem>
-                  <SelectItem value="high">High</SelectItem>
-                  <SelectItem value="medium">Medium</SelectItem>
-                  <SelectItem value="low">Low</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(23rem,0.82fr)_minmax(36rem,1.18fr)]">
         <Card className="min-w-0 rounded-xl">

@@ -108,17 +108,11 @@ export function RelationsWorkspace({
       />
       <Card className="rounded-xl">
         <CardHeader className="border-b pb-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="secondary">AI gated</Badge>
-                <Badge variant={unresolvedCount ? "destructive" : "outline"}>{unresolvedCount} unresolved</Badge>
-                <Badge variant={suggestedCount ? "secondary" : "outline"}>{suggestedCount} suggested</Badge>
-              </div>
-              <CardTitle className="mt-3">Relations Review</CardTitle>
-              <CardDescription className="mt-2 max-w-[72ch] leading-6">
-                Review extracted SOP dependencies. Search and chat expansion only use relations approved here.
-              </CardDescription>
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle className="me-2 text-base">Relation queue</CardTitle>
+              <Badge variant={unresolvedCount ? "destructive" : "outline"}>{unresolvedCount} unresolved</Badge>
+              <Badge variant={suggestedCount ? "secondary" : "outline"}>{suggestedCount} suggested</Badge>
             </div>
             <div className="flex flex-wrap gap-2">
               <Select onValueChange={(value) => onSetStatus(value as RelationStatus | "all")} value={status || "unresolved"}>

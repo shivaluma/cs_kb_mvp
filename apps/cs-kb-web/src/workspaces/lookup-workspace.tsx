@@ -3,7 +3,6 @@ import {
   IconCopy as Copy,
   IconFileTime as FileClock,
   IconFileText as FileText,
-  IconLoader2 as Loader2,
   IconSearch as Search,
   IconShieldCheck as ShieldCheck,
   IconSparkles as Sparkles
@@ -12,7 +11,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { SearchBar } from "@/components/search-bar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -102,39 +101,23 @@ export function LookupWorkspace({
 
   return (
     <div className="space-y-4">
-      <Card className="rounded-xl">
-        <CardContent className="pt-4">
-          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
-            <div className="relative min-w-0">
-              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                className="h-10 pl-9"
-                id="sop-search"
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    onRunSearch();
-                  }
-                }}
-                placeholder="Search SOP, case reason, policy keyword, or natural language question"
-                value={query}
-              />
-            </div>
-            <Button className="h-10 px-4" disabled={loading || !canSearch} onClick={onRunSearch} type="button">
-              {loading ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Search data-icon="inline-start" className="size-4" />}
-              Search
-            </Button>
-          </div>
-          <div className="mt-3">
-            <FilterGrid
-              collectionOptions={collectionOptions}
-              filterOptions={dynamicFilterOptions}
-              filters={filters}
-              onUpdateFilter={onUpdateFilter}
-            />
-          </div>
-        </CardContent>
-      </Card>
+      <div className="space-y-3">
+        <SearchBar
+          actionLabel="Search"
+          id="sop-search"
+          loading={loading}
+          onChange={setQuery}
+          onSearch={onRunSearch}
+          placeholder="Search SOP, case reason, policy keyword, or natural language question"
+          value={query}
+        />
+        <FilterGrid
+          collectionOptions={collectionOptions}
+          filterOptions={dynamicFilterOptions}
+          filters={filters}
+          onUpdateFilter={onUpdateFilter}
+        />
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(22rem,0.72fr)_minmax(34rem,1.28fr)]">
         <section className="min-w-0">
@@ -354,38 +337,38 @@ function DocumentMatchButton({
         selected && "border-primary bg-primary/5",
       )}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-2">
         <h3 className="min-w-0 text-sm font-semibold leading-5">{match.heading || match.title}</h3>
-        <Badge variant="outline">doc v{match.version_number}</Badge>
+        <Badge className="shrink-0" variant="outline">v{match.version_number}</Badge>
       </div>
       <p className="mt-1 truncate text-xs text-muted-foreground">From: {match.title}</p>
-      <p className="mt-2 line-clamp-3 text-sm leading-5 text-muted-foreground">{match.content}</p>
+      <p className="mt-1 line-clamp-2 text-sm leading-5 text-muted-foreground">{match.content}</p>
       {facts.length > 0 ? (
-        <div className="mt-3 grid gap-1.5 rounded-lg border bg-muted/20 p-2">
+        <div className="mt-2 grid gap-x-3 gap-y-1 rounded-md bg-muted/25 px-2 py-1.5 md:grid-cols-2">
           {facts.map((fact) => (
-            <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2 text-[11px]" key={fact.label}>
+            <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-1 text-[11px]" key={fact.label}>
               <span className="text-muted-foreground">{fact.label}</span>
               <span className="truncate font-medium">{fact.value}</span>
             </div>
           ))}
         </div>
       ) : null}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{isDocumentLayer ? "Full SOP" : "Quick answer"}</Badge>
         <Badge variant="secondary">{unitType}</Badge>
         <Badge variant="outline">{String(match.metadata.review_status ?? "approved")}</Badge>
         <Badge variant="outline">{match.rank_source.join(" + ")}</Badge>
       </div>
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="mt-2 flex flex-wrap gap-1.5">
         <Button className="h-7 px-2" onClick={onClick} size="sm" type="button" variant="outline">
-          Open quick answer
+          Quick answer
         </Button>
         <Button className="h-7 px-2" onClick={onOpenFullSop} size="sm" type="button" variant="outline">
-          Open full SOP
+          Full SOP
         </Button>
         <Button className="h-7 px-2" onClick={onCopyAnswer} size="sm" type="button" variant="ghost">
           <Copy data-icon="inline-start" className="size-3.5" />
-          Copy answer
+          Copy
         </Button>
       </div>
     </article>

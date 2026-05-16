@@ -1,14 +1,13 @@
 import {
   IconExternalLink as ExternalLink,
   IconLink as Link2,
-  IconSearch as Search,
   IconTool as Wrench
 } from "@tabler/icons-react";
 
+import { SearchBar } from "@/components/search-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { KBCollectionSummary, ToolLinkSummary } from "@/types";
 
@@ -34,15 +33,12 @@ export function ToolsWorkspace({
   return (
     <div className="space-y-5">
       <div className="grid gap-3 lg:grid-cols-[1fr_260px]">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-3 size-4 text-muted-foreground" />
-          <Input
-            className="pl-9"
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search tool, form, dashboard, owner, or system..."
-            value={query}
-          />
-        </div>
+        <SearchBar
+          className="lg:block"
+          onChange={setQuery}
+          placeholder="Search tool, form, dashboard, owner, or system..."
+          value={query}
+        />
         <Select onValueChange={(value) => setCollection(value === "all" ? "" : value)} value={collection || "all"}>
           <SelectTrigger>
             <SelectValue placeholder="Collection" />
@@ -57,45 +53,57 @@ export function ToolsWorkspace({
           </SelectContent>
         </Select>
       </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
+        <span>{tools.length} approved tool{tools.length === 1 ? "" : "s"} match this view.</span>
+        <span>Open links are tracked for source-unit usage.</span>
+      </div>
 
       {loading ? <Card><CardContent className="p-6 text-sm text-muted-foreground">Loading tools...</CardContent></Card> : null}
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {tools.map((tool) => (
-          <Card key={tool.id}>
-            <CardHeader className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <Badge variant="secondary">{tool.tool_type}</Badge>
-                <Wrench className="size-4 text-muted-foreground" />
+      <div className="overflow-x-auto rounded-xl border bg-card">
+        <div className="grid min-w-[48rem] grid-cols-[minmax(13rem,1.2fr)_8rem_minmax(10rem,0.8fr)_7rem_7rem] gap-3 border-b bg-muted/35 px-3 py-2 text-xs font-medium text-muted-foreground">
+          <span>Tool</span>
+          <span>Type</span>
+          <span>Owner</span>
+          <span>Sources</span>
+          <span className="text-right">Action</span>
+        </div>
+        <div className="min-w-[48rem] divide-y">
+          {tools.map((tool) => (
+            <div className="grid grid-cols-[minmax(13rem,1.2fr)_8rem_minmax(10rem,0.8fr)_7rem_7rem] items-center gap-3 px-3 py-2.5 text-sm" key={tool.id}>
+              <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Wrench className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate font-medium">{tool.name}</span>
+                </div>
+                <p className="mt-0.5 truncate text-xs text-muted-foreground">{tool.description || "No description yet."}</p>
               </div>
-              <CardTitle className="text-base">{tool.name}</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4 text-sm">
-              <p className="line-clamp-3 text-muted-foreground">{tool.description || "No description yet."}</p>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Badge className="w-fit" variant="secondary">{tool.tool_type}</Badge>
+              <span className="truncate text-muted-foreground">{tool.owner_team || "Unassigned"}</span>
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Link2 className="size-3.5" />
-                <span>{tool.used_by.length} linked source units</span>
+                {tool.used_by.length}
+              </span>
+              <div className="flex justify-end">
+                {tool.url ? (
+                  <Button asChild className="h-8 px-2" size="sm" onClick={() => onOpenTool(tool)} variant="outline">
+                    <a href={tool.url} rel="noreferrer" target="_blank">
+                      <ExternalLink data-icon="inline-start" className="size-3.5" />
+                      Open
+                    </a>
+                  </Button>
+                ) : (
+                  <Button className="h-8 px-2" disabled size="sm" variant="outline">
+                    Missing URL
+                  </Button>
+                )}
               </div>
-              {tool.url ? (
-                <Button asChild size="sm" onClick={() => onOpenTool(tool)}>
-                  <a href={tool.url} rel="noreferrer" target="_blank">
-                    <ExternalLink className="mr-2 size-4" />
-                    Open tool
-                  </a>
-                </Button>
-              ) : (
-                <Button disabled size="sm" variant="outline">
-                  Missing URL
-                </Button>
-              )}
-            </CardContent>
-          </Card>
-        ))}
+            </div>
+          ))}
+          {!loading && tools.length === 0 ? (
+            <div className="px-3 py-6 text-sm text-muted-foreground">No approved tools match this view.</div>
+          ) : null}
+        </div>
       </div>
-      {!loading && tools.length === 0 ? (
-        <Card>
-          <CardContent className="p-6 text-sm text-muted-foreground">No approved tools match this view.</CardContent>
-        </Card>
-      ) : null}
     </div>
   );
 }
