@@ -136,6 +136,7 @@ export function DocumentsWorkspace({
   savingUnitId,
   setSelectedDocument,
   setUpload,
+  surface = "review",
   upload,
   versionRaw,
   versionRawLoading,
@@ -171,6 +172,7 @@ export function DocumentsWorkspace({
   selectedChunkVersionId: string;
   setSelectedDocument: (document: DocumentSummary) => void;
   setUpload: Dispatch<SetStateAction<UploadState>>;
+  surface?: "queue" | "review" | "upload";
   onUpdateExtractionUnit: (unit: ExtractionUnit, update: ExtractionUnitUpdate) => void;
   savingUnitId: string;
   upload: UploadState;
@@ -455,15 +457,34 @@ export function DocumentsWorkspace({
     onFileSelected(file);
   }
 
+  const isReviewSurface = surface === "review";
+
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]">
-      <aside className="space-y-4 xl:sticky xl:top-4 xl:self-start">
+    <div
+      className={cn(
+        "grid gap-4",
+        isReviewSurface ? "mx-auto max-w-7xl" : surface === "upload" ? "mx-auto max-w-2xl" : "mx-auto max-w-5xl",
+      )}
+    >
+      {!isReviewSurface ? (
+      <aside className="space-y-4">
+        {surface !== "queue" ? (
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
-            <CardTitle>New source</CardTitle>
-            <CardDescription>Upload as draft. Review and publish happen after extraction.</CardDescription>
+            <div>
+              <CardTitle>New source</CardTitle>
+              <CardDescription>Step 1 of 3: upload as draft. Review and publish happen after extraction.</CardDescription>
+            </div>
           </CardHeader>
-          <CardContent className="space-y-4 pt-4">
+          <CardContent className="flex flex-col gap-4 pt-4">
+            <StepRail
+              current="upload"
+              steps={[
+                { key: "upload", label: "Upload" },
+                { key: "queue", label: "Queue" },
+                { key: "review", label: "Review" },
+              ]}
+            />
             <div className="grid grid-cols-2 gap-2 rounded-lg border bg-muted/15 p-1">
               <Button
                 onClick={() => setSourceMode("file")}
@@ -605,121 +626,125 @@ export function DocumentsWorkspace({
             ) : null}
 
             <Field label="Title" value={upload.title} onChange={(title) => setUpload((current) => ({ ...current, title }))} placeholder="Quy định xác minh tài khoản" />
-            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
-              <Field label="Vertical" value={upload.vertical} onChange={(vertical) => setUpload((current) => ({ ...current, vertical }))} />
-              <Field label="Audience" value={upload.audience} onChange={(audience) => setUpload((current) => ({ ...current, audience }))} placeholder="customer, driver" />
-              <Field label="Category" value={upload.category} onChange={(category) => setUpload((current) => ({ ...current, category }))} />
-              <Field label="Owner team" value={upload.ownerTeam} onChange={(ownerTeam) => setUpload((current) => ({ ...current, ownerTeam }))} />
-            </div>
-            <div className="rounded-lg border bg-muted/20 p-3">
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <div className="text-xs font-semibold text-foreground">Primary collection</div>
-                  <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
-                    AI can suggest, but only approved/manual selection is used by Lookup and Chat.
-                  </p>
+            <details className="order-20 rounded-lg border bg-muted/10 p-3">
+              <summary className="cursor-pointer text-sm font-medium">Optional metadata</summary>
+              <div className="mt-3 space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
+                  <Field label="Vertical" value={upload.vertical} onChange={(vertical) => setUpload((current) => ({ ...current, vertical }))} />
+                  <Field label="Audience" value={upload.audience} onChange={(audience) => setUpload((current) => ({ ...current, audience }))} placeholder="customer, driver" />
+                  <Field label="Category" value={upload.category} onChange={(category) => setUpload((current) => ({ ...current, category }))} />
+                  <Field label="Owner team" value={upload.ownerTeam} onChange={(ownerTeam) => setUpload((current) => ({ ...current, ownerTeam }))} />
                 </div>
-                <Badge variant={upload.collectionAssignmentStatus === "approved" ? "secondary" : "outline"}>
-                  {upload.collectionAssignmentStatus === "approved" ? "approved" : upload.collectionAssignmentStatus === "suggested" ? "AI suggested" : "optional"}
-                </Badge>
-              </div>
-              <Select
-                onValueChange={(value) => {
-                  if (value === "none") {
-                    setUpload((current) => ({
-                      ...current,
-                      collectionSlug: "",
-                      collectionName: "",
-                      collectionType: "",
-                      collectionAssignmentStatus: "unassigned",
-                      collectionSource: "manual",
-                      collectionConfidence: 0,
-                    }));
-                    return;
-                  }
-                  const collection = collections.find((item) => item.slug === value);
-                  setUpload((current) => ({
-                    ...current,
-                    collectionSlug: collection?.slug ?? value,
-                    collectionName: collection?.name ?? value,
-                    collectionType: collection?.collection_type ?? "domain",
-                    collectionAssignmentStatus: "approved",
-                    collectionSource: "manual",
-                    collectionConfidence: 1,
-                  }));
-                }}
-                value={upload.collectionSlug || "none"}
-              >
-                <SelectTrigger className="h-9 rounded-full bg-background">
-                  <SelectValue placeholder="No collection" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No collection yet</SelectItem>
-                  {collections.map((collection) => (
-                    <SelectItem key={collection.id} value={collection.slug}>
-                      {collection.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {upload.suggestedCollectionSlug ? (
-                <div className="mt-2 rounded-lg border bg-background px-3 py-2 text-xs leading-5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-muted-foreground">
-                      AI suggested: <span className="font-semibold text-foreground">{suggestedUploadCollection?.name ?? upload.suggestedCollectionName ?? upload.suggestedCollectionSlug}</span>
-                      {upload.suggestedCollectionConfidence ? ` · ${Math.round(upload.suggestedCollectionConfidence * 100)}%` : ""}
-                    </span>
-                    <Button
-                      className="h-7 rounded-full px-2"
-                      onClick={() => {
-                        const collection = suggestedUploadCollection;
+                <div className="rounded-lg border bg-background p-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-semibold text-foreground">Primary collection</div>
+                      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                        AI can suggest, but only approved/manual selection is used by Lookup and Chat.
+                      </p>
+                    </div>
+                    <Badge variant={upload.collectionAssignmentStatus === "approved" ? "secondary" : "outline"}>
+                      {upload.collectionAssignmentStatus === "approved" ? "approved" : upload.collectionAssignmentStatus === "suggested" ? "AI suggested" : "optional"}
+                    </Badge>
+                  </div>
+                  <Select
+                    onValueChange={(value) => {
+                      if (value === "none") {
                         setUpload((current) => ({
                           ...current,
-                          collectionSlug: collection?.slug ?? current.suggestedCollectionSlug,
-                          collectionName: collection?.name ?? current.suggestedCollectionName,
-                          collectionType: collection?.collection_type ?? current.suggestedCollectionType,
-                          collectionAssignmentStatus: "approved",
-                          collectionSource: "ai_suggestion_approved",
-                          collectionConfidence: current.suggestedCollectionConfidence || 0.7,
+                          collectionSlug: "",
+                          collectionName: "",
+                          collectionType: "",
+                          collectionAssignmentStatus: "unassigned",
+                          collectionSource: "manual",
+                          collectionConfidence: 0,
                         }));
-                      }}
-                      size="sm"
-                      type="button"
-                      variant="secondary"
-                    >
-                      Approve suggestion
-                    </Button>
+                        return;
+                      }
+                      const collection = collections.find((item) => item.slug === value);
+                      setUpload((current) => ({
+                        ...current,
+                        collectionSlug: collection?.slug ?? value,
+                        collectionName: collection?.name ?? value,
+                        collectionType: collection?.collection_type ?? "domain",
+                        collectionAssignmentStatus: "approved",
+                        collectionSource: "manual",
+                        collectionConfidence: 1,
+                      }));
+                    }}
+                    value={upload.collectionSlug || "none"}
+                  >
+                    <SelectTrigger className="h-9 rounded-full bg-background">
+                      <SelectValue placeholder="No collection" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No collection yet</SelectItem>
+                      {collections.map((collection) => (
+                        <SelectItem key={collection.id} value={collection.slug}>
+                          {collection.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {upload.suggestedCollectionSlug ? (
+                    <div className="mt-2 rounded-lg border bg-background px-3 py-2 text-xs leading-5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-muted-foreground">
+                          AI suggested: <span className="font-semibold text-foreground">{suggestedUploadCollection?.name ?? upload.suggestedCollectionName ?? upload.suggestedCollectionSlug}</span>
+                          {upload.suggestedCollectionConfidence ? ` · ${Math.round(upload.suggestedCollectionConfidence * 100)}%` : ""}
+                        </span>
+                        <Button
+                          className="h-7 rounded-full px-2"
+                          onClick={() => {
+                            const collection = suggestedUploadCollection;
+                            setUpload((current) => ({
+                              ...current,
+                              collectionSlug: collection?.slug ?? current.suggestedCollectionSlug,
+                              collectionName: collection?.name ?? current.suggestedCollectionName,
+                              collectionType: collection?.collection_type ?? current.suggestedCollectionType,
+                              collectionAssignmentStatus: "approved",
+                              collectionSource: "ai_suggestion_approved",
+                              collectionConfidence: current.suggestedCollectionConfidence || 0.7,
+                            }));
+                          }}
+                          size="sm"
+                          type="button"
+                          variant="secondary"
+                        >
+                          Approve suggestion
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="rounded-lg border bg-background p-3">
+                  <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-foreground">
+                    <ShieldCheck className="size-4" />
+                    Owner review SLA
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
+                    <GovernanceSelect
+                      label="Risk level"
+                      onChange={(riskLevel) => setUpload((current) => ({ ...current, riskLevel }))}
+                      options={["low", "medium", "high", "critical"]}
+                      placeholder="Unset risk"
+                      value={upload.riskLevel}
+                    />
+                    <GovernanceSelect
+                      label="Review frequency"
+                      onChange={(reviewFrequency) => setUpload((current) => ({ ...current, reviewFrequency }))}
+                      options={["quarterly", "semiannual", "annual"]}
+                      placeholder="Unset frequency"
+                      value={upload.reviewFrequency}
+                    />
+                    <Field label="Last reviewed" value={upload.lastReviewedAt} onChange={(lastReviewedAt) => setUpload((current) => ({ ...current, lastReviewedAt }))} placeholder="YYYY-MM-DD" />
+                    <Field label="Next review due" value={upload.nextReviewDue} onChange={(nextReviewDue) => setUpload((current) => ({ ...current, nextReviewDue }))} placeholder="YYYY-MM-DD" />
                   </div>
                 </div>
-              ) : null}
-            </div>
-            <div className="rounded-lg border bg-muted/20 p-3">
-              <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-foreground">
-                <ShieldCheck className="size-4" />
-                Owner review SLA
+                <Field label="Tags" value={upload.tags} onChange={(tags) => setUpload((current) => ({ ...current, tags }))} />
+                <Field label="Case reasons" value={upload.caseReasons} onChange={(caseReasons) => setUpload((current) => ({ ...current, caseReasons }))} />
               </div>
-              <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
-                <GovernanceSelect
-                  label="Risk level"
-                  onChange={(riskLevel) => setUpload((current) => ({ ...current, riskLevel }))}
-                  options={["low", "medium", "high", "critical"]}
-                  placeholder="Unset risk"
-                  value={upload.riskLevel}
-                />
-                <GovernanceSelect
-                  label="Review frequency"
-                  onChange={(reviewFrequency) => setUpload((current) => ({ ...current, reviewFrequency }))}
-                  options={["quarterly", "semiannual", "annual"]}
-                  placeholder="Unset frequency"
-                  value={upload.reviewFrequency}
-                />
-                <Field label="Last reviewed" value={upload.lastReviewedAt} onChange={(lastReviewedAt) => setUpload((current) => ({ ...current, lastReviewedAt }))} placeholder="YYYY-MM-DD" />
-                <Field label="Next review due" value={upload.nextReviewDue} onChange={(nextReviewDue) => setUpload((current) => ({ ...current, nextReviewDue }))} placeholder="YYYY-MM-DD" />
-              </div>
-            </div>
-            <Field label="Tags" value={upload.tags} onChange={(tags) => setUpload((current) => ({ ...current, tags }))} />
-            <Field label="Case reasons" value={upload.caseReasons} onChange={(caseReasons) => setUpload((current) => ({ ...current, caseReasons }))} />
-
+            </details>
             <label className="flex items-start gap-3 rounded-lg border bg-muted/20 p-3 text-xs leading-5">
               <input
                 checked={upload.asyncExtraction}
@@ -748,31 +773,45 @@ export function DocumentsWorkspace({
               </div>
             ) : null}
 
+            <p className="text-xs leading-5 text-muted-foreground">
+              Draft extraction stays out of Lookup and AI answers until a reviewer publishes the version.
+            </p>
             <Button className="w-full justify-center" disabled={busyKey === "upload" || busyKey === "metadata-preview" || !uploadReady} onClick={onUpload} type="button">
               {busyKey === "upload" ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Upload data-icon="inline-start" className="size-4" />}
               Upload draft
             </Button>
-            <div className="rounded-lg border bg-muted/25 p-3 text-xs leading-5 text-muted-foreground">
-              <div className="mb-1 flex items-center gap-2 font-medium text-foreground">
-                <ShieldCheck className="size-4" />
-                Curation gate
-              </div>
-              Draft extraction is editable. Lookup and AI answers only use published versions.
-            </div>
+            <Button asChild className="w-full justify-center" type="button" variant="outline">
+              <a href={workspacePaths.documentQueue}>Go to source queue</a>
+            </Button>
           </CardContent>
         </Card>
+        ) : null}
 
+        {surface !== "upload" ? (
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
             <div className="flex items-start justify-between gap-2">
               <div>
                 <CardTitle>Source queue</CardTitle>
-                <CardDescription>{activeDocuments.length} active, {archivedDocuments.length} archived</CardDescription>
+                <CardDescription>Step 2 of 3: choose a source to review. {activeDocuments.length} active, {archivedDocuments.length} archived.</CardDescription>
               </div>
-              <Button onClick={onRefreshDocuments} size="icon" type="button" variant="ghost">
-                <RefreshCw className="size-4" />
-              </Button>
+              <div className="flex items-center gap-1">
+                <Button asChild size="sm" type="button" variant="outline">
+                  <a href={workspacePaths.documentUpload}>Upload</a>
+                </Button>
+                <Button onClick={onRefreshDocuments} size="icon" type="button" variant="ghost">
+                  <RefreshCw className="size-4" />
+                </Button>
+              </div>
             </div>
+            <StepRail
+              current="queue"
+              steps={[
+                { key: "upload", label: "Upload" },
+                { key: "queue", label: "Queue" },
+                { key: "review", label: "Review" },
+              ]}
+            />
             <div className="mt-3 grid grid-cols-3 gap-1 rounded-lg border bg-muted/15 p-1">
               {(["active", "archived", "all"] as const).map((filter) => (
                 <Button
@@ -813,6 +852,14 @@ export function DocumentsWorkspace({
                         setSelectedDocument(document);
                         onInspectVersion(document.latest_version_id ?? "");
                         onSelectDocument(document.document_id);
+                        if (surface === "queue") {
+                          const params = new URLSearchParams();
+                          params.set("document", document.document_id);
+                          if (document.latest_version_id) {
+                            params.set("version", document.latest_version_id);
+                          }
+                          window.location.href = `${workspacePaths.documents}?${params.toString()}`;
+                        }
                       }}
                       type="button"
                     >
@@ -837,8 +884,11 @@ export function DocumentsWorkspace({
             </ScrollArea>
           </CardContent>
         </Card>
+        ) : null}
       </aside>
+      ) : null}
 
+      {isReviewSurface ? (
       <section className="min-w-0 space-y-4">
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
@@ -849,25 +899,42 @@ export function DocumentsWorkspace({
                   {selectedDocument?.source_filename ?? "Choose from the source queue to review versions, extraction units, and indexed chunks."}
                 </CardDescription>
               </div>
-              {selectedDocument ? (
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant={selectedIsArchived ? "outline" : "secondary"}>
-                    {selectedIsArchived ? "archived source" : "active source"}
-                  </Badge>
-                  <Badge variant="outline">{selectedDocument.latest_document_type ?? "unknown type"}</Badge>
-                  <Button
-                    disabled={busyKey === "archive-document" || selectedIsArchived}
-                    onClick={() => onArchiveDocument(selectedDocument)}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    {busyKey === "archive-document" ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Archive data-icon="inline-start" className="size-4" />}
-                    {selectedIsArchived ? "Archived" : "Archive"}
+              <div className="flex flex-wrap gap-2">
+                <Button asChild size="sm" type="button" variant="outline">
+                  <a href={workspacePaths.documentQueue}>Source queue</a>
+                </Button>
+                {selectedDocument ? (
+                  <>
+                    <Badge variant={selectedIsArchived ? "outline" : "secondary"}>
+                      {selectedIsArchived ? "archived source" : "active source"}
+                    </Badge>
+                    <Badge variant="outline">{selectedDocument.latest_document_type ?? "unknown type"}</Badge>
+                    <Button
+                      disabled={busyKey === "archive-document" || selectedIsArchived}
+                      onClick={() => onArchiveDocument(selectedDocument)}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {busyKey === "archive-document" ? <Loader2 data-icon="inline-start" className="size-4 animate-spin" /> : <Archive data-icon="inline-start" className="size-4" />}
+                      {selectedIsArchived ? "Archived" : "Archive"}
+                    </Button>
+                  </>
+                ) : (
+                  <Button asChild size="sm" type="button" variant="secondary">
+                    <a href={workspacePaths.documentUpload}>Upload source</a>
                   </Button>
-                </div>
-              ) : null}
+                )}
+              </div>
             </div>
+            <StepRail
+              current="review"
+              steps={[
+                { key: "upload", label: "Upload" },
+                { key: "queue", label: "Queue" },
+                { key: "review", label: "Review" },
+              ]}
+            />
           </CardHeader>
           <CardContent className="pt-4">
             {selectedIsArchived ? (
@@ -916,9 +983,9 @@ export function DocumentsWorkspace({
         <Tabs className="space-y-4" onValueChange={(value) => setDocumentStep(value as DocumentStep)} value={documentStep}>
           <div className="sticky top-4 z-20 rounded-xl border bg-background/95 p-2 shadow-sm backdrop-blur">
             <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-3 lg:grid-cols-6 xl:grid-cols-7">
-              <TabsTrigger value="view">0. View</TabsTrigger>
+              <TabsTrigger value="view">Source</TabsTrigger>
               <TabsTrigger className="gap-2" value="review">
-                1. Review
+                Review
                 {pendingReviewCount ? (
                   <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                     {pendingReviewCount}
@@ -927,7 +994,7 @@ export function DocumentsWorkspace({
               </TabsTrigger>
               {showWorkflowTab ? (
                 <TabsTrigger className="gap-2" value="workflow">
-                  2. Workflow
+                  Workflow
                   {workflowGraphIssueCount || missingWorkflowUnits.length ? (
                     <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                       {workflowGraphIssueCount + missingWorkflowUnits.length}
@@ -937,7 +1004,7 @@ export function DocumentsWorkspace({
               ) : null}
               {showKbIndexTab ? (
                 <TabsTrigger className="gap-2" value="kbIndex">
-                  2. Index
+                  Index
                   {kbIndexPlan?.summary?.unresolved_target_count ? (
                     <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                       {String(kbIndexPlan.summary.unresolved_target_count)}
@@ -945,15 +1012,15 @@ export function DocumentsWorkspace({
                   ) : null}
                 </TabsTrigger>
               ) : null}
-              <TabsTrigger value="sop">3. SOP Preview</TabsTrigger>
+              <TabsTrigger value="sop">SOP</TabsTrigger>
               <TabsTrigger className="gap-2" value="gate">
-                4. Verify
+                Verify
                 <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                   {readinessChecks.filter((check) => check.passed).length}/{readinessChecks.length}
                 </span>
               </TabsTrigger>
-              <TabsTrigger value="publish">5. Publish</TabsTrigger>
-              <TabsTrigger value="chunks">6. Debug</TabsTrigger>
+              <TabsTrigger value="publish">Publish</TabsTrigger>
+              <TabsTrigger value="chunks">Debug</TabsTrigger>
             </TabsList>
           </div>
 
@@ -1655,6 +1722,7 @@ export function DocumentsWorkspace({
           </TabsContent>
         </Tabs>
       </section>
+      ) : null}
     </div>
   );
 }
@@ -1867,6 +1935,40 @@ function ValidationPill({ text, valid }: { text: string; valid: boolean }) {
     <div className={cn("rounded-lg border px-2 py-1 text-[11px]", valid ? "bg-secondary text-secondary-foreground" : "border-destructive/30 bg-destructive/10 text-destructive")}>
       {valid ? "OK" : "Block"}: {text}
     </div>
+  );
+}
+
+function StepRail({
+  current,
+  steps,
+}: {
+  current: string;
+  steps: Array<{ key: string; label: string }>;
+}) {
+  const currentIndex = Math.max(0, steps.findIndex((step) => step.key === current));
+  return (
+    <ol className="grid gap-2 rounded-lg border bg-muted/15 p-2 sm:grid-cols-3">
+      {steps.map((step, index) => {
+        const state = index < currentIndex ? "done" : index === currentIndex ? "current" : "next";
+        return (
+          <li className="grid grid-cols-[1.75rem_minmax(0,1fr)] items-center gap-2" key={step.key}>
+            <span
+              className={cn(
+                "flex size-6 items-center justify-center rounded-full border text-[11px] font-semibold tabular-nums",
+                state === "current" && "border-primary bg-primary text-primary-foreground",
+                state === "done" && "bg-secondary text-secondary-foreground",
+                state === "next" && "bg-background text-muted-foreground",
+              )}
+            >
+              {index + 1}
+            </span>
+            <span className={cn("truncate text-xs font-medium", state === "next" ? "text-muted-foreground" : "text-foreground")}>
+              {step.label}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 

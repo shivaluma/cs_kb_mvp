@@ -32,7 +32,9 @@ const DocumentsWorkspace = lazy(() =>
   import("@/workspaces/documents-workspace").then((module) => ({ default: module.DocumentsWorkspace })),
 );
 
-export function DocumentsPage() {
+export type DocumentsSurface = "queue" | "review" | "upload";
+
+export function DocumentsPage({ surface = "review" }: { surface?: DocumentsSurface }) {
   const { getParam, setParams } = useUrlSearch();
   const { reportError, reportNotice } = useFeedback();
   const [upload, setUpload] = useState<UploadState>(defaultUpload);
@@ -485,6 +487,7 @@ export function DocumentsPage() {
         selectedDocument={selectedDocument}
         setSelectedDocument={(document) => selectDocument(document.document_id)}
         setUpload={setUpload}
+        surface={surface}
         upload={upload}
         versionRaw={versionRawQuery.data ?? null}
         versionRawLoading={versionRawQuery.isFetching}

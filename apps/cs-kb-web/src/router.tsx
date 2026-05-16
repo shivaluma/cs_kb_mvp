@@ -73,6 +73,18 @@ const documentsRoute = createRoute({
   component: DocumentsPage,
 });
 
+const documentUploadRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.documentUpload,
+  component: () => <DocumentsPage surface="upload" />,
+});
+
+const documentQueueRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.documentQueue,
+  component: () => <DocumentsPage surface="queue" />,
+});
+
 const feedbackRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: workspacePaths.feedback,
@@ -107,6 +119,8 @@ const routeTree = rootRoute.addChildren([
   toolsRoute,
   collectionsRoute,
   documentsRoute,
+  documentUploadRoute,
+  documentQueueRoute,
   feedbackRoute,
   relationsRoute,
   synonymsRoute,

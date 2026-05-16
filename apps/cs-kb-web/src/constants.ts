@@ -23,6 +23,8 @@ export const workspacePaths = {
   tools: "/tools",
   collections: "/collections",
   documents: "/documents",
+  documentUpload: "/documents/upload",
+  documentQueue: "/documents/queue",
   feedback: "/feedback",
   relations: "/relations",
   synonyms: "/synonyms",
@@ -138,9 +140,23 @@ export const navItems = [
   {
     id: "documents",
     path: workspacePaths.documents,
-    label: "Documents",
+    label: "Document Review",
     icon: FileText,
-    description: "Upload, extract, review, publish, and archive source files.",
+    description: "Review extracted units, verify readiness, and publish approved source versions.",
+  },
+  {
+    id: "documentUpload",
+    path: workspacePaths.documentUpload,
+    label: "Upload",
+    icon: FileText,
+    description: "Add one source file or raw text draft for extraction.",
+  },
+  {
+    id: "documentQueue",
+    path: workspacePaths.documentQueue,
+    label: "Source Queue",
+    icon: FileText,
+    description: "Select active or archived sources for review.",
   },
   {
     id: "feedback",
@@ -179,7 +195,7 @@ export const navGroups = [
   },
   {
     label: "Review operations",
-    items: navItems.filter((item) => ["documents", "feedback", "relations"].includes(item.id)),
+    items: navItems.filter((item) => ["documentUpload", "documentQueue", "documents", "feedback", "relations"].includes(item.id)),
   },
   {
     label: "Admin and debug",
