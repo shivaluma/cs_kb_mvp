@@ -1,0 +1,210 @@
+{
+  "chat_intent_patterns": {
+    "tx": ["tx", "tai xe", "tai xế", "tài xế"],
+    "kh": ["kh", "khach hang", "khách hàng"],
+    "hotline": ["hotline", "1900232345"],
+    "chat_social": ["chat social"],
+    "call_in_app": ["call in app", "cia", "non voice", "non-voice", "chat in app"],
+    "mail": ["mail", "email", "ho.tro", "hotro@be.com.vn"],
+    "alternate_number": ["so khac", "sdt khac", "goi sang so", "goi ra so", "lien he ra 1 so", "lien he so dien thoai khac"],
+    "cs_outbound_reflection": ["cs goi tx", "cs lien he tx", "xu ly phan anh", "kh phan anh"],
+    "tx_inbound": ["tx chu dong", "tx lien he", "tai xe lien he", "goi vao"],
+    "si_lock": ["si", "bi khoa", "tam khoa", "khoa tai khoan"],
+    "foreign_customer": ["nuoc ngoai", "ngoai ngu", "tieng anh", "tieng viet"],
+    "betaxi": ["betaxi", "be taxi"],
+    "gsm": ["gsm", "xanh sm"],
+    "taxi_phone": ["so dien thoai hang taxi", "hang taxi", "thanh nga", "van xuan", "thang long"],
+    "email": ["email", "e-mail"],
+    "email_missing": ["khong co email", "không có email", "chua co email", "chưa có email", "thieu email", "thiếu email"],
+    "email_collection": ["xin email", "cap nhat email", "cập nhật email", "bo sung email", "bổ sung email"],
+    "retry_policy": ["goi lai", "gọi lại", "toi thieu 2 lan", "tối thiểu 2 lần", "cach nhau 10 phut", "cách nhau 10 phút"],
+    "contact_channel": ["kenh nao", "kênh nào", "qua kenh", "qua kênh", "lien he qua", "liên hệ qua"],
+    "info_collection": ["khai thac them thong tin", "khai thác thêm thông tin", "xin them thong tin", "xin thêm thông tin"],
+    "rating_1_star": ["rating 1 sao", "danh gia 1 sao", "đánh giá 1 sao"],
+    "driver_attitude_complaint": ["complain thai do tx", "complain thái độ tx", "thai do tx", "thái độ tx", "thai do tai xe", "thái độ tài xế"],
+    "current_trip": ["chuyen dang loi", "chuyen can ho tro", "trip hien tai", "don dang loi"],
+    "completed_trip": ["chuyen hoan thanh gan nhat", "trip hoan thanh gan nhat", "khong phai chuyen xe can ho tro"]
+  },
+  "follow_up_markers": ["cái đó", "cai do", "vậy", "vay", "nó", "no", "tiếp", "tiep", "ở trên", "o tren", "trên", "tren", "khác gì", "khac gi", "thì sao", "thi sao", "còn", "con"],
+  "chat_context_limit_rules": {
+    "6": ["taxi_phone"],
+    "8": ["alternate_number", "current_trip", "si_lock", "email", "completed_trip"]
+  },
+  "chat_ranking_rules": {
+    "channel_groups": ["hotline", "chat_social", "call_in_app", "mail"],
+    "exclusive_context_groups": ["si_lock", "foreign_customer", "betaxi", "gsm", "taxi_phone"],
+    "high_overlap_terms": ["alternate_number", "cs_outbound_reflection", "tx_inbound", "completed_trip", "current_trip"],
+    "channel_overlap_weight": 0.045,
+    "default_overlap_weight": 0.025,
+    "high_overlap_weight": 0.055,
+    "channel_mismatch_penalty": 0.09,
+    "exclusive_context_penalty": 0.07,
+    "conditional_penalty_rules": [
+      {
+        "query_has": ["cs_outbound_reflection"],
+        "candidate_has": ["si_lock"],
+        "query_lacks": ["si_lock"],
+        "penalty": 0.1,
+        "reason": "si_lock_not_asked"
+      },
+      {
+        "query_has": ["tx"],
+        "candidate_has": ["kh"],
+        "candidate_lacks": ["tx"],
+        "penalty": 0.04,
+        "reason": "audience_mismatch"
+      }
+    ]
+  },
+  "exact_lookup_rules": {
+    "phone_query_terms": ["so dien thoai", "sdt", "hotline"],
+    "phone_regex": "\\b0\\d{8,10}\\b"
+  },
+  "asked_field_patterns": {
+    "contact_channel": ["kenh nao", "qua kenh", "kenh lien he", "lien he qua", "lien lac qua", "goi hay mail", "call hay mail", "email hay call", "call out hay email"],
+    "info_collection": ["khai thac them thong tin", "lay them thong tin", "xin them thong tin", "thu thap them thong tin", "xac minh them thong tin"],
+    "retry_policy": ["goi may lan", "bao nhieu lan", "toi thieu may lan", "cach nhau bao lau", "goi lai", "lien he lai", "retry"],
+    "full_workflow": ["xu ly nhu the nao", "xu ly sao", "quy trinh", "cac buoc", "lam gi tiep", "sau do", "tiep theo"]
+  },
+  "explicit_condition_patterns": {
+    "rating_1_star": ["rating 1 sao", "danh gia 1 sao", "1 sao"],
+    "driver_attitude_complaint": ["complain thai do tx", "phan anh thai do tx", "khieu nai thai do tx", "thai do tai xe", "thai do tx"],
+    "customer_complaint": ["kh complain", "kh phan anh", "kh khieu nai", "khach hang phan anh"],
+    "email_missing": ["khong co email", "chua co email", "khong co mail", "chua co mail", "thieu email"],
+    "failed_contact": ["khong lien he duoc", "kh khong nghe may", "khong bat may", "khong nghe dien thoai", "call khong duoc"]
+  },
+  "branch_patterns": {
+    "email_missing": ["khong co email", "chua co email", "khong co mail", "chua co mail", "thieu email"],
+    "email_collection": ["xin email", "cap nhat email", "bo sung email", "lay email", "thu thap email"],
+    "retry_policy": ["toi thieu 2 lan", "toi thieu hai lan", "cach nhau 10 phut", "goi lai", "lien he lai", "retry", "so lan goi"],
+    "failed_contact": ["khong lien he duoc", "kh khong nghe may", "khong bat may", "khong nghe dien thoai", "call khong duoc"],
+    "escalation": ["escalate", "chuyen lead", "chuyen bpla", "chuyen tech", "chuyen qa", "chuyen case"],
+    "compensation": ["boi hoan", "hoan tien", "refund", "compensation", "ma voucher", "voucher"],
+    "sla": ["sla", "thoi han", "trong vong", "ngay lam viec"],
+    "case_creation": ["tao case", "case reason", "ticket", "tasklist"]
+  },
+  "workflow_stage_patterns": {
+    "contact_channel_selection": ["kenh lien he", "lien he qua", "lien lac qua", "qua kenh", "call out", "goi dien", "goi ra", "email thay vi call", "mail thay vi call", "nhan phan hoi qua email", "chi muon nhan phan hoi qua email"],
+    "post_call_notification": ["sau khi call", "sau call", "ket qua sau call", "phan hoi ket qua qua email", "gui ket qua qua email", "email ket qua", "financial result email"],
+    "email_collection": ["khong co email", "chua co email", "xin email", "cap nhat email", "bo sung email"],
+    "evidence_submission": ["gui hinh", "gui anh", "hinh anh", "image", "bang chung", "minh chung"],
+    "rating_escalation": ["rating 1 sao", "danh gia 1 sao", "complain thai do", "thai do tx", "escalate rating"],
+    "escalation": ["escalate", "chuyen lead", "chuyen bpla", "chuyen tech", "chuyen qa", "chuyen case"]
+  },
+  "channel_patterns": {
+    "email": ["email", "e mail", "mail", "ho tro", "hotro"],
+    "call": ["call", "goi", "goi dien", "goi ra", "call out"],
+    "chat": ["chat", "chat social", "call in app", "cia"]
+  },
+  "scenario_patterns": {
+    "email_instead_of_call": ["email thay vi call", "mail thay vi call", "email thay vi goi", "nhan phan hoi qua email thay vi call", "chi muon nhan phan hoi qua email", "khong muon call", "khong muon nghe may", "khong muon goi dien"]
+  },
+  "negative_workflow_stages_by_scenario": {
+    "email_instead_of_call": ["post_call_notification", "email_collection", "evidence_submission", "rating_escalation", "escalation"]
+  },
+  "scope_rules": {
+    "asked_field_exclusions": {
+      "contact_channel": ["email_missing", "email_collection", "retry_policy", "failed_contact", "escalation", "compensation", "sla", "case_creation"]
+    },
+    "asked_field_relaxes": {
+      "retry_policy": ["retry_policy", "failed_contact"]
+    },
+    "narrow_asked_fields": ["contact_channel"],
+    "narrow_excluded_asked_fields": ["full_workflow"]
+  },
+  "semantic_enrichment": {
+    "actor_patterns": {
+      "KH": ["kh", "khach hang"],
+      "TX": ["tx", "tai xe"],
+      "CS": ["cs"]
+    },
+    "scenario_workflow_stages": {
+      "email_instead_of_call": ["contact_channel_selection"]
+    },
+    "scenario_case_types": {
+      "email_instead_of_call": ["contact_preference"]
+    },
+    "condition_case_types": {
+      "rating_1_star": ["driver_attitude_complaint"],
+      "driver_attitude_complaint": ["driver_attitude_complaint"]
+    },
+    "asked_field_negative_workflow_stages": {
+      "contact_channel": ["post_call_notification", "email_collection", "rating_escalation"]
+    }
+  },
+  "candidate_inference_rules": {
+    "branch_implied_workflow_stages": {
+      "email_missing": ["email_collection"],
+      "email_collection": ["email_collection"],
+      "escalation": ["escalation"]
+    },
+    "document_context_unit_types": ["full_sop", "workflow_overview", "workflow_graph"],
+    "exception_unit_types": ["exception_rule"],
+    "fallback_branch_types": ["email_missing", "retry_policy", "failed_contact"],
+    "downstream_workflow_stages": ["post_call_notification", "rating_escalation", "evidence_submission"],
+    "special_policy_unit_types": ["sla_rule", "escalation_rule", "handoff_rule", "case_creation_rule", "macro_script"]
+  },
+  "applicability_scoring": {
+    "weights": {
+      "semantic": 0.18,
+      "lexical": 0.12,
+      "condition": 0.25,
+      "workflow": 0.18,
+      "policy_type": 0.12,
+      "action": 0.15,
+      "negative_penalty": 0.32
+    },
+    "thresholds": {
+      "selected_signal": 0.72,
+      "direct_applicable": 0.58,
+      "diagnostic_exclusion": 0.46,
+      "low_applicability": 0.32,
+      "low_unsupported": 0.42
+    },
+    "policy_type_scores": {
+      "fallback_rule": 0.34,
+      "exception_rule": 0.38,
+      "downstream_step": 0.24,
+      "document_context": 0.18
+    }
+  },
+  "action_alignment_rules": {
+    "scenario_required_channels": {
+      "email_instead_of_call": ["email", "call"]
+    },
+    "scenario_required_workflow_stage": {
+      "email_instead_of_call": "contact_channel_selection"
+    }
+  },
+  "policy_unit_type_scores": {
+    "policy_rule": 0.9,
+    "handling_rule": 0.88,
+    "operational_instruction": 0.82,
+    "routing_rule": 0.78,
+    "validation_rule": 0.72,
+    "decision_rule": 0.72,
+    "workflow_step": 0.62,
+    "decision_point": 0.58,
+    "exception_rule": 0.42,
+    "sla_rule": 0.35,
+    "escalation_rule": 0.32,
+    "handoff_rule": 0.32,
+    "case_creation_rule": 0.32,
+    "operational_note": 0.28,
+    "warning": 0.24,
+    "full_sop": 0.18,
+    "workflow_overview": 0.18,
+    "workflow_graph": 0.18,
+    "macro_script": 0.16
+  },
+  "answer_segment_boundary_terms": ["nếu", "neu", "trường hợp", "truong hop", "đối với", "doi voi", "khi"],
+  "unsupported_scenario_rules": {
+    "email_instead_of_call": {
+      "reason_codes": ["no_primary_rule_for_customer_email_preference"]
+    }
+  },
+  "unsupported_scenario_messages": {
+    "email_instead_of_call": "SOP published hiện chưa có rule trực tiếp đủ rõ cho tình huống KH chỉ muốn nhận phản hồi qua email thay vì call. Không dùng các nhánh như email sau call, KH không có email, gửi hình ảnh hoặc rating/escalation để suy ra chính sách; CS cần mở source liên quan hoặc escalate Lead để xác nhận trước khi xử lý.",
+    "default": "SOP published hiện chưa có rule trực tiếp đủ rõ cho tình huống này. CS cần mở source liên quan hoặc escalate Lead để xác nhận trước khi xử lý."
+  }
+}

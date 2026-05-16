@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from app.answer_scope import build_answer_scope
+from app.answer_scope import applicability_thresholds, build_answer_scope
 from app.config import settings
 from app.search_labels import meaningful_search_label
 from app.schemas import (
@@ -1719,6 +1719,13 @@ def generate_grounded_answer(
             "answer_type": result.metadata.get("answer_type"),
             "chat_match_penalties": result.metadata.get("chat_match_penalties"),
             "chat_scope_unasked_branches": result.metadata.get("chat_scope_unasked_branches"),
+            "policy_facets": result.metadata.get("policy_facets"),
+            "candidate_policy_signals": result.metadata.get("candidate_policy_signals"),
+            "policy_applicability_score": result.metadata.get("policy_applicability_score"),
+            "workflow_match_score": result.metadata.get("workflow_match_score"),
+            "condition_entailment_score": result.metadata.get("condition_entailment_score"),
+            "negative_constraint_violations": result.metadata.get("negative_constraint_violations"),
+            "context_selection": result.metadata.get("chat_context_selection"),
         }
         sources.append(
             "\n".join(
@@ -1760,6 +1767,7 @@ def generate_grounded_answer(
                     "Kỷ luật scope cho SOP vận hành: xác định đúng field user hỏi (ví dụ kênh liên hệ, số lần retry, SLA, escalation), trả lời field đó trước và không kéo thêm nhánh fallback/exception/retry/email/SLA/case/escalation nếu user không hỏi. "
                     "Một claim vừa phải được source hỗ trợ vừa phải đúng scope câu hỏi; supported-but-out-of-scope thì loại khỏi answer và có thể ghi vào excluded_source_indices/claim_grounding. "
                     "Nếu source chứa cả primary action và conditional flow, chỉ đưa conditional flow khi điều kiện đó xuất hiện rõ trong Current question. "
+                    "Không dùng source có negative_constraint_violations hoặc policy_applicability_score thấp để tạo procedural claim; các source đó chỉ là debug/context rủi ro. "
                     "Câu trả lời phải ngắn, actionable, tiếng Việt, và có warning nếu source có risk/compliance/security/financial/account/escalation signal. "
                     + (
                         "Đây là câu hỏi có rủi ro cao hoặc policy/exception: nếu source không nêu rõ điều kiện/action, bắt buộc từ chối kết luận và hướng dẫn mở source/escalate Lead. "
@@ -1768,7 +1776,7 @@ def generate_grounded_answer(
                         else ""
                     )
                     +
-                    "Bắt buộc trả JSON object đúng schema: {\"answer\":\"...\",\"steps\":[\"...\"],\"warnings\":[\"...\"],\"confidence\":0.0,\"source_indices\":[1],\"direct_answer\":\"...\",\"conditions_used\":[\"...\"],\"conditional_flows\":[],\"excluded_source_indices\":[],\"claim_grounding\":[{\"claim\":\"...\",\"source_index\":1,\"scope\":\"in_scope\"}]}. "
+                    "Bắt buộc trả JSON object đúng schema: {\"answer\":\"...\",\"steps\":[\"...\"],\"warnings\":[\"...\"],\"confidence\":0.0,\"source_indices\":[1],\"direct_answer\":\"...\",\"conditions_used\":[\"...\"],\"conditional_flows\":[],\"excluded_source_indices\":[],\"claim_grounding\":[{\"claim\":\"...\",\"supported\":true,\"relevant_to_question\":true,\"source_indices\":[1],\"scope\":\"in_scope\",\"remove_reason\":null}]}. "
                     "source_indices chỉ được chứa index của SOURCES đã dùng. Nếu không dùng source nào, để [] và answer phải nói không đủ căn cứ."
                 ),
             },
@@ -1807,6 +1815,8 @@ def generate_grounded_answer(
         warnings = ["openrouter_grounded_answer_used", f"openrouter_model:{model or settings.openrouter_chat_model}"]
         if repaired:
             warnings.append("openrouter_json_repair_used")
+        answer, grounding_warnings = enforce_answer_grounding_contract(answer, retrieval)
+        warnings.extend(grounding_warnings)
         if not answer.source_indices:
             warnings.append("answer_without_citation_rejected")
             return GroundedAnswerPayload(
@@ -1819,6 +1829,72 @@ def generate_grounded_answer(
         return answer, warnings
     except Exception as exc:
         return None, [f"openrouter_grounded_answer_failed:{exc.__class__.__name__}"]
+
+
+def enforce_answer_grounding_contract(
+    answer: GroundedAnswerPayload,
+    retrieval: RetrievalResponse,
+) -> tuple[GroundedAnswerPayload, list[str]]:
+    warnings: list[str] = []
+    risky_source_indices = risky_procedural_source_indices(retrieval)
+    requested_indices = [index for index in answer.source_indices if 1 <= int(index) <= len(retrieval.results)]
+    allowed_indices = [index for index in requested_indices if index not in risky_source_indices]
+    if len(allowed_indices) != len(requested_indices):
+        warnings.append("risky_source_indices_removed_from_answer")
+
+    unsupported_claims = [
+        claim
+        for claim in answer.claim_grounding
+        if isinstance(claim, dict) and not claim_grounding_is_allowed(claim, risky_source_indices)
+    ]
+    if unsupported_claims:
+        warnings.append("claim_grounding_contract_rejected_answer")
+        return answer.model_copy(
+            update={
+                "answer": "Không tìm thấy SOP published đủ căn cứ để trả lời chắc chắn. Vui lòng mở Lookup hoặc escalate Lead để xác nhận.",
+                "steps": [],
+                "warnings": [*answer.warnings, "claim_grounding_contract_rejected_answer"],
+                "confidence": 0,
+                "source_indices": [],
+            }
+        ), warnings
+
+    return answer.model_copy(update={"source_indices": allowed_indices}), warnings
+
+
+def risky_procedural_source_indices(retrieval: RetrievalResponse) -> set[int]:
+    low_threshold = applicability_thresholds().get("low_applicability", 0.32)
+    risky: set[int] = set()
+    for index, result in enumerate(retrieval.results, start=1):
+        metadata = result.metadata or {}
+        if metadata.get("negative_constraint_violations"):
+            risky.add(index)
+            continue
+        try:
+            applicability = float(metadata.get("policy_applicability_score") or 0)
+        except (TypeError, ValueError):
+            applicability = 0.0
+        if "policy_applicability_score" in metadata and applicability < low_threshold:
+            risky.add(index)
+    return risky
+
+
+def claim_grounding_is_allowed(claim: dict[str, Any], risky_source_indices: set[int]) -> bool:
+    if claim.get("supported") is False:
+        return False
+    if claim.get("relevant_to_question") is False or claim.get("relevant") is False:
+        return False
+    scope = str(claim.get("scope") or "in_scope")
+    if scope not in {"in_scope", "direct_answer"}:
+        return False
+    if claim.get("remove_reason"):
+        return False
+    source_indices = claim.get("source_indices", claim.get("source_index", []))
+    if isinstance(source_indices, int):
+        source_indices = [source_indices]
+    if not isinstance(source_indices, list):
+        return True
+    return not any(index in risky_source_indices for index in source_indices if isinstance(index, int))
 
 
 def generate_chat_session_title(question: str, model: str | None = None) -> tuple[str, list[str]]:

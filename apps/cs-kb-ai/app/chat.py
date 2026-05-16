@@ -8,9 +8,18 @@ import unicodedata
 from typing import Any
 
 from app import repository
-from app.answer_scope import build_answer_scope, prune_answer_to_scope, scope_penalty
+from app.answer_scope import (
+    applicability_thresholds,
+    build_answer_scope,
+    build_policy_facets,
+    policy_applicability_debug,
+    prune_answer_to_scope,
+    scope_penalty,
+    unsupported_scenario_assessment,
+)
 from app.config import settings
 from app.openrouter import generate_chat_session_title, generate_grounded_answer
+from app.policy_taxonomy import taxonomy_patterns, taxonomy_score_map, taxonomy_section, taxonomy_string_list
 from app.retrieval import retrieve, to_result
 from app.search_labels import is_bad_search_label
 from app.schemas import ChatSessionMessageRequest, GroundedChatRequest, GroundedChatResponse, RetrievalFilters, RetrievalRequest, RetrievalResponse, RetrievalResult
@@ -64,63 +73,6 @@ SOURCE_GROUP_LABELS = {
     "tool_link": "Tools",
     "parent_sop": "Parent SOP",
 }
-FOLLOW_UP_MARKERS = (
-    "cái đó",
-    "cai do",
-    "vậy",
-    "vay",
-    "nó",
-    "no",
-    "tiếp",
-    "tiep",
-    "ở trên",
-    "o tren",
-    "trên",
-    "tren",
-    "khác gì",
-    "khac gi",
-    "thì sao",
-    "thi sao",
-    "còn",
-    "con",
-)
-
-CHANNEL_GROUPS = {"hotline", "chat_social", "call_in_app", "mail"}
-EXCLUSIVE_CONTEXT_GROUPS = {
-    "si_lock",
-    "foreign_customer",
-    "betaxi",
-    "gsm",
-    "taxi_phone",
-}
-INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
-    "tx": ("tx", "tai xe", "tai xế", "tài xế"),
-    "kh": ("kh", "khach hang", "khách hàng"),
-    "hotline": ("hotline", "1900232345"),
-    "chat_social": ("chat social",),
-    "call_in_app": ("call in app", "cia", "non voice", "non-voice", "chat in app"),
-    "mail": ("mail", "email", "ho.tro", "hotro@be.com.vn"),
-    "alternate_number": ("so khac", "sdt khac", "goi sang so", "goi ra so", "lien he ra 1 so", "lien he so dien thoai khac"),
-    "cs_outbound_reflection": ("cs goi tx", "cs lien he tx", "xu ly phan anh", "kh phan anh"),
-    "tx_inbound": ("tx chu dong", "tx lien he", "tai xe lien he", "goi vao"),
-    "si_lock": ("si", "bi khoa", "tam khoa", "khoa tai khoan"),
-    "foreign_customer": ("nuoc ngoai", "ngoai ngu", "tieng anh", "tieng viet"),
-    "betaxi": ("betaxi", "be taxi"),
-    "gsm": ("gsm", "xanh sm"),
-    "taxi_phone": ("so dien thoai hang taxi", "hang taxi", "thanh nga", "van xuan", "thang long"),
-    "email": ("email", "e-mail"),
-    "email_missing": ("khong co email", "không có email", "chua co email", "chưa có email", "thieu email", "thiếu email"),
-    "email_collection": ("xin email", "cap nhat email", "cập nhật email", "bo sung email", "bổ sung email"),
-    "retry_policy": ("goi lai", "gọi lại", "toi thieu 2 lan", "tối thiểu 2 lần", "cach nhau 10 phut", "cách nhau 10 phút"),
-    "contact_channel": ("kenh nao", "kênh nào", "qua kenh", "qua kênh", "lien he qua", "liên hệ qua"),
-    "info_collection": ("khai thac them thong tin", "khai thác thêm thông tin", "xin them thong tin", "xin thêm thông tin"),
-    "rating_1_star": ("rating 1 sao", "danh gia 1 sao", "đánh giá 1 sao"),
-    "driver_attitude_complaint": ("complain thai do tx", "complain thái độ tx", "thai do tx", "thái độ tx", "thai do tai xe", "thái độ tài xế"),
-    "current_trip": ("chuyen dang loi", "chuyen can ho tro", "trip hien tai", "don dang loi"),
-    "completed_trip": ("chuyen hoan thanh gan nhat", "trip hoan thanh gan nhat", "khong phai chuyen xe can ho tro"),
-}
-
-
 @dataclass(frozen=True)
 class ChatModelSelection:
     route: str
@@ -188,6 +140,28 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             retrieval=retrieval,
             source_groups=bundle.source_groups,
             retrieval_trace=bundle.trace,
+            answer_scope=answer_scope.model_dump(),
+            latency_ms=elapsed_ms(started_at),
+            model_route=selection.route,
+            model_used=selection.model,
+            model_reason=selection.reason,
+        )
+        repository.log_chat(response)
+        return response
+
+    unsupported = unsupported_scenario_assessment(request.question, retrieval.results)
+    if unsupported.get("status") == "unsupported_or_ambiguous":
+        response = GroundedChatResponse(
+            question=request.question,
+            answer=str(unsupported.get("safe_response") or "SOP published hiện chưa nêu rõ tình huống này. CS cần mở source hoặc escalate Lead để xác nhận trước khi xử lý."),
+            steps=[],
+            warnings=[*warnings, "unsupported_scenario_detected", *[f"unsupported_reason:{reason}" for reason in unsupported.get("reason_codes", [])]],
+            citations=[],
+            sources=retrieval.results,
+            confidence=0.12,
+            retrieval=retrieval,
+            source_groups=bundle.source_groups,
+            retrieval_trace={**bundle.trace, "unsupported_scenario": unsupported},
             answer_scope=answer_scope.model_dump(),
             latency_ms=elapsed_ms(started_at),
             model_route=selection.route,
@@ -305,6 +279,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
     index_limit = max(6, min(request.limit, 10))
     query_text = request.retrieval_query.strip() or request.question
     answer_scope = build_answer_scope(request.question)
+    policy_facets = build_policy_facets(request.question, answer_scope)
     context_limit = chat_context_limit(query_text, request.limit)
 
     direct_retrieval = retrieve(
@@ -334,8 +309,8 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         annotate_result(result, index_source_role(result), "kb_index_match")
         for result in index_retrieval.results
     ]
-    direct_results = rerank_stage_results(query_text, direct_candidates, answer_scope)
-    index_results = rerank_stage_results(query_text, index_candidates, answer_scope)
+    direct_results = rerank_stage_results(query_text, direct_candidates, answer_scope, policy_facets)
+    index_results = rerank_stage_results(query_text, index_candidates, answer_scope, policy_facets)
     session_context_rows = repository.published_chunk_rows_by_ids(
         request.context_chunk_ids,
         [],
@@ -345,7 +320,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         annotate_result(to_result(row), "direct_sop", "session_context_source")
         for row in session_context_rows
     ]
-    session_context_results = rerank_stage_results(query_text, session_context_results, answer_scope)
+    session_context_results = rerank_stage_results(query_text, session_context_results, answer_scope, policy_facets)
     initial_results = dedupe_results([*session_context_results, *direct_results, *index_results])
     relation_seed_results = relation_seed_candidates(initial_results, context_limit)
     exclude_ids = [result.chunk_id for result in initial_results]
@@ -358,7 +333,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         annotate_result(to_result(row), "related_sop", "approved_relation_expansion")
         for row in relation_rows
     ]
-    related_results = rerank_stage_results(query_text, related_results, answer_scope)
+    related_results = rerank_stage_results(query_text, related_results, answer_scope, policy_facets)
     exclude_ids.extend(result.chunk_id for result in related_results)
     parent_context_skipped_by_scope = answer_scope.is_narrow and bool(direct_results or related_results)
     parent_rows = [] if parent_context_skipped_by_scope else repository.parent_sop_context_rows(
@@ -372,7 +347,8 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
     ]
     context_candidates = [*session_context_results, *direct_results, *index_results, *related_results, *parent_results]
     deduped_context_candidates = semantic_dedupe_results(context_candidates)
-    final_results = rank_chat_results(context_candidates, context_limit)
+    ranked_context_candidates = rank_chat_results(deduped_context_candidates, max(context_limit * 2, context_limit))
+    final_results, excluded_context_results = select_minimal_context(ranked_context_candidates, context_limit, answer_scope)
     warnings = list(
         dict.fromkeys(
             [
@@ -413,7 +389,16 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         "session_context_count": len(session_context_results),
         "scope_filters": base_filters.model_dump(),
         "answer_scope": answer_scope.model_dump(),
+        "policy_facets": policy_facets.model_dump(),
         "parent_context_skipped_by_scope": parent_context_skipped_by_scope,
+        "candidate_debug": [
+            candidate_debug_payload(result, "selected")
+            for result in final_results
+        ],
+        "excluded_candidate_debug": [
+            candidate_debug_payload(result, "excluded")
+            for result in excluded_context_results[:8]
+        ],
         "retrieval_query_used": query_text != request.question,
     }
     return ChatRetrievalBundle(
@@ -562,7 +547,7 @@ def should_use_recent_context(question: str, recent_user_context: list[str]) -> 
     if not recent_user_context:
         return False
     normalized = question.lower()
-    return any(marker in normalized for marker in FOLLOW_UP_MARKERS) or len(normalized.split()) <= 5
+    return any(marker in normalized for marker in taxonomy_string_list("follow_up_markers")) or len(normalized.split()) <= 5
 
 
 def updated_session_summary(current_summary: str, question: str, filters: dict[str, object]) -> str:
@@ -619,10 +604,12 @@ def assistant_context_chunk_ids(rows: list[dict[str, Any]]) -> list[str]:
 
 def chat_context_limit(query: str, requested_limit: int) -> int:
     intent = query_intent(query)
-    if "taxi_phone" in intent:
-        return min(requested_limit, 6)
-    if intent & {"alternate_number", "current_trip", "si_lock", "email", "completed_trip"}:
-        return min(requested_limit, 8)
+    for limit_text, terms in taxonomy_section("chat_context_limit_rules").items():
+        if isinstance(terms, list) and intent & {str(term) for term in terms}:
+            try:
+                return min(requested_limit, int(limit_text))
+            except ValueError:
+                continue
     return min(requested_limit, 7)
 
 
@@ -673,11 +660,70 @@ def rank_chat_results(results: list[RetrievalResult], limit: int) -> list[Retrie
         semantic_dedupe_results(results),
         key=lambda result: (
             SOURCE_ROLE_ORDER.get(source_role(result), 99),
-            -chat_adjusted_score(result),
+            -final_rank_score(result),
             -float(result.lexical_score or 0),
             -float(result.vector_score or 0),
         ),
     )[:limit]
+
+
+def select_minimal_context(
+    ranked_results: list[RetrievalResult],
+    limit: int,
+    answer_scope: Any,
+) -> tuple[list[RetrievalResult], list[RetrievalResult]]:
+    selected: list[RetrievalResult] = []
+    excluded: list[RetrievalResult] = []
+    for index, result in enumerate(ranked_results):
+        metadata = result.metadata or {}
+        violations = metadata.get("negative_constraint_violations") or []
+        applicability = policy_applicability_score(result)
+        diagnostic_only = bool(violations) and applicability < applicability_thresholds().get("diagnostic_exclusion", 0.46) and bool(getattr(answer_scope, "is_narrow", False))
+        if diagnostic_only:
+            excluded.append(mark_context_selection(result, "excluded_negative_constraint"))
+            continue
+        selected.append(mark_context_selection(result, "selected_minimal_context"))
+        if len(selected) >= limit:
+            excluded.extend(mark_context_selection(item, "excluded_over_limit") for item in ranked_results[index + 1 :])
+            break
+
+    if not selected and ranked_results:
+        diagnostic = [
+            mark_context_selection(result, "selected_diagnostic_context")
+            for result in ranked_results[: min(limit, 3)]
+        ]
+        diagnostic_ids = {result.chunk_id for result in diagnostic}
+        excluded = [
+            result
+            for result in excluded
+            if result.chunk_id not in diagnostic_ids
+        ]
+        selected = diagnostic
+    return selected, excluded
+
+
+def mark_context_selection(result: RetrievalResult, status: str) -> RetrievalResult:
+    metadata = dict(result.metadata or {})
+    metadata["chat_context_selection"] = status
+    return result.model_copy(update={"metadata": metadata})
+
+
+def candidate_debug_payload(result: RetrievalResult, status: str) -> dict[str, Any]:
+    metadata = result.metadata or {}
+    return {
+        "chunk_id": result.chunk_id,
+        "title": result.title,
+        "source_role": source_role(result),
+        "status": status,
+        "selected_because": metadata.get("selected_because") or [],
+        "risk_flags": metadata.get("risk_flags") or [],
+        "workflow_match_score": metadata.get("workflow_match_score", 0.0),
+        "condition_entailment_score": metadata.get("condition_entailment_score", 0.0),
+        "policy_applicability_score": metadata.get("policy_applicability_score", 0.0),
+        "negative_constraint_violations": metadata.get("negative_constraint_violations") or [],
+        "final_rank_score": metadata.get("final_rank_score", metadata.get("chat_adjusted_score", result.score)),
+        "context_selection": metadata.get("chat_context_selection", ""),
+    }
 
 
 def dedupe_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
@@ -739,16 +785,7 @@ def merge_duplicate_metadata(keeper: RetrievalResult, duplicate: RetrievalResult
 def dedupe_preference_score(result: RetrievalResult) -> float:
     metadata = result.metadata or {}
     unit_type = str(metadata.get("unit_type") or result.section)
-    unit_score = {
-        "policy_rule": 0.08,
-        "handling_rule": 0.07,
-        "decision_rule": 0.07,
-        "exception_rule": 0.07,
-        "sla_rule": 0.06,
-        "workflow_step": 0.04,
-        "operational_note": 0.03,
-        "full_sop": 0.01,
-    }.get(unit_type, 0.04)
+    unit_score = min(0.08, taxonomy_score_map("policy_unit_type_scores").get(unit_type, 0.4) / 10)
     source_ref_bonus = 0.04 if has_structured_source_ref(metadata) else 0.0
     return chat_adjusted_score(result) + unit_score + source_ref_bonus
 
@@ -768,21 +805,33 @@ def semantic_text(result: RetrievalResult) -> str:
     return normalize_for_match(f"{heading} {result.content}")
 
 
-def rerank_stage_results(query: str, results: list[RetrievalResult], answer_scope: Any | None = None) -> list[RetrievalResult]:
+def rerank_stage_results(
+    query: str,
+    results: list[RetrievalResult],
+    answer_scope: Any | None = None,
+    policy_facets: Any | None = None,
+) -> list[RetrievalResult]:
     query_terms = query_intent(query)
     answer_scope = answer_scope or build_answer_scope(query)
-    reranked = [annotate_match_metadata(result, query_terms, answer_scope) for result in results]
+    policy_facets = policy_facets or build_policy_facets(query, answer_scope)
+    reranked = [annotate_match_metadata(query, result, query_terms, answer_scope, policy_facets) for result in results]
     return sorted(
         reranked,
         key=lambda result: (
-            -chat_adjusted_score(result),
+            -final_rank_score(result),
             -float(result.lexical_score or 0),
             -float(result.vector_score or 0),
         ),
     )
 
 
-def annotate_match_metadata(result: RetrievalResult, query_terms: set[str], answer_scope: Any) -> RetrievalResult:
+def annotate_match_metadata(
+    query: str,
+    result: RetrievalResult,
+    query_terms: set[str],
+    answer_scope: Any,
+    policy_facets: Any,
+) -> RetrievalResult:
     metadata = dict(result.metadata or {})
     candidate_terms = query_intent(candidate_match_text(result))
     boosts: list[str] = []
@@ -794,39 +843,75 @@ def annotate_match_metadata(result: RetrievalResult, query_terms: set[str], answ
         boost += 0.28
         boosts.append("previous_cited_source")
 
+    ranking_rules = taxonomy_section("chat_ranking_rules")
+    channel_groups = set(str(term) for term in ranking_rules.get("channel_groups", []) if str(term))
+    exclusive_context_groups = set(str(term) for term in ranking_rules.get("exclusive_context_groups", []) if str(term))
+    high_overlap_terms = set(str(term) for term in ranking_rules.get("high_overlap_terms", []) if str(term))
+    default_overlap_weight = float(ranking_rules.get("default_overlap_weight") or 0.025)
+    high_overlap_weight = float(ranking_rules.get("high_overlap_weight") or 0.055)
+    channel_overlap_weight = float(ranking_rules.get("channel_overlap_weight") or 0.045)
+
     for term in sorted(query_terms & candidate_terms):
-        weight = 0.025
-        if term in {"alternate_number", "cs_outbound_reflection", "tx_inbound", "completed_trip", "current_trip"}:
-            weight = 0.055
-        if term in CHANNEL_GROUPS:
-            weight = 0.045
+        weight = default_overlap_weight
+        if term in high_overlap_terms:
+            weight = high_overlap_weight
+        if term in channel_groups:
+            weight = channel_overlap_weight
         boost += weight
         boosts.append(term)
 
-    query_channels = query_terms & CHANNEL_GROUPS
-    candidate_channels = candidate_terms & CHANNEL_GROUPS
+    query_channels = query_terms & channel_groups
+    candidate_channels = candidate_terms & channel_groups
     if query_channels and candidate_channels and not (query_channels & candidate_channels):
-        penalty += 0.09
+        penalty += float(ranking_rules.get("channel_mismatch_penalty") or 0.09)
         penalties.append("channel_mismatch")
 
-    for term in sorted((candidate_terms & EXCLUSIVE_CONTEXT_GROUPS) - query_terms):
-        penalty += 0.07
+    for term in sorted((candidate_terms & exclusive_context_groups) - query_terms):
+        penalty += float(ranking_rules.get("exclusive_context_penalty") or 0.07)
         penalties.append(f"context_mismatch:{term}")
 
-    if "cs_outbound_reflection" in query_terms and "si_lock" in candidate_terms and "si_lock" not in query_terms:
-        penalty += 0.1
-        penalties.append("si_lock_not_asked")
-    if "tx" in query_terms and "kh" in candidate_terms and "tx" not in candidate_terms:
-        penalty += 0.04
-        penalties.append("audience_mismatch")
+    for rule in ranking_rules.get("conditional_penalty_rules", []):
+        if not isinstance(rule, dict):
+            continue
+        query_has = {str(term) for term in rule.get("query_has", [])}
+        candidate_has = {str(term) for term in rule.get("candidate_has", [])}
+        query_lacks = {str(term) for term in rule.get("query_lacks", [])}
+        candidate_lacks = {str(term) for term in rule.get("candidate_lacks", [])}
+        if query_has <= query_terms and candidate_has <= candidate_terms and not (query_lacks & query_terms) and not (candidate_lacks & candidate_terms):
+            penalty += float(rule.get("penalty") or 0)
+            reason = str(rule.get("reason") or "conditional_penalty")
+            penalties.append(reason)
 
     branch_penalty, branch_penalties, scope_metadata = scope_penalty(candidate_match_text(result), answer_scope)
     penalty += branch_penalty
     penalties.extend(branch_penalties)
     metadata.update(scope_metadata)
+    applicability = policy_applicability_debug(
+        query=query,
+        candidate_text=candidate_match_text(result),
+        metadata=metadata,
+        scope=answer_scope,
+        facets=policy_facets,
+        semantic_score=float(result.score or 0.0),
+        lexical_score=float(result.lexical_score or 0.0),
+    )
+    metadata.update(applicability)
+    applicability_score = float(applicability.get("policy_applicability_score") or 0.0)
+    thresholds = applicability_thresholds()
+    if applicability_score >= thresholds.get("direct_applicable", 0.58):
+        boost += min(0.16, applicability_score * 0.14)
+    elif applicability_score < thresholds.get("low_applicability", 0.32):
+        penalty += 0.1
+        penalties.append("low_policy_applicability")
+    violations = applicability.get("negative_constraint_violations") or []
+    if violations:
+        penalty += min(0.24, 0.08 * len(violations))
+        penalties.extend(f"negative_constraint:{violation}" for violation in violations)
 
     adjusted_score = max(0.0, float(result.score or 0.0) + boost - penalty)
+    final_rank = max(0.0, 0.52 * adjusted_score + 0.48 * applicability_score)
     metadata["chat_adjusted_score"] = adjusted_score
+    metadata["final_rank_score"] = round(final_rank, 6)
     metadata["chat_match_boosts"] = boosts
     metadata["chat_match_penalties"] = penalties
     metadata["chat_intent_terms"] = sorted(candidate_terms)
@@ -839,6 +924,22 @@ def chat_adjusted_score(result: RetrievalResult) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(result.score or 0.0)
+
+
+def policy_applicability_score(result: RetrievalResult) -> float:
+    value = (result.metadata or {}).get("policy_applicability_score")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def final_rank_score(result: RetrievalResult) -> float:
+    value = (result.metadata or {}).get("final_rank_score")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return chat_adjusted_score(result)
 
 
 def relation_seed_candidates(results: list[RetrievalResult], context_limit: int) -> list[RetrievalResult]:
@@ -856,7 +957,7 @@ def query_intent(text: str) -> set[str]:
     normalized = normalize_for_match(text)
     return {
         key
-        for key, patterns in INTENT_PATTERNS.items()
+        for key, patterns in taxonomy_patterns("chat_intent_patterns").items()
         if any(normalize_for_match(pattern) in normalized for pattern in patterns)
     }
 
@@ -872,6 +973,13 @@ def candidate_match_text(result: RetrievalResult) -> str:
         metadata.get("tags"),
         metadata.get("aliases"),
         metadata.get("section_path"),
+        metadata.get("policy_type"),
+        metadata.get("workflow_stage"),
+        metadata.get("conditions"),
+        metadata.get("actions"),
+        metadata.get("exceptions"),
+        metadata.get("channel_type"),
+        metadata.get("priority"),
     ]
     heading = "" if is_bad_search_label(result.heading, result.content) else result.heading
     return " ".join([heading, result.section, result.content, *[str(bit) for bit in metadata_bits if bit]])
@@ -926,8 +1034,11 @@ def evidence_confidence(
 def is_exact_lookup(question: str, cited_results: list[RetrievalResult]) -> bool:
     normalized = normalize_for_match(question)
     text = normalize_for_match(" ".join(result.content for result in cited_results))
-    asks_phone = "so dien thoai" in normalized or "sdt" in normalized or "hotline" in normalized
-    has_phone = bool(re.search(r"\b0\d{8,10}\b", text))
+    exact_lookup_rules = taxonomy_section("exact_lookup_rules")
+    phone_terms = [normalize_for_match(str(term)) for term in exact_lookup_rules.get("phone_query_terms", [])]
+    asks_phone = any(term and term in normalized for term in phone_terms)
+    phone_pattern = str(exact_lookup_rules.get("phone_regex") or r"\b0\d{8,10}\b")
+    has_phone = bool(re.search(phone_pattern, text))
     return asks_phone and has_phone
 
 

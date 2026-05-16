@@ -16,6 +16,7 @@ from app.chat import (
     should_use_recent_context,
     updated_session_summary,
 )
+from app.openrouter import enforce_answer_grounding_contract
 from app.schemas import (
     ChatSessionCreateRequest,
     ChatSessionMessageRequest,
@@ -203,8 +204,10 @@ class ChatRetrievalTest(unittest.TestCase):
             )
 
         self.assertEqual(bundle.retrieval.results[0].chunk_id, "primary")
-        self.assertIn("unasked_branch:email_missing", bundle.retrieval.results[1].metadata["chat_match_penalties"])
-        self.assertIn("unasked_branch:retry_policy", bundle.retrieval.results[1].metadata["chat_match_penalties"])
+        excluded_debug = bundle.trace["excluded_candidate_debug"][0]
+        self.assertEqual(excluded_debug["chunk_id"], "fallback")
+        self.assertIn("email_missing", excluded_debug["negative_constraint_violations"])
+        self.assertIn("retry_policy", excluded_debug["negative_constraint_violations"])
 
     def test_narrow_contact_channel_query_skips_parent_full_sop_context(self) -> None:
         direct = retrieval_result(
@@ -274,6 +277,223 @@ class ChatRetrievalTest(unittest.TestCase):
         self.assertEqual(response.steps, [])
         self.assertIn("out_of_scope_branch_claim_removed:email_missing", response.warnings)
         self.assertIn("out_of_scope_branch_claim_removed:retry_policy", response.warnings)
+
+    def test_policy_applicability_reranks_email_preference_over_email_after_call(self) -> None:
+        post_call = retrieval_result(
+            "post-call-email",
+            "handling_rule",
+            score=0.9,
+            heading="Gửi kết quả xử lý qua email sau khi call",
+            content="Sau khi call KH về kết quả tài chính beFood, CS gửi kết quả sau call qua email cho KH.",
+        )
+        missing_email = retrieval_result(
+            "missing-email",
+            "handling_rule",
+            score=0.86,
+            heading="KH không có email",
+            content="Nếu KH không có email, CS gọi tối thiểu 2 lần cách nhau 10 phút để xin email cập nhật.",
+        )
+        direct_preference = retrieval_result(
+            "email-preference",
+            "policy_rule",
+            score=0.62,
+            heading="KH muốn email thay vì call",
+            content="Khi KH chỉ muốn nhận phản hồi qua email thay vì call, CS kiểm tra rule kênh liên hệ được duyệt trước khi quyết định kênh phản hồi.",
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([post_call, missing_email, direct_preference]), retrieval_response([])]),
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]),
+        ):
+            bundle = retrieve_for_chat(
+                GroundedChatRequest(
+                    question="KH chỉ muốn nhận phản hồi qua email thay vì call thì xử lý sao?",
+                    limit=10,
+                )
+            )
+
+        self.assertEqual(bundle.retrieval.results[0].chunk_id, "email-preference")
+        debug = {item["chunk_id"]: item for item in bundle.trace["candidate_debug"]}
+        self.assertGreater(debug["email-preference"]["policy_applicability_score"], debug["post-call-email"]["policy_applicability_score"])
+        self.assertIn("post_call_notification", debug["post-call-email"]["negative_constraint_violations"])
+
+    def test_policy_applicability_uses_normalized_metadata_without_alias_text(self) -> None:
+        post_call = retrieval_result(
+            "post-call-email",
+            "handling_rule",
+            score=0.88,
+            heading="Notification policy",
+            content="CS sends the completed financial result notification to the customer.",
+        ).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "handling_rule",
+                    "workflow_stage": "post_call_notification",
+                    "channel_type": ["email"],
+                    "review_status": "approved",
+                }
+            }
+        )
+        direct_metadata_rule = retrieval_result(
+            "metadata-direct",
+            "policy_rule",
+            score=0.5,
+            heading="Contact preference policy",
+            content="Use the approved contact-preference decision rule for this case.",
+        ).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "policy_rule",
+                    "workflow_stage": "contact_channel_selection",
+                    "condition": ["email_instead_of_call"],
+                    "channel_type": ["email", "call"],
+                    "review_status": "approved",
+                }
+            }
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([post_call, direct_metadata_rule]), retrieval_response([])]),
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]),
+        ):
+            bundle = retrieve_for_chat(
+                GroundedChatRequest(
+                    question="KH chỉ muốn nhận phản hồi qua email thay vì call thì xử lý sao?",
+                    limit=10,
+                )
+            )
+
+        self.assertEqual(bundle.retrieval.results[0].chunk_id, "metadata-direct")
+        debug = {item["chunk_id"]: item for item in bundle.trace["candidate_debug"]}
+        self.assertIn("workflow_stage_match", debug["metadata-direct"]["selected_because"])
+        self.assertIn("post_call_notification", debug["post-call-email"]["negative_constraint_violations"])
+
+    def test_unsupported_email_preference_scenario_stops_before_generation(self) -> None:
+        post_call = retrieval_result(
+            "post-call-email",
+            "handling_rule",
+            score=0.9,
+            heading="Gửi kết quả xử lý qua email sau khi call",
+            content="Sau khi call KH về kết quả tài chính beFood, CS gửi kết quả sau call qua email cho KH.",
+        )
+        image_flow = retrieval_result(
+            "image-flow",
+            "workflow_step",
+            score=0.82,
+            heading="KH gửi hình ảnh",
+            content="KH gửi hình ảnh minh chứng qua email để CS kiểm tra theo luồng bổ sung chứng từ.",
+        )
+        missing_email = retrieval_result(
+            "missing-email",
+            "handling_rule",
+            score=0.78,
+            heading="KH không có email",
+            content="Nếu KH không có email, CS gọi tối thiểu 2 lần cách nhau 10 phút để xin email cập nhật.",
+        )
+        rating_flow = retrieval_result(
+            "rating-escalation",
+            "escalation_rule",
+            score=0.7,
+            heading="Rating 1 sao complain thái độ TX",
+            content="KH rating 1 sao complain thái độ TX thì CS call out khai thác thêm thông tin và chuyển escalation theo quy định.",
+        )
+        retrieval = retrieval_response(
+            [
+                item.model_copy(update={"metadata": {**item.metadata, "chat_source_role": "direct_sop"}})
+                for item in [post_call, image_flow, missing_email, rating_flow]
+            ]
+        )
+        bundle = ChatRetrievalBundle(
+            retrieval=retrieval,
+            source_groups=[{"role": "direct_sop", "label": "Direct SOP", "sources": [item.model_dump() for item in retrieval.results]}],
+            trace={"strategy": "chat_kb_index_multi_stage", "final_count": 4},
+        )
+
+        with (
+            patch("app.chat.retrieve_for_chat", return_value=bundle),
+            patch("app.chat.generate_grounded_answer") as generate_answer,
+            patch("app.chat.repository.log_chat"),
+        ):
+            response = grounded_chat(GroundedChatRequest(question="KH chỉ muốn nhận phản hồi qua email thay vì call thì xử lý sao?"))
+
+        generate_answer.assert_not_called()
+        self.assertIn("unsupported_scenario_detected", response.warnings)
+        self.assertIn("no_primary_rule_for_customer_email_preference", response.retrieval_trace["unsupported_scenario"]["reason_codes"])
+        self.assertIn("chưa có rule trực tiếp", response.answer)
+
+    def test_context_debug_exposes_rerank_and_exclusion_reasons(self) -> None:
+        direct = retrieval_result(
+            "direct",
+            "policy_rule",
+            score=0.72,
+            heading="Kênh khai thác rating 1 sao",
+            content="KH gửi rating 1 sao và complain thái độ TX thì CS liên hệ KH qua call out để khai thác thêm thông tin.",
+        )
+        fallback = retrieval_result(
+            "fallback",
+            "handling_rule",
+            score=0.7,
+            heading="KH không có email",
+            content="Nếu KH không có email, CS gọi tối thiểu 2 lần cách nhau 10 phút để xin email cập nhật.",
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([direct, fallback]), retrieval_response([])]),
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]),
+        ):
+            bundle = retrieve_for_chat(
+                GroundedChatRequest(
+                    question="KH gửi rating 1 sao và complain thái độ TX, CS phải liên hệ qua kênh nào để khai thác thêm thông tin?",
+                    limit=10,
+                )
+            )
+
+        selected_debug = bundle.trace["candidate_debug"][0]
+        excluded_debug = bundle.trace["excluded_candidate_debug"][0]
+        self.assertEqual(selected_debug["chunk_id"], "direct")
+        self.assertEqual(excluded_debug["chunk_id"], "fallback")
+        self.assertIn("email_missing", excluded_debug["negative_constraint_violations"])
+        self.assertLess(excluded_debug["policy_applicability_score"], selected_debug["policy_applicability_score"])
+
+    def test_answer_grounding_contract_rejects_risky_claim_source(self) -> None:
+        risky = retrieval_result(
+            "risky",
+            "handling_rule",
+            score=0.7,
+            heading="Risky branch",
+            content="Diagnostic context only.",
+        ).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "handling_rule",
+                    "negative_constraint_violations": ["post_call_notification"],
+                    "policy_applicability_score": 0.25,
+                }
+            }
+        )
+        answer = GroundedAnswerPayload(
+            answer="Use this branch.",
+            source_indices=[1],
+            confidence=0.8,
+            claim_grounding=[
+                {
+                    "claim": "Use this branch.",
+                    "supported": True,
+                    "relevant_to_question": True,
+                    "source_indices": [1],
+                    "scope": "in_scope",
+                }
+            ],
+        )
+
+        grounded, warnings = enforce_answer_grounding_contract(answer, retrieval_response([risky]))
+
+        self.assertEqual(grounded.source_indices, [])
+        self.assertEqual(grounded.confidence, 0)
+        self.assertIn("claim_grounding_contract_rejected_answer", warnings)
 
     def test_semantic_duplicate_chunks_merge_before_context(self) -> None:
         first = retrieval_result(
