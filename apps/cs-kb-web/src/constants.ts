@@ -188,6 +188,9 @@ export const navItems = [
   },
 ] as const;
 
+export const documentWorkflowStepIds = ["documentUpload", "documentQueue", "documents"] as const;
+export const documentWorkflowItems = documentWorkflowStepIds.map((id) => navItems.find((item) => item.id === id)!);
+
 export const navGroups = [
   {
     label: "Agent surfaces",
@@ -195,7 +198,7 @@ export const navGroups = [
   },
   {
     label: "Review operations",
-    items: navItems.filter((item) => ["documentUpload", "documentQueue", "documents", "feedback", "relations"].includes(item.id)),
+    items: navItems.filter((item) => ["feedback", "relations"].includes(item.id)),
   },
   {
     label: "Admin and debug",
