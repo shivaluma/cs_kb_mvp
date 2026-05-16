@@ -69,7 +69,21 @@ type WorkflowGraphMetadata = {
 type WorkflowEdgeMetadata = NonNullable<WorkflowGraphMetadata["edges"]>[number];
 type WorkflowNodeMetadata = NonNullable<WorkflowGraphMetadata["nodes"]>[number];
 type WorkflowNodeKind = "decision" | "end" | "note" | "orderHistory" | "script" | "start" | "step";
-type DocumentStep = "view" | "gate" | "workflow" | "sop" | "publish" | "review" | "kbIndex" | "chunks";
+type DocumentStep =
+  | "assign"
+  | "backendGate"
+  | "chunks"
+  | "evidence"
+  | "kbIndex"
+  | "pipeline"
+  | "publish"
+  | "quality"
+  | "readiness"
+  | "sop"
+  | "units"
+  | "view"
+  | "workflowGraph"
+  | "workflowRequirements";
 type ReviewFilter = "needs_review" | "reviewed" | "approved" | "rejected" | "source_refs" | "atomic" | "all";
 type RequiredWorkflowUnit = {
   key: string;
@@ -259,7 +273,6 @@ export function DocumentsWorkspace({
   const missingWorkflowUnits = requiredWorkflowUnits.filter(
     (required) => !activeExtractionUnits.some((unit) => required.types.includes(unit.unit_type) && isReviewedExtractionUnit(unit)),
   );
-  const showWorkflowTab = workflowRequiresGraph || requiredWorkflowUnits.length > 0 || workflowGraphUnits.length > 0;
   const showKbIndexTab = isKbIndexWorkbook;
   const workflowRequirementStatuses = requiredWorkflowUnits.map((required) => {
     const matchingUnits = activeExtractionUnits.filter((unit) => required.types.includes(unit.unit_type));
@@ -407,9 +420,12 @@ export function DocumentsWorkspace({
   const bulkApproveLabel = bulkApproveScope === "atomic" ? "Approve all atomic units" : "Approve all units";
 
   useEffect(() => {
-    const allowedSteps = new Set<DocumentStep>(["view", "review", "sop", "gate", "publish", "chunks"]);
-    if (showWorkflowTab) {
-      allowedSteps.add("workflow");
+    const allowedSteps = new Set<DocumentStep>(["view", "assign", "evidence", "units", "sop", "backendGate", "readiness", "quality", "publish", "pipeline", "chunks"]);
+    if (requiredWorkflowUnits.length) {
+      allowedSteps.add("workflowRequirements");
+    }
+    if (workflowRequiresGraph || workflowGraphUnits.length > 0) {
+      allowedSteps.add("workflowGraph");
     }
     if (showKbIndexTab) {
       allowedSteps.add("kbIndex");
@@ -417,12 +433,12 @@ export function DocumentsWorkspace({
     if (!allowedSteps.has(documentStep)) {
       setDocumentStep("view");
     }
-  }, [documentStep, showKbIndexTab, showWorkflowTab]);
+  }, [documentStep, requiredWorkflowUnits.length, showKbIndexTab, workflowGraphUnits.length, workflowRequiresGraph]);
 
   function focusReviewRequirement(requirement: RequiredWorkflowUnit) {
     setRequiredUnitFocus(requirement);
     setReviewFilter("needs_review");
-    setDocumentStep("review");
+    setDocumentStep("units");
     window.setTimeout(() => {
       reviewSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 50);
@@ -982,19 +998,21 @@ export function DocumentsWorkspace({
 
         <Tabs className="space-y-4" onValueChange={(value) => setDocumentStep(value as DocumentStep)} value={documentStep}>
           <div className="sticky top-4 z-20 rounded-xl border bg-background/95 p-2 shadow-sm backdrop-blur">
-            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-muted/30 p-1 sm:grid-cols-3 lg:grid-cols-6 xl:grid-cols-7">
-              <TabsTrigger value="view">Source</TabsTrigger>
-              <TabsTrigger className="gap-2" value="review">
-                Review
+            <TabsList className="flex h-auto w-full flex-wrap gap-1 bg-muted/30 p-1">
+              <TabsTrigger className="min-w-20 flex-1" value="view">Source</TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1" value="assign">Assign</TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1" value="evidence">Evidence</TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1 gap-2" value="units">
+                Units
                 {pendingReviewCount ? (
                   <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                     {pendingReviewCount}
                   </span>
                 ) : null}
               </TabsTrigger>
-              {showWorkflowTab ? (
-                <TabsTrigger className="gap-2" value="workflow">
-                  Workflow
+              {requiredWorkflowUnits.length ? (
+                <TabsTrigger className="min-w-28 flex-1 gap-2" value="workflowRequirements">
+                  Requirements
                   {workflowGraphIssueCount || missingWorkflowUnits.length ? (
                     <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                       {workflowGraphIssueCount + missingWorkflowUnits.length}
@@ -1002,8 +1020,18 @@ export function DocumentsWorkspace({
                   ) : null}
                 </TabsTrigger>
               ) : null}
+              {workflowRequiresGraph || workflowGraphUnits.length ? (
+                <TabsTrigger className="min-w-20 flex-1 gap-2" value="workflowGraph">
+                  Graph
+                  {workflowGraphIssueCount ? (
+                    <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {workflowGraphIssueCount}
+                    </span>
+                  ) : null}
+                </TabsTrigger>
+              ) : null}
               {showKbIndexTab ? (
-                <TabsTrigger className="gap-2" value="kbIndex">
+                <TabsTrigger className="min-w-20 flex-1 gap-2" value="kbIndex">
                   Index
                   {kbIndexPlan?.summary?.unresolved_target_count ? (
                     <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
@@ -1012,15 +1040,23 @@ export function DocumentsWorkspace({
                   ) : null}
                 </TabsTrigger>
               ) : null}
-              <TabsTrigger value="sop">SOP</TabsTrigger>
-              <TabsTrigger className="gap-2" value="gate">
-                Verify
+              <TabsTrigger className="min-w-20 flex-1" value="sop">SOP</TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1 gap-2" value="backendGate">
+                API
+                <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {publishReadinessLoading ? "..." : publishReadiness ? publishReadiness.ready ? "ok" : publishReadiness.failure_count : "-"}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1 gap-2" value="readiness">
+                Ready
                 <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                   {readinessChecks.filter((check) => check.passed).length}/{readinessChecks.length}
                 </span>
               </TabsTrigger>
-              <TabsTrigger value="publish">Publish</TabsTrigger>
-              <TabsTrigger value="chunks">Debug</TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1" value="quality">Quality</TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1" value="publish">Publish</TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1" value="pipeline">Jobs</TabsTrigger>
+              <TabsTrigger className="min-w-20 flex-1" value="chunks">Chunks</TabsTrigger>
             </TabsList>
           </div>
 
@@ -1034,13 +1070,61 @@ export function DocumentsWorkspace({
             />
           </TabsContent>
 
-          <TabsContent className="mt-0 space-y-4" value="review">
+          <TabsContent className="mt-0 space-y-4" value="assign">
+            <Card className="rounded-xl">
+              <CardHeader className="border-b pb-4">
+                <CardTitle>Collection assignment</CardTitle>
+                <CardDescription>Approve the retrieval collection before reviewing individual units.</CardDescription>
+              </CardHeader>
+              <CardContent className="pt-4">
+                {selectedDocument && extractionUnits.length ? (
+                <CollectionAssignmentPanel
+                  canEdit={canEditSelectedVersion}
+                  collections={collections}
+                  document={selectedDocument}
+                  onApply={(collection) => onApplyCollection(extractionUnits, collection)}
+                  units={extractionUnits}
+                />
+                ) : !selectedDocument ? (
+                  <EmptyPanel icon={GitBranch} title="Select a document" text="Choose a source file before assigning collections." compact />
+                ) : extractionUnitsLoading ? (
+                  <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" />
+                    Loading extraction units
+                  </div>
+                ) : (
+                  <EmptyPanel icon={GitBranch} title="No units to assign" text="This version has no extracted units yet." compact />
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent className="mt-0 space-y-4" value="evidence">
+            {!selectedDocument ? (
+              <Card className="rounded-xl">
+                <CardContent className="pt-4">
+                  <EmptyPanel icon={FileText} title="Select a document" text="Choose a source file to inspect source evidence." compact />
+                </CardContent>
+              </Card>
+            ) : (
+              <SourceViewer
+                extractionUnits={extractionUnits}
+                loading={versionRawLoading}
+                selectedDocument={selectedDocument}
+                selectedVersion={selectedVersion}
+                sourceEvidenceView={sourceEvidenceView}
+                versionRaw={versionRaw}
+              />
+            )}
+          </TabsContent>
+
+          <TabsContent className="mt-0 space-y-4" value="units">
           <Card className="rounded-xl" ref={reviewSectionRef}>
             <CardHeader className="border-b pb-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <CardTitle>Extraction review</CardTitle>
-                  <CardDescription>Start here: compare source evidence with extracted units, then approve or edit before publish.</CardDescription>
+                  <CardTitle>Structured units</CardTitle>
+                  <CardDescription>Edit, reject, approve, or acknowledge source references before publish.</CardDescription>
                 </div>
                 {reviewStats.total ? (
                   <div className="flex flex-wrap gap-2">
@@ -1052,15 +1136,6 @@ export function DocumentsWorkspace({
               </div>
             </CardHeader>
             <CardContent className="pt-4">
-              {selectedDocument && extractionUnits.length ? (
-                <CollectionAssignmentPanel
-                  canEdit={canEditSelectedVersion}
-                  collections={collections}
-                  document={selectedDocument}
-                  onApply={(collection) => onApplyCollection(extractionUnits, collection)}
-                  units={extractionUnits}
-                />
-              ) : null}
               {!selectedDocument ? (
                 <EmptyPanel icon={GitBranch} title="Select a document" text="Choose a source file to inspect extracted knowledge units." compact />
               ) : extractionUnitsLoading ? (
@@ -1071,16 +1146,7 @@ export function DocumentsWorkspace({
               ) : extractionUnits.length === 0 ? (
                 <EmptyPanel icon={GitBranch} title="No extraction units" text="This version has no extracted units yet." compact />
               ) : (
-                <div className="grid gap-4 2xl:grid-cols-[minmax(24rem,0.9fr)_minmax(0,1.6fr)]">
-                  <SourceViewer
-                    extractionUnits={extractionUnits}
-                    loading={versionRawLoading}
-                    selectedDocument={selectedDocument}
-                    selectedVersion={selectedVersion}
-                    sourceEvidenceView={sourceEvidenceView}
-                    versionRaw={versionRaw}
-                  />
-                  <div className="min-w-0">
+                <div className="min-w-0">
                     <div className="sticky top-3 z-10 mb-3 rounded-xl border bg-background/95 p-3 shadow-sm backdrop-blur">
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
@@ -1213,7 +1279,6 @@ export function DocumentsWorkspace({
                         ) : null}
                       </div>
                     </ScrollArea>
-                  </div>
                 </div>
               )}
             </CardContent>
@@ -1235,30 +1300,32 @@ export function DocumentsWorkspace({
             </TabsContent>
           ) : null}
 
-          {showWorkflowTab ? (
-            <TabsContent className="mt-0 space-y-4" value="workflow">
-              {requiredWorkflowUnits.length ? (
-                <WorkflowRequirementsPanel
-                  busy={busyKey === "create-unit"}
-                  canEdit={canEditSelectedVersion}
-                  defaultEffectiveFrom={defaultEffectiveFrom}
-                  onCreate={(requirement) => {
-                    if (!selectedVersion) {
-                      return;
-                    }
-                    onCreateExtractionUnit(selectedVersion.version_id, buildWorkflowRequirementStub(requirement, selectedDocument, selectedVersion, defaultEffectiveFrom));
-                    focusReviewRequirement(requirement);
-                  }}
-                  onConvertCandidate={(unit, requirement) => {
-                    onUpdateExtractionUnit(unit, buildWorkflowRequirementConversion(unit, requirement, defaultEffectiveFrom));
-                    focusReviewRequirement(requirement);
-                  }}
-                  onReviewExisting={focusReviewRequirement}
-                  requirements={workflowRequirementStatuses}
-                />
-              ) : null}
+          {requiredWorkflowUnits.length ? (
+            <TabsContent className="mt-0 space-y-4" value="workflowRequirements">
+              <WorkflowRequirementsPanel
+                busy={busyKey === "create-unit"}
+                canEdit={canEditSelectedVersion}
+                defaultEffectiveFrom={defaultEffectiveFrom}
+                onCreate={(requirement) => {
+                  if (!selectedVersion) {
+                    return;
+                  }
+                  onCreateExtractionUnit(selectedVersion.version_id, buildWorkflowRequirementStub(requirement, selectedDocument, selectedVersion, defaultEffectiveFrom));
+                  focusReviewRequirement(requirement);
+                }}
+                onConvertCandidate={(unit, requirement) => {
+                  onUpdateExtractionUnit(unit, buildWorkflowRequirementConversion(unit, requirement, defaultEffectiveFrom));
+                  focusReviewRequirement(requirement);
+                }}
+                onReviewExisting={focusReviewRequirement}
+                requirements={workflowRequirementStatuses}
+              />
+            </TabsContent>
+          ) : null}
 
-              {workflowRequiresGraph ? (
+          {workflowRequiresGraph || workflowGraphUnits.length ? (
+            <TabsContent className="mt-0 space-y-4" value="workflowGraph">
+              {workflowGraphUnit || workflowRequiresGraph ? (
                 <WorkflowGraphPanel
                   canEdit={canEditSelectedVersion}
                   graph={workflowGraph}
@@ -1269,7 +1336,13 @@ export function DocumentsWorkspace({
                   onReviewEdge={(unit, edge, status, reason) => onUpdateExtractionUnit(unit, buildWorkflowEdgeReviewUpdate(unit, edge, status, reason))}
                   saving={savingUnitId === workflowGraphUnit?.unit_id}
                 />
-              ) : null}
+              ) : (
+                <Card className="rounded-xl">
+                  <CardContent className="pt-4">
+                    <EmptyPanel icon={Network} title="No workflow graph" text="This version has no workflow graph unit to review." compact />
+                  </CardContent>
+                </Card>
+              )}
             </TabsContent>
           ) : null}
 
@@ -1317,7 +1390,7 @@ export function DocumentsWorkspace({
             />
           </TabsContent>
 
-          <TabsContent className="mt-0 space-y-4" value="gate">
+          <TabsContent className="mt-0 space-y-4" value="backendGate">
             {workflowRequiresGraph && workflowGraphIssueCount > 0 ? (
               <Card className="rounded-xl border-destructive/35 bg-destructive/5">
                 <CardHeader className="border-b border-destructive/20 pb-4">
@@ -1325,12 +1398,12 @@ export function DocumentsWorkspace({
                     <div>
                       <CardTitle className="text-destructive">Workflow graph blocks publish</CardTitle>
                       <CardDescription>
-                        This is resolved in the Workflow tab. Verify only shows the blocker summary.
+                        This is resolved in the Graph tab. API gate only shows the blocker summary.
                       </CardDescription>
                     </div>
-                    <Button onClick={() => setDocumentStep("workflow")} size="sm" type="button" variant="secondary">
+                    <Button onClick={() => setDocumentStep("workflowGraph")} size="sm" type="button" variant="secondary">
                       <Network data-icon="inline-start" className="size-4" />
-                      Open Workflow review
+                      Open Graph review
                     </Button>
                   </div>
                 </CardHeader>
@@ -1345,7 +1418,7 @@ export function DocumentsWorkspace({
                     <p className="mt-2 text-xs leading-5 text-muted-foreground">
                       {workflowGraphWarningsAcknowledged
                         ? "Topology warnings have an acknowledgement reason."
-                        : "Open the Workflow tab, compare against source, then fill Acknowledge with reason."}
+                        : "Open the Graph tab, compare against source, then fill Acknowledge with reason."}
                     </p>
                   </div>
                   <div className="rounded-lg border bg-background p-3">
@@ -1357,7 +1430,7 @@ export function DocumentsWorkspace({
                     </div>
                     <p className="mt-2 text-xs leading-5 text-muted-foreground">
                       {workflowEdgeReviewSummary.blockingCount
-                        ? "Open the Workflow tab and confirm each decision branch, or acknowledge ambiguous branches with a reason."
+                        ? "Open the Graph tab and confirm each decision branch, or acknowledge ambiguous branches with a reason."
                         : "All required decision branches are confirmed or acknowledged."}
                     </p>
                   </div>
@@ -1404,7 +1477,9 @@ export function DocumentsWorkspace({
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
 
+          <TabsContent className="mt-0 space-y-4" value="readiness">
             <Card className="rounded-xl">
               <CardHeader className="border-b pb-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1472,7 +1547,9 @@ export function DocumentsWorkspace({
             </Card>
 
             <PublishTaskList tasks={publishTasks} ready={readinessPassed && !selectedIsArchived && !publishReadinessLoading && publishReadiness?.ready !== false} />
+          </TabsContent>
 
+          <TabsContent className="mt-0 space-y-4" value="quality">
             <SopQualityAuditPanel audit={sopQualityAudit} />
           </TabsContent>
 
@@ -1509,7 +1586,7 @@ export function DocumentsWorkspace({
                     } else if (backendPublishBlocked) {
                       publishBlockReason = `Backend publish gate still has ${publishReadiness?.failure_count ?? 0} blocker(s).`;
                     } else if (!readinessPassed) {
-                      publishBlockReason = "Publishing is blocked until the Verify checklist passes.";
+                      publishBlockReason = "Publishing is blocked until the Checklist passes.";
                     }
                     return (
                     <div className={cn("rounded-lg border p-3", selectedChunkVersionId === version.version_id ? "bg-muted/35" : "bg-card")} key={version.version_id}>
@@ -1648,9 +1725,9 @@ export function DocumentsWorkspace({
                         <div className="mt-3 rounded-lg border bg-muted/15 p-3">
                           <p className="text-xs leading-5 text-muted-foreground">{publishBlockReason}</p>
                           {isInspectedVersion && (!readinessPassed || backendPublishBlocked) ? (
-                            <Button className="mt-2 h-8 px-3" onClick={() => setDocumentStep("gate")} size="sm" type="button" variant="secondary">
+                            <Button className="mt-2 h-8 px-3" onClick={() => setDocumentStep("readiness")} size="sm" type="button" variant="secondary">
                               <ShieldCheck data-icon="inline-start" className="size-3.5" />
-                              Open Verify checklist
+                              Open Checklist
                             </Button>
                           ) : null}
                         </div>
@@ -1673,9 +1750,11 @@ export function DocumentsWorkspace({
           </Card>
           </TabsContent>
 
-          <TabsContent className="mt-0 space-y-4" value="chunks">
+          <TabsContent className="mt-0 space-y-4" value="pipeline">
             <ExtractionPipelineTrace inspection={extractionPipelineInspection} jobs={extractionPipeline} loading={extractionPipelineLoading} />
+          </TabsContent>
 
+          <TabsContent className="mt-0 space-y-4" value="chunks">
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
             <CardTitle>Indexed chunks</CardTitle>
