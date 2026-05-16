@@ -23,7 +23,7 @@ class Settings:
         self.chunk_target_tokens = int(os.getenv("CHUNK_TARGET_TOKENS", "260"))
         self.chunk_overlap_tokens = int(os.getenv("CHUNK_OVERLAP_TOKENS", "48"))
         self.max_upload_bytes = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
-        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
+        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
         self.openrouter_extraction_model = os.getenv("OPENROUTER_EXTRACTION_MODEL", self.openrouter_model).strip() or self.openrouter_model

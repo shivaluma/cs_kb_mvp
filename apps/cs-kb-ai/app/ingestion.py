@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any
 
 from app.embedding import embed_texts, embedding_runtime_metadata
@@ -5619,12 +5620,91 @@ def suggest_metadata(
         }
         for chunk in chunks[:30]
     ]
-    suggestion, signals, warnings = suggest_document_metadata(
-        filename,
-        raw_text,
-        str(enrichment.get("document_type", "unknown")),
-        str(enrichment.get("source_type", "upload")),
-        unit_summary,
-    )
+    try:
+        suggestion, signals, warnings = suggest_document_metadata(
+            filename,
+            raw_text,
+            str(enrichment.get("document_type", "unknown")),
+            str(enrichment.get("source_type", "upload")),
+            unit_summary,
+        )
+    except Exception as exc:
+        suggestion = deterministic_metadata_suggestion(filename, raw_text, enrichment)
+        signals = {
+            "matched_terms": metadata_signal_terms(raw_text),
+            "missing_fields": ["ai_metadata_suggestion"],
+            "warnings": [f"openrouter_metadata_suggestion_failed:{exc.__class__.__name__}"],
+        }
+        warnings = ["metadata_preview_fallback_used", f"openrouter_metadata_suggestion_failed:{exc.__class__.__name__}"]
     signals["metadata_warnings"] = warnings
     return suggestion, signals
+
+
+def deterministic_metadata_suggestion(filename: str, raw_text: str, enrichment: dict[str, Any]) -> dict[str, Any]:
+    title = fallback_document_title(filename, raw_text)
+    tags = metadata_signal_terms(raw_text)
+    try:
+        extraction_confidence = float(enrichment.get("extraction_confidence") or 0.0)
+    except (TypeError, ValueError):
+        extraction_confidence = 0.0
+    return {
+        "title": title,
+        "audience": infer_metadata_audience(raw_text),
+        "vertical": "",
+        "category": "",
+        "tags": tags[:8],
+        "case_reasons": [],
+        "owner_team": "",
+        "source": "metadata_preview_fallback",
+        "document_type": str(enrichment.get("document_type") or "unknown"),
+        "source_type": str(enrichment.get("source_type") or "upload"),
+        "review_status": "needs_review",
+        "extraction_confidence": extraction_confidence,
+        "extraction_status": "previewed",
+        "extraction_warnings": [
+            *list(enrichment.get("extraction_warnings") or []),
+            "metadata_preview_fallback_used",
+        ],
+    }
+
+
+def fallback_document_title(filename: str, raw_text: str) -> str:
+    for line in str(raw_text or "").splitlines():
+        cleaned = re.sub(r"\s+", " ", line).strip(" #\t")
+        if 6 <= len(cleaned) <= 120:
+            return cleaned
+    return Path(filename or "document").stem or "Document upload"
+
+
+def metadata_signal_terms(raw_text: str) -> list[str]:
+    normalized = normalize_for_signal(raw_text)
+    signals = [
+        ("refund", ["refund", "hoan tien", "hoàn tiền"]),
+        ("payment", ["payment", "thanh toan", "thanh toán"]),
+        ("account", ["account", "tai khoan", "tài khoản"]),
+        ("driver", ["driver", "tai xe", "tài xế", "tx"]),
+        ("customer", ["customer", "khach hang", "khách hàng", "kh"]),
+        ("merchant", ["merchant", "nha hang", "nhà hàng", "mcu"]),
+        ("email", ["email", "mail"]),
+        ("call", ["call", "cuoc goi", "cuộc gọi"]),
+        ("chat", ["chat"]),
+        ("compliance", ["compliance", "zt", "che tai", "chế tài", "audit"]),
+    ]
+    matched = [
+        label
+        for label, terms in signals
+        if any(normalize_for_signal(term) in normalized for term in terms)
+    ]
+    return list(dict.fromkeys(matched))
+
+
+def infer_metadata_audience(raw_text: str) -> list[str]:
+    normalized = normalize_for_signal(raw_text)
+    audience: list[str] = []
+    if any(term in normalized for term in ["khach hang", "customer", " kh "]):
+        audience.append("customer")
+    if any(term in normalized for term in ["tai xe", "driver", " tx "]):
+        audience.append("driver")
+    if any(term in normalized for term in ["merchant", "nha hang", "mcu"]):
+        audience.append("merchant")
+    return audience

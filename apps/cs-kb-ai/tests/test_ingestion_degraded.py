@@ -19,6 +19,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.original_renderer = ingestion.render_pdf_pages_as_data_urls
         self.original_refiner = ingestion.refine_extracted_units
         self.original_source_evidence_formatter = ingestion.format_source_evidence_view
+        self.original_metadata_suggester = ingestion.suggest_document_metadata
 
     def tearDown(self) -> None:
         ingestion.extract_rule_table_units = self.original_rule_extractor
@@ -28,6 +29,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         ingestion.render_pdf_pages_as_data_urls = self.original_renderer
         ingestion.refine_extracted_units = self.original_refiner
         ingestion.format_source_evidence_view = self.original_source_evidence_formatter
+        ingestion.suggest_document_metadata = self.original_metadata_suggester
 
     def test_docx_policy_rule_openrouter_disabled_creates_degraded_units(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_disabled"])
@@ -63,6 +65,28 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertTrue(any(artifact["artifact_type"] == "degraded_draft" for artifact in artifacts))
         self.assertTrue(any(artifact["artifact_type"] == "verification_report" for artifact in artifacts))
         self.assertEqual(enrichment["pipeline_job_status"], "degraded")
+
+    def test_metadata_preview_falls_back_when_openrouter_fails(self) -> None:
+        def fail_metadata(*_args, **_kwargs):
+            raise RuntimeError("401 Unauthorized")
+
+        ingestion.suggest_document_metadata = fail_metadata
+
+        preview = ingestion.preview_document_metadata(
+            filename="refund-policy.txt",
+            content_type="text/plain",
+            data=(
+                "Quy định hoàn tiền cho khách hàng\n"
+                "CS kiểm tra thanh toán và tài khoản trước khi xử lý refund."
+            ).encode("utf-8"),
+        )
+
+        self.assertEqual(preview["title"], "Quy định hoàn tiền cho khách hàng")
+        self.assertEqual(preview["suggested_metadata"].source, "metadata_preview_fallback")
+        self.assertIn("metadata_preview_fallback_used", preview["suggested_metadata"].extraction_warnings)
+        self.assertIn("metadata_preview_fallback_used", preview["signals"]["metadata_warnings"])
+        self.assertTrue(any(warning.startswith("openrouter_metadata_suggestion_failed") for warning in preview["signals"]["metadata_warnings"]))
+        self.assertIn("refund", preview["suggested_metadata"].tags)
 
     def test_rule_table_prompt_shape_merges_full_sop_into_units_contract(self) -> None:
         normalized_payload, warnings = openrouter.normalize_rule_table_response_payload(

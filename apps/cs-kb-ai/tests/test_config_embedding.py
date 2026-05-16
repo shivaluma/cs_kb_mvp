@@ -30,6 +30,13 @@ class EmbeddingConfigTest(unittest.TestCase):
         self.assertEqual(settings.embedding_provider, "local_hash")
         self.assertEqual(settings.embedding_model, DEFAULT_EMBEDDING_MODEL)
 
+    def test_openrouter_api_key_is_stripped(self) -> None:
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "  openrouter-key\n"}, clear=True):
+            settings = Settings()
+
+        self.assertEqual(settings.openrouter_api_key, "openrouter-key")
+        self.assertEqual(settings.embedding_api_key, "openrouter-key")
+
 
 if __name__ == "__main__":
     unittest.main()
