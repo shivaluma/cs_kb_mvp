@@ -171,6 +171,110 @@ class ChatRetrievalTest(unittest.TestCase):
         self.assertEqual(bundle.retrieval.results[0].chunk_id, "outbound")
         self.assertIn("si_lock_not_asked", bundle.retrieval.results[1].metadata["chat_match_penalties"])
 
+    def test_narrow_contact_channel_query_penalizes_unasked_email_retry_branch(self) -> None:
+        fallback = retrieval_result(
+            "fallback",
+            "handling_rule",
+            score=0.78,
+            heading="Khai thác rating 1 sao và cập nhật email",
+            content=(
+                "KH gửi rating 1 sao và complain thái độ TX thì CS call out để khai thác thêm thông tin. "
+                "Nếu KH không có email, CS gọi tối thiểu 2 lần, cách nhau 10 phút để xin email cập nhật."
+            ),
+        )
+        primary = retrieval_result(
+            "primary",
+            "handling_rule",
+            score=0.72,
+            heading="Kênh khai thác rating 1 sao",
+            content="KH gửi rating 1 sao và complain thái độ TX thì CS liên hệ KH qua call out để khai thác thêm thông tin.",
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([fallback, primary]), retrieval_response([])]),
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]),
+        ):
+            bundle = retrieve_for_chat(
+                GroundedChatRequest(
+                    question="KH gửi rating 1 sao và complain thái độ TX, CS phải liên hệ qua kênh nào để khai thác thêm thông tin?",
+                    limit=10,
+                )
+            )
+
+        self.assertEqual(bundle.retrieval.results[0].chunk_id, "primary")
+        self.assertIn("unasked_branch:email_missing", bundle.retrieval.results[1].metadata["chat_match_penalties"])
+        self.assertIn("unasked_branch:retry_policy", bundle.retrieval.results[1].metadata["chat_match_penalties"])
+
+    def test_narrow_contact_channel_query_skips_parent_full_sop_context(self) -> None:
+        direct = retrieval_result(
+            "direct-channel",
+            "handling_rule",
+            score=0.8,
+            heading="Kênh khai thác rating 1 sao",
+            content="KH gửi rating 1 sao và complain thái độ TX thì CS liên hệ KH qua call out để khai thác thêm thông tin.",
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([direct]), retrieval_response([])]),
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]) as parent_rows,
+        ):
+            bundle = retrieve_for_chat(
+                GroundedChatRequest(
+                    question="KH gửi rating 1 sao và complain thái độ TX, CS phải liên hệ qua kênh nào để khai thác thêm thông tin?",
+                    limit=10,
+                )
+            )
+
+        parent_rows.assert_not_called()
+        self.assertTrue(bundle.trace["parent_context_skipped_by_scope"])
+
+    def test_grounded_chat_prunes_unasked_fallback_branch_from_answer(self) -> None:
+        result = retrieval_result(
+            "source",
+            "handling_rule",
+            score=0.84,
+            heading="Kênh khai thác rating 1 sao",
+            content=(
+                "KH gửi rating 1 sao và complain thái độ TX thì CS liên hệ KH qua call out để khai thác thêm thông tin. "
+                "Nếu KH không có email, CS gọi tối thiểu 2 lần, cách nhau 10 phút để xin email cập nhật."
+            ),
+        )
+        retrieval = retrieval_response([result.model_copy(update={"metadata": {**result.metadata, "chat_source_role": "direct_sop"}})])
+        bundle = ChatRetrievalBundle(
+            retrieval=retrieval,
+            source_groups=[{"role": "direct_sop", "label": "Direct SOP", "sources": [result.model_dump()]}],
+            trace={"strategy": "chat_kb_index_multi_stage", "final_count": 1},
+        )
+        answer = GroundedAnswerPayload(
+            answer=(
+                "CS cần thực hiện call out để khai thác thêm thông tin. "
+                "Nếu KH không có email, CS cần gọi tối thiểu 2 lần, cách nhau 10 phút để xin email cập nhật."
+            ),
+            steps=["Nếu KH không có email, gọi tối thiểu 2 lần cách nhau 10 phút."],
+            warnings=[],
+            confidence=0.86,
+            source_indices=[1],
+        )
+
+        with (
+            patch("app.chat.retrieve_for_chat", return_value=bundle),
+            patch("app.chat.generate_grounded_answer", return_value=(answer, ["model_used"])),
+            patch("app.chat.repository.unresolved_relations_for_chunks", return_value=[]),
+            patch("app.chat.repository.log_chat"),
+        ):
+            response = grounded_chat(
+                GroundedChatRequest(
+                    question="KH gửi rating 1 sao và complain thái độ TX, CS phải liên hệ qua kênh nào để khai thác thêm thông tin?"
+                )
+            )
+
+        self.assertEqual(response.answer, "CS cần thực hiện call out để khai thác thêm thông tin.")
+        self.assertEqual(response.steps, [])
+        self.assertIn("out_of_scope_branch_claim_removed:email_missing", response.warnings)
+        self.assertIn("out_of_scope_branch_claim_removed:retry_policy", response.warnings)
+
     def test_semantic_duplicate_chunks_merge_before_context(self) -> None:
         first = retrieval_result(
             "policy",

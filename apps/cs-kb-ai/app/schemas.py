@@ -1362,6 +1362,11 @@ class GroundedAnswerPayload(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0, le=1)
     source_indices: list[int] = Field(default_factory=list)
+    direct_answer: str = ""
+    conditions_used: list[str] = Field(default_factory=list)
+    conditional_flows: list[dict[str, Any]] = Field(default_factory=list)
+    excluded_source_indices: list[int] = Field(default_factory=list)
+    claim_grounding: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class GroundedChatResponse(BaseModel):
@@ -1377,6 +1382,7 @@ class GroundedChatResponse(BaseModel):
     retrieval: RetrievalResponse
     source_groups: list[dict[str, Any]] = Field(default_factory=list)
     retrieval_trace: dict[str, Any] = Field(default_factory=dict)
+    answer_scope: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int
     model_route: str = "auto"
     model_used: str = ""

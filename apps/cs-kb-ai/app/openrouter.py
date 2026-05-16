@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from app.answer_scope import build_answer_scope
 from app.config import settings
 from app.search_labels import meaningful_search_label
 from app.schemas import (
@@ -1696,6 +1697,7 @@ def generate_grounded_answer(
     if not retrieval.results:
         return None, ["missing_published_sources"]
 
+    answer_scope = build_answer_scope(question)
     sources = []
     for index, result in enumerate(retrieval.results, start=1):
         source_ref = f"[{index}] {result.title} v{result.version_number} / {result.section} / chunk {result.chunk_index}"
@@ -1710,6 +1712,13 @@ def generate_grounded_answer(
             "risk_level": result.metadata.get("risk_level"),
             "tags": result.metadata.get("tags"),
             "aliases": result.metadata.get("aliases"),
+            "condition": result.metadata.get("condition"),
+            "actor": result.metadata.get("actor") or result.metadata.get("owner"),
+            "channel": result.metadata.get("channel"),
+            "branch_type": result.metadata.get("branch_type"),
+            "answer_type": result.metadata.get("answer_type"),
+            "chat_match_penalties": result.metadata.get("chat_match_penalties"),
+            "chat_scope_unasked_branches": result.metadata.get("chat_scope_unasked_branches"),
         }
         sources.append(
             "\n".join(
@@ -1748,6 +1757,9 @@ def generate_grounded_answer(
                     "Không đổi nhẹ wording làm thay đổi mức độ policy, ví dụ không tự đổi 'chưa thể hỗ trợ' thành 'từ chối hỗ trợ' nếu source không dùng cụm đó. "
                     "Nguồn có metadata chat_source_role=issue_router/tool_link/action_template chỉ là context điều hướng/tool/action, không đủ để kết luận policy nếu không có direct_sop hoặc related_sop. "
                     "Nếu chỉ có context index/tool/action mà không có source role direct_sop hoặc related_sop, phải nói chưa đủ SOP được link để trả lời chắc chắn. "
+                    "Kỷ luật scope cho SOP vận hành: xác định đúng field user hỏi (ví dụ kênh liên hệ, số lần retry, SLA, escalation), trả lời field đó trước và không kéo thêm nhánh fallback/exception/retry/email/SLA/case/escalation nếu user không hỏi. "
+                    "Một claim vừa phải được source hỗ trợ vừa phải đúng scope câu hỏi; supported-but-out-of-scope thì loại khỏi answer và có thể ghi vào excluded_source_indices/claim_grounding. "
+                    "Nếu source chứa cả primary action và conditional flow, chỉ đưa conditional flow khi điều kiện đó xuất hiện rõ trong Current question. "
                     "Câu trả lời phải ngắn, actionable, tiếng Việt, và có warning nếu source có risk/compliance/security/financial/account/escalation signal. "
                     + (
                         "Đây là câu hỏi có rủi ro cao hoặc policy/exception: nếu source không nêu rõ điều kiện/action, bắt buộc từ chối kết luận và hướng dẫn mở source/escalate Lead. "
@@ -1756,7 +1768,7 @@ def generate_grounded_answer(
                         else ""
                     )
                     +
-                    "Bắt buộc trả JSON object đúng schema: {\"answer\":\"...\",\"steps\":[\"...\"],\"warnings\":[\"...\"],\"confidence\":0.0,\"source_indices\":[1]}. "
+                    "Bắt buộc trả JSON object đúng schema: {\"answer\":\"...\",\"steps\":[\"...\"],\"warnings\":[\"...\"],\"confidence\":0.0,\"source_indices\":[1],\"direct_answer\":\"...\",\"conditions_used\":[\"...\"],\"conditional_flows\":[],\"excluded_source_indices\":[],\"claim_grounding\":[{\"claim\":\"...\",\"source_index\":1,\"scope\":\"in_scope\"}]}. "
                     "source_indices chỉ được chứa index của SOURCES đã dùng. Nếu không dùng source nào, để [] và answer phải nói không đủ căn cứ."
                 ),
             },
@@ -1767,6 +1779,12 @@ def generate_grounded_answer(
                     f"Recent user context, for intent resolution only, not policy evidence:\n{recent_user_text or '(none)'}\n\n"
                     f"Previous assistant answer summary, for resolving follow-up references only, not policy evidence. Verify every claim against SOURCES before answering:\n{recent_assistant_text or '(none)'}\n\n"
                     f"Session summary, for intent resolution only, not policy evidence:\n{session_summary_text or '(none)'}\n\n"
+                    f"Answer scope contract:\n{json.dumps(answer_scope.model_dump(), ensure_ascii=False)}\n\n"
+                    "Scope instructions:\n"
+                    "- Nếu is_narrow=true, answer tối đa 1-2 câu, chỉ trả procedural field được hỏi.\n"
+                    "- Không include branch nằm trong excluded_branch_types, kể cả branch đó có trong SOURCES.\n"
+                    "- conditional_flows chỉ được có item khi Current question nêu rõ condition tương ứng.\n"
+                    "- claim_grounding.scope phải là in_scope cho mọi claim xuất hiện trong answer.\n\n"
                     "SOURCES, the only allowed evidence:\n"
                     + "\n\n---\n\n".join(sources)
                 ),

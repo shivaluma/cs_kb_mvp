@@ -8,6 +8,7 @@ import unicodedata
 from typing import Any
 
 from app import repository
+from app.answer_scope import build_answer_scope, prune_answer_to_scope, scope_penalty
 from app.config import settings
 from app.openrouter import generate_chat_session_title, generate_grounded_answer
 from app.retrieval import retrieve, to_result
@@ -108,6 +109,13 @@ INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
     "gsm": ("gsm", "xanh sm"),
     "taxi_phone": ("so dien thoai hang taxi", "hang taxi", "thanh nga", "van xuan", "thang long"),
     "email": ("email", "e-mail"),
+    "email_missing": ("khong co email", "không có email", "chua co email", "chưa có email", "thieu email", "thiếu email"),
+    "email_collection": ("xin email", "cap nhat email", "cập nhật email", "bo sung email", "bổ sung email"),
+    "retry_policy": ("goi lai", "gọi lại", "toi thieu 2 lan", "tối thiểu 2 lần", "cach nhau 10 phut", "cách nhau 10 phút"),
+    "contact_channel": ("kenh nao", "kênh nào", "qua kenh", "qua kênh", "lien he qua", "liên hệ qua"),
+    "info_collection": ("khai thac them thong tin", "khai thác thêm thông tin", "xin them thong tin", "xin thêm thông tin"),
+    "rating_1_star": ("rating 1 sao", "danh gia 1 sao", "đánh giá 1 sao"),
+    "driver_attitude_complaint": ("complain thai do tx", "complain thái độ tx", "thai do tx", "thái độ tx", "thai do tai xe", "thái độ tài xế"),
     "current_trip": ("chuyen dang loi", "chuyen can ho tro", "trip hien tai", "don dang loi"),
     "completed_trip": ("chuyen hoan thanh gan nhat", "trip hoan thanh gan nhat", "khong phai chuyen xe can ho tro"),
 }
@@ -131,6 +139,7 @@ class ChatRetrievalBundle:
 
 def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
     started_at = time.perf_counter()
+    answer_scope = build_answer_scope(request.question)
     bundle = retrieve_for_chat(request)
     retrieval = bundle.retrieval
 
@@ -153,6 +162,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             retrieval=retrieval,
             source_groups=bundle.source_groups,
             retrieval_trace=bundle.trace,
+            answer_scope=answer_scope.model_dump(),
             latency_ms=elapsed_ms(started_at),
             model_route=selection.route,
             model_used=selection.model,
@@ -178,6 +188,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             retrieval=retrieval,
             source_groups=bundle.source_groups,
             retrieval_trace=bundle.trace,
+            answer_scope=answer_scope.model_dump(),
             latency_ms=elapsed_ms(started_at),
             model_route=selection.route,
             model_used=selection.model,
@@ -225,6 +236,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             retrieval=retrieval,
             source_groups=bundle.source_groups,
             retrieval_trace=bundle.trace,
+            answer_scope=answer_scope.model_dump(),
             latency_ms=elapsed_ms(started_at),
             model_route=selection.route,
             model_used=used_model,
@@ -244,6 +256,8 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
     else:
         answer_text = answer.answer
         steps = answer.steps
+        answer_text, steps, scope_warnings = prune_answer_to_scope(answer_text, steps, request.question)
+        warnings.extend(scope_warnings)
     unresolved_dependencies = repository.unresolved_relations_for_chunks([result.chunk_id for result in cited_results or retrieval.results])
     if unresolved_dependencies:
         warnings.append("matched_source_has_unresolved_dependency")
@@ -275,6 +289,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         retrieval=retrieval,
         source_groups=bundle.source_groups,
         retrieval_trace=bundle.trace,
+        answer_scope=answer_scope.model_dump(),
         latency_ms=elapsed_ms(started_at),
         model_route=selection.route,
         model_used=used_model,
@@ -289,6 +304,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
     direct_limit = max(request.limit, 10)
     index_limit = max(6, min(request.limit, 10))
     query_text = request.retrieval_query.strip() or request.question
+    answer_scope = build_answer_scope(request.question)
     context_limit = chat_context_limit(query_text, request.limit)
 
     direct_retrieval = retrieve(
@@ -318,8 +334,8 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         annotate_result(result, index_source_role(result), "kb_index_match")
         for result in index_retrieval.results
     ]
-    direct_results = rerank_stage_results(query_text, direct_candidates)
-    index_results = rerank_stage_results(query_text, index_candidates)
+    direct_results = rerank_stage_results(query_text, direct_candidates, answer_scope)
+    index_results = rerank_stage_results(query_text, index_candidates, answer_scope)
     session_context_rows = repository.published_chunk_rows_by_ids(
         request.context_chunk_ids,
         [],
@@ -329,7 +345,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         annotate_result(to_result(row), "direct_sop", "session_context_source")
         for row in session_context_rows
     ]
-    session_context_results = rerank_stage_results(query_text, session_context_results)
+    session_context_results = rerank_stage_results(query_text, session_context_results, answer_scope)
     initial_results = dedupe_results([*session_context_results, *direct_results, *index_results])
     relation_seed_results = relation_seed_candidates(initial_results, context_limit)
     exclude_ids = [result.chunk_id for result in initial_results]
@@ -342,9 +358,10 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         annotate_result(to_result(row), "related_sop", "approved_relation_expansion")
         for row in relation_rows
     ]
-    related_results = rerank_stage_results(query_text, related_results)
+    related_results = rerank_stage_results(query_text, related_results, answer_scope)
     exclude_ids.extend(result.chunk_id for result in related_results)
-    parent_rows = repository.parent_sop_context_rows(
+    parent_context_skipped_by_scope = answer_scope.is_narrow and bool(direct_results or related_results)
+    parent_rows = [] if parent_context_skipped_by_scope else repository.parent_sop_context_rows(
         [result.chunk_id for result in relation_seed_candidates([*direct_results, *related_results], context_limit)],
         [*exclude_ids],
         max(2, request.limit // 4),
@@ -395,6 +412,8 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         "relation_seed_count": len(relation_seed_results),
         "session_context_count": len(session_context_results),
         "scope_filters": base_filters.model_dump(),
+        "answer_scope": answer_scope.model_dump(),
+        "parent_context_skipped_by_scope": parent_context_skipped_by_scope,
         "retrieval_query_used": query_text != request.question,
     }
     return ChatRetrievalBundle(
@@ -517,6 +536,7 @@ def chat_session_failure_response(
             "error_type": exc.__class__.__name__,
             "retrieval_query_used": request.retrieval_query != payload.question,
         },
+        answer_scope=build_answer_scope(payload.question).model_dump(),
         latency_ms=elapsed_ms(started_at),
         model_route=payload.model_route,
         model_used="",
@@ -748,9 +768,10 @@ def semantic_text(result: RetrievalResult) -> str:
     return normalize_for_match(f"{heading} {result.content}")
 
 
-def rerank_stage_results(query: str, results: list[RetrievalResult]) -> list[RetrievalResult]:
+def rerank_stage_results(query: str, results: list[RetrievalResult], answer_scope: Any | None = None) -> list[RetrievalResult]:
     query_terms = query_intent(query)
-    reranked = [annotate_match_metadata(result, query_terms) for result in results]
+    answer_scope = answer_scope or build_answer_scope(query)
+    reranked = [annotate_match_metadata(result, query_terms, answer_scope) for result in results]
     return sorted(
         reranked,
         key=lambda result: (
@@ -761,7 +782,7 @@ def rerank_stage_results(query: str, results: list[RetrievalResult]) -> list[Ret
     )
 
 
-def annotate_match_metadata(result: RetrievalResult, query_terms: set[str]) -> RetrievalResult:
+def annotate_match_metadata(result: RetrievalResult, query_terms: set[str], answer_scope: Any) -> RetrievalResult:
     metadata = dict(result.metadata or {})
     candidate_terms = query_intent(candidate_match_text(result))
     boosts: list[str] = []
@@ -798,6 +819,11 @@ def annotate_match_metadata(result: RetrievalResult, query_terms: set[str]) -> R
     if "tx" in query_terms and "kh" in candidate_terms and "tx" not in candidate_terms:
         penalty += 0.04
         penalties.append("audience_mismatch")
+
+    branch_penalty, branch_penalties, scope_metadata = scope_penalty(candidate_match_text(result), answer_scope)
+    penalty += branch_penalty
+    penalties.extend(branch_penalties)
+    metadata.update(scope_metadata)
 
     adjusted_score = max(0.0, float(result.score or 0.0) + boost - penalty)
     metadata["chat_adjusted_score"] = adjusted_score
