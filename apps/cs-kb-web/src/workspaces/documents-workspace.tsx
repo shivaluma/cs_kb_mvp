@@ -33,9 +33,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EmptyPanel, Field, StatusBadge } from "@/components/common";
+import { DatePicker } from "@/components/date-picker";
 import { ExtractionReviewEditor } from "@/components/extraction-review-editor";
 import { API_BASE_URL } from "@/config";
 import { workspacePaths } from "@/constants";
+import { nextReviewDueIso, withReviewFrequencyDates } from "@/lib/date";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, KBCollectionSummary, PublishReadiness, UploadState, VersionRawText, VersionSummary } from "@/types";
@@ -748,13 +750,33 @@ export function DocumentsWorkspace({
                     />
                     <GovernanceSelect
                       label="Review frequency"
-                      onChange={(reviewFrequency) => setUpload((current) => ({ ...current, reviewFrequency }))}
+                      onChange={(reviewFrequency) => setUpload((current) => withReviewFrequencyDates(current, reviewFrequency))}
                       options={["quarterly", "semiannual", "annual"]}
                       placeholder="Unset frequency"
                       value={upload.reviewFrequency}
                     />
-                    <Field label="Last reviewed" value={upload.lastReviewedAt} onChange={(lastReviewedAt) => setUpload((current) => ({ ...current, lastReviewedAt }))} placeholder="YYYY-MM-DD" />
-                    <Field label="Next review due" value={upload.nextReviewDue} onChange={(nextReviewDue) => setUpload((current) => ({ ...current, nextReviewDue }))} placeholder="YYYY-MM-DD" />
+                    <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                      Last reviewed
+                      <DatePicker
+                        label="Last reviewed"
+                        onChange={(lastReviewedAt) => setUpload((current) => ({
+                          ...current,
+                          lastReviewedAt,
+                          nextReviewDue: current.reviewFrequency ? nextReviewDueIso(lastReviewedAt, current.reviewFrequency) : current.nextReviewDue,
+                        }))}
+                        placeholder="Pick last review date"
+                        value={upload.lastReviewedAt}
+                      />
+                    </label>
+                    <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                      Next review due
+                      <DatePicker
+                        label="Next review due"
+                        onChange={(nextReviewDue) => setUpload((current) => ({ ...current, nextReviewDue }))}
+                        placeholder="Pick next due date"
+                        value={upload.nextReviewDue}
+                      />
+                    </label>
                   </div>
                 </div>
                 <Field label="Tags" value={upload.tags} onChange={(tags) => setUpload((current) => ({ ...current, tags }))} />

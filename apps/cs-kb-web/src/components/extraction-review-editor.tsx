@@ -9,8 +9,10 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DatePicker } from "@/components/date-picker";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { nextReviewDueIso, withReviewFrequencyDates } from "@/lib/date";
 import { cn } from "@/lib/utils";
 import type { ExtractionUnit, ExtractionUnitUpdate } from "@/types";
 
@@ -348,7 +350,7 @@ export function ExtractionReviewEditor({
           Review frequency
           <Select
             disabled={disabled}
-            onValueChange={(reviewFrequency) => setDraft((current) => ({ ...current, reviewFrequency: reviewFrequency === "inherit" ? "" : reviewFrequency }))}
+            onValueChange={(reviewFrequency) => setDraft((current) => withReviewFrequencyDates(current, reviewFrequency === "inherit" ? "" : reviewFrequency))}
             value={draft.reviewFrequency || "inherit"}
           >
             <SelectTrigger>
@@ -364,18 +366,24 @@ export function ExtractionReviewEditor({
         </label>
         <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
           Last reviewed
-          <Input
+          <DatePicker
             disabled={disabled}
-            onChange={(event) => setDraft((current) => ({ ...current, lastReviewedAt: event.target.value }))}
+            label="Last reviewed"
+            onChange={(lastReviewedAt) => setDraft((current) => ({
+              ...current,
+              lastReviewedAt,
+              nextReviewDue: current.reviewFrequency ? nextReviewDueIso(lastReviewedAt, current.reviewFrequency) : current.nextReviewDue,
+            }))}
             placeholder={documentGovernance?.lastReviewedAt ? `inherits ${documentGovernance.lastReviewedAt}` : "YYYY-MM-DD"}
             value={draft.lastReviewedAt}
           />
         </label>
         <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
           Next review due
-          <Input
+          <DatePicker
             disabled={disabled}
-            onChange={(event) => setDraft((current) => ({ ...current, nextReviewDue: event.target.value }))}
+            label="Next review due"
+            onChange={(nextReviewDue) => setDraft((current) => ({ ...current, nextReviewDue }))}
             placeholder={documentGovernance?.nextReviewDue ? `inherits ${documentGovernance.nextReviewDue}` : "YYYY-MM-DD"}
             value={draft.nextReviewDue}
           />
