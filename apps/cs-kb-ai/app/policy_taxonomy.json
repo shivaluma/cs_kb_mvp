@@ -60,6 +60,16 @@
     "phone_query_terms": ["so dien thoai", "sdt", "hotline"],
     "phone_regex": "\\b0\\d{8,10}\\b"
   },
+  "semantic_metadata": {
+    "containers": ["policy_semantics", "semantic_facets", "retrieval_facets", "policy_metadata"],
+    "workflow_stage_keys": ["workflow_stage", "workflow_stages", "stage", "stages"],
+    "condition_keys": ["condition", "conditions", "trigger", "triggers", "case_type", "case_types", "applies_when"],
+    "channel_keys": ["channel", "channels", "channel_type", "channel_types", "contact_channel", "contact_channels"],
+    "branch_keys": ["branch_type", "branch_types", "exception_type", "exception_types", "fallback_type", "fallback_types"],
+    "actor_keys": ["actor", "actors", "audience", "owner", "owners"],
+    "action_keys": ["action", "actions", "support_actions", "procedure_actions"],
+    "negative_constraint_keys": ["negative_constraints", "not_applicable_when", "excluded_workflow_stages", "excluded_branch_types"]
+  },
   "asked_field_patterns": {
     "contact_channel": ["kenh nao", "qua kenh", "kenh lien he", "lien he qua", "lien lac qua", "goi hay mail", "call hay mail", "email hay call", "call out hay email"],
     "info_collection": ["khai thac them thong tin", "lay them thong tin", "xin them thong tin", "thu thap them thong tin", "xac minh them thong tin"],
@@ -84,6 +94,15 @@
     "case_creation": ["tao case", "case reason", "ticket", "tasklist"]
   },
   "workflow_stage_patterns": {
+    "intake_triage": ["phan loai yeu cau", "tiep nhan yeu cau", "xac dinh van de", "triage", "intake"],
+    "identity_verification": ["xac minh tai khoan", "xac minh danh tinh", "kiem tra thong tin tai khoan", "verify account", "identity verification"],
+    "eligibility_validation": ["kiem tra dieu kien", "kiem tra hop le", "du dieu kien", "khong du dieu kien", "eligibility", "validation"],
+    "evidence_collection": ["thu thap bang chung", "bo sung chung tu", "hinh anh minh chung", "bang chung", "minh chung", "evidence"],
+    "case_creation": ["tao case", "tao ticket", "case reason", "tasklist"],
+    "resolution_execution": ["thuc hien xu ly", "xu ly yeu cau", "cap nhat ket qua", "resolve", "resolution"],
+    "compensation_refund": ["boi hoan", "hoan tien", "refund", "compensation", "voucher"],
+    "customer_response": ["phan hoi kh", "phan hoi khach hang", "gui phan hoi", "tra loi kh", "customer response"],
+    "audit_compliance": ["audit", "qa cham loi", "bao mat", "compliance", "zt", "khong duoc cung cap"],
     "contact_channel_selection": ["kenh lien he", "lien he qua", "lien lac qua", "qua kenh", "call out", "goi dien", "goi ra", "email thay vi call", "mail thay vi call", "nhan phan hoi qua email", "chi muon nhan phan hoi qua email"],
     "post_call_notification": ["sau khi call", "sau call", "ket qua sau call", "phan hoi ket qua qua email", "gui ket qua qua email", "email ket qua", "financial result email"],
     "email_collection": ["khong co email", "chua co email", "xin email", "cap nhat email", "bo sung email"],

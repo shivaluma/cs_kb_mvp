@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from app.answer_scope import AnswerScope, PolicyFacets, policy_applicability_debug
 from app.chat import (
     ChatRetrievalBundle,
     assistant_context_briefs,
@@ -369,6 +370,102 @@ class ChatRetrievalTest(unittest.TestCase):
         debug = {item["chunk_id"]: item for item in bundle.trace["candidate_debug"]}
         self.assertIn("workflow_stage_match", debug["metadata-direct"]["selected_because"])
         self.assertIn("post_call_notification", debug["post-call-email"]["negative_constraint_violations"])
+
+    def test_policy_applicability_accepts_unregistered_semantic_metadata_values(self) -> None:
+        scope = AnswerScope(
+            asked_fields=("full_workflow",),
+            explicit_conditions=("vip_partner_case",),
+            excluded_branch_types=(),
+            is_narrow=False,
+        )
+        facets = PolicyFacets(
+            asked_fields=scope.asked_fields,
+            scenario_types=(),
+            workflow_stages=("custom_partner_review",),
+            negative_workflow_stages=(),
+            explicit_conditions=("vip_partner_case",),
+            channel_types=("zalo_support",),
+            case_types=("partner_support",),
+            actors=("CS",),
+            unsupported_sensitive=False,
+        )
+
+        debug = policy_applicability_debug(
+            query="custom partner review",
+            candidate_text="Metadata-only policy unit",
+            metadata={
+                "unit_type": "policy_rule",
+                "policy_semantics": {
+                    "workflow_stage": "custom_partner_review",
+                    "condition": ["vip_partner_case"],
+                    "channel_type": ["zalo_support"],
+                },
+            },
+            scope=scope,
+            facets=facets,
+            semantic_score=0.1,
+            lexical_score=0.1,
+        )
+
+        self.assertEqual(debug["workflow_match_score"], 1.0)
+        self.assertEqual(debug["condition_entailment_score"], 1.0)
+        self.assertEqual(debug["action_alignment_score"], 1.0)
+        self.assertIn("custom_partner_review", debug["candidate_policy_signals"]["workflow_stages"])
+        self.assertIn("vip_partner_case", debug["candidate_policy_signals"]["conditions"])
+        self.assertIn("zalo_support", debug["candidate_policy_signals"]["channel_types"])
+
+    def test_scope_exclusion_uses_nested_branch_metadata_without_surface_text(self) -> None:
+        fallback = retrieval_result(
+            "metadata-fallback",
+            "handling_rule",
+            score=0.86,
+            heading="Generic fallback",
+            content="Fallback branch content.",
+        ).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "handling_rule",
+                    "policy_semantics": {
+                        "branch_type": ["retry_policy"],
+                        "workflow_stage": "customer_response",
+                    },
+                }
+            }
+        )
+        primary = retrieval_result(
+            "metadata-primary",
+            "policy_rule",
+            score=0.52,
+            heading="Generic contact channel",
+            content="Primary contact channel rule.",
+        ).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "policy_rule",
+                    "policy_semantics": {
+                        "workflow_stage": "contact_channel_selection",
+                        "channel_type": ["call"],
+                    },
+                }
+            }
+        )
+
+        with (
+            patch("app.chat.retrieve", side_effect=[retrieval_response([fallback, primary]), retrieval_response([])]),
+            patch("app.chat.repository.approved_relation_target_rows_for_chunks", return_value=[]),
+            patch("app.chat.repository.parent_sop_context_rows", return_value=[]),
+        ):
+            bundle = retrieve_for_chat(
+                GroundedChatRequest(
+                    question="KH cần CS liên hệ qua kênh nào?",
+                    limit=10,
+                )
+            )
+
+        self.assertEqual(bundle.retrieval.results[0].chunk_id, "metadata-primary")
+        excluded_debug = bundle.trace["excluded_candidate_debug"][0]
+        self.assertEqual(excluded_debug["chunk_id"], "metadata-fallback")
+        self.assertIn("retry_policy", excluded_debug["negative_constraint_violations"])
 
     def test_unsupported_email_preference_scenario_stops_before_generation(self) -> None:
         post_call = retrieval_result(

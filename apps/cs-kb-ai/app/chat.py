@@ -882,7 +882,7 @@ def annotate_match_metadata(
             reason = str(rule.get("reason") or "conditional_penalty")
             penalties.append(reason)
 
-    branch_penalty, branch_penalties, scope_metadata = scope_penalty(candidate_match_text(result), answer_scope)
+    branch_penalty, branch_penalties, scope_metadata = scope_penalty(candidate_match_text(result), answer_scope, metadata)
     penalty += branch_penalty
     penalties.extend(branch_penalties)
     metadata.update(scope_metadata)

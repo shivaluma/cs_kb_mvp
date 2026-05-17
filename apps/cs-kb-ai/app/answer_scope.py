@@ -81,6 +81,15 @@ def configured_policy_type_scores() -> dict[str, float]:
     return nested_taxonomy_score_map("applicability_scoring", "policy_type_scores")
 
 
+def semantic_metadata_containers() -> tuple[str, ...]:
+    return nested_taxonomy_string_list("semantic_metadata", "containers")
+
+
+def semantic_metadata_keys(field: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
+    configured = nested_taxonomy_string_list("semantic_metadata", f"{field}_keys")
+    return configured or fallback
+
+
 @dataclass(frozen=True)
 class AnswerScope:
     asked_fields: tuple[str, ...]
@@ -192,8 +201,8 @@ def build_policy_facets(question: str, scope: AnswerScope | None = None) -> Poli
     )
 
 
-def source_scope_metadata(text: str, scope: AnswerScope) -> dict[str, Any]:
-    branch_terms = detect_pattern_keys(text, branch_patterns())
+def source_scope_metadata(text: str, scope: AnswerScope, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    branch_terms = detect_candidate_branch_types(text, metadata or {})
     unasked = sorted(branch_terms & set(scope.excluded_branch_types))
     return {
         "chat_scope_branch_terms": sorted(branch_terms),
@@ -203,8 +212,8 @@ def source_scope_metadata(text: str, scope: AnswerScope) -> dict[str, Any]:
     }
 
 
-def scope_penalty(text: str, scope: AnswerScope) -> tuple[float, list[str], dict[str, Any]]:
-    metadata = source_scope_metadata(text, scope)
+def scope_penalty(text: str, scope: AnswerScope, source_metadata: dict[str, Any] | None = None) -> tuple[float, list[str], dict[str, Any]]:
+    metadata = source_scope_metadata(text, scope, source_metadata)
     unasked = metadata["chat_scope_unasked_branches"]
     if not unasked:
         return 0.0, [], metadata
@@ -225,9 +234,19 @@ def policy_applicability_debug(
     candidate_stages = detect_candidate_workflow_stages(candidate_text, metadata)
     candidate_channels = detect_candidate_channels(candidate_text, metadata)
     candidate_conditions = detect_candidate_conditions(candidate_text, metadata)
+    candidate_branches = detect_candidate_branch_types(candidate_text, metadata)
+    candidate_negative_constraints = detect_candidate_negative_constraints(metadata)
     candidate_policy_type = candidate_policy_type_from_metadata(candidate_text, metadata)
-    negative_violations = sorted(set(candidate_stages) & set(facets.negative_workflow_stages))
-    scope_unasked = sorted(set(detect_pattern_keys(candidate_text, branch_patterns())) & set(scope.excluded_branch_types))
+    query_signals = (
+        set(facets.workflow_stages)
+        | set(facets.scenario_types)
+        | set(facets.explicit_conditions)
+        | set(facets.asked_fields)
+        | set(facets.channel_types)
+        | set(facets.case_types)
+    )
+    negative_violations = sorted((set(candidate_stages) & set(facets.negative_workflow_stages)) | (set(candidate_negative_constraints) & query_signals))
+    scope_unasked = sorted(set(candidate_branches) & set(scope.excluded_branch_types))
     for branch in scope_unasked:
         if branch not in negative_violations:
             negative_violations.append(branch)
@@ -280,6 +299,8 @@ def policy_applicability_debug(
             "workflow_stages": candidate_stages,
             "channel_types": candidate_channels,
             "conditions": candidate_conditions,
+            "branch_types": candidate_branches,
+            "negative_constraints": candidate_negative_constraints,
         },
         "selected_because": selected_because,
         "risk_flags": risk_flags,
@@ -295,10 +316,11 @@ def policy_applicability_debug(
 
 
 def detect_candidate_workflow_stages(text: str, metadata: dict[str, Any]) -> list[str]:
-    metadata_values = metadata_terms(metadata, ("workflow_stage", "stage", "policy_type", "branch_type", "answer_type", "tags", "section_path"))
-    stages = detect_declared_semantic_values(metadata, ("workflow_stage", "stage"), workflow_stage_patterns().keys())
+    stage_keys = semantic_metadata_keys("workflow_stage", ("workflow_stage", "workflow_stages", "stage", "stages"))
+    metadata_values = metadata_terms(metadata, (*stage_keys, "policy_type", "branch_type", "answer_type", "tags", "section_path"))
+    stages = detect_declared_semantic_values(metadata, stage_keys, workflow_stage_patterns().keys(), preserve_unknown=True)
     stages.update(detect_pattern_keys(" ".join([text, *metadata_values]), workflow_stage_patterns()))
-    branch_terms = detect_pattern_keys(text, branch_patterns())
+    branch_terms = detect_candidate_branch_types(text, metadata)
     branch_stage_map = candidate_inference_mapping("branch_implied_workflow_stages")
     for branch in branch_terms:
         stages.update(branch_stage_map.get(branch, ()))
@@ -306,19 +328,37 @@ def detect_candidate_workflow_stages(text: str, metadata: dict[str, Any]) -> lis
 
 
 def detect_candidate_channels(text: str, metadata: dict[str, Any]) -> list[str]:
-    metadata_values = metadata_terms(metadata, ("channel", "channel_type", "tags", "aliases"))
-    channels = detect_declared_semantic_values(metadata, ("channel", "channel_type"), channel_patterns().keys())
+    channel_keys = semantic_metadata_keys("channel", ("channel", "channels", "channel_type", "channel_types"))
+    metadata_values = metadata_terms(metadata, (*channel_keys, "tags", "aliases"))
+    channels = detect_declared_semantic_values(metadata, channel_keys, channel_patterns().keys(), preserve_unknown=True)
     channels.update(detect_pattern_keys(" ".join([text, *metadata_values]), channel_patterns()))
     return sorted(channels)
 
 
 def detect_candidate_conditions(text: str, metadata: dict[str, Any]) -> list[str]:
-    metadata_values = metadata_terms(metadata, ("condition", "conditions", "trigger", "case_type", "tags", "aliases"))
+    condition_keys = semantic_metadata_keys("condition", ("condition", "conditions", "trigger", "triggers", "case_type", "case_types"))
+    metadata_values = metadata_terms(metadata, (*condition_keys, "tags", "aliases"))
     allowed_conditions = set(explicit_condition_patterns()) | set(scenario_patterns())
-    conditions = detect_declared_semantic_values(metadata, ("condition", "conditions", "trigger", "case_type"), allowed_conditions)
+    conditions = detect_declared_semantic_values(metadata, condition_keys, allowed_conditions, preserve_unknown=True)
     conditions.update(detect_pattern_keys(" ".join([text, *metadata_values]), explicit_condition_patterns()))
     conditions.update(detect_pattern_keys(" ".join([text, *metadata_values]), scenario_patterns()))
     return sorted(conditions)
+
+
+def detect_candidate_branch_types(text: str, metadata: dict[str, Any]) -> set[str]:
+    branch_keys = semantic_metadata_keys("branch", ("branch_type", "branch_types", "exception_type", "fallback_type"))
+    metadata_values = metadata_terms(metadata, branch_keys)
+    branches = detect_declared_semantic_values(metadata, branch_keys, branch_patterns().keys(), preserve_unknown=True)
+    branches.update(detect_pattern_keys(" ".join([text, *metadata_values]), branch_patterns()))
+    return branches
+
+
+def detect_candidate_negative_constraints(metadata: dict[str, Any]) -> list[str]:
+    negative_keys = semantic_metadata_keys(
+        "negative_constraint",
+        ("negative_constraints", "not_applicable_when", "excluded_workflow_stages", "excluded_branch_types"),
+    )
+    return sorted(detect_declared_semantic_values(metadata, negative_keys, (), preserve_unknown=True))
 
 
 def candidate_policy_type_from_metadata(text: str, metadata: dict[str, Any]) -> str:
@@ -326,8 +366,8 @@ def candidate_policy_type_from_metadata(text: str, metadata: dict[str, Any]) -> 
         " ".join(metadata_terms(metadata, ("policy_type", "branch_type", "unit_type", "retrieval_scope")))
     )
     unit_type = normalize_operational_text(str(metadata.get("unit_type") or ""))
-    branches = detect_pattern_keys(text, branch_patterns())
-    stages = detect_pattern_keys(text, workflow_stage_patterns())
+    branches = detect_candidate_branch_types(text, metadata)
+    stages = set(detect_candidate_workflow_stages(text, metadata))
     if "document" in declared or unit_type in set(candidate_inference_list("document_context_unit_types")):
         return "document_context"
     if "exception" in declared or unit_type in set(candidate_inference_list("exception_unit_types")):
@@ -407,6 +447,16 @@ def metadata_terms(metadata: dict[str, Any], keys: tuple[str, ...]) -> list[str]
     output: list[str] = []
     for key in keys:
         output.extend(flatten_metadata_value(metadata.get(key)))
+    for container_key in semantic_metadata_containers():
+        container = metadata.get(container_key)
+        if isinstance(container, dict):
+            for key in keys:
+                output.extend(flatten_metadata_value(container.get(key)))
+        elif isinstance(container, list):
+            for item in container:
+                if isinstance(item, dict):
+                    for key in keys:
+                        output.extend(flatten_metadata_value(item.get(key)))
     return output
 
 
@@ -558,6 +608,8 @@ def detect_declared_semantic_values(
     metadata: dict[str, Any],
     keys: tuple[str, ...],
     allowed_values: Any,
+    *,
+    preserve_unknown: bool = False,
 ) -> set[str]:
     canonical_by_normalized = {
         normalize_operational_text(value): str(value)
@@ -572,14 +624,25 @@ def detect_declared_semantic_values(
         if normalized_value in canonical_by_normalized:
             detected.add(canonical_by_normalized[normalized_value])
             continue
+        matched = False
         for fragment in re.split(r"[,;|/]+", str(value)):
             normalized_fragment = normalize_operational_text(fragment)
             if normalized_fragment in canonical_by_normalized:
                 detected.add(canonical_by_normalized[normalized_fragment])
+                matched = True
         for normalized_allowed, canonical in canonical_by_normalized.items():
             if re.search(rf"\b{re.escape(normalized_allowed)}\b", normalized_value):
                 detected.add(canonical)
+                matched = True
+        if preserve_unknown and not matched:
+            semantic_id = semantic_value_id(value)
+            if semantic_id:
+                detected.add(semantic_id)
     return detected
+
+
+def semantic_value_id(value: Any) -> str:
+    return normalize_operational_text(str(value or "")).replace(" ", "_")
 
 
 def normalize_operational_text(text: str) -> str:
