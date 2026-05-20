@@ -102,6 +102,24 @@ export function humanizeFilterValue(value: string) {
   return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+export function slugifyValue(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+}
+
+export function categoryKey(value: string) {
+  return slugifyValue(value.replace(/_/g, " "));
+}
+
+export function labelFromKey(value: string) {
+  return humanizeFilterValue(value.replace(/[-_]+/g, " "));
+}
+
 export function fileExternalId(name: string) {
   return name
     .toLowerCase()

@@ -1,8 +1,9 @@
 import {
   IconRobot as Bot,
-  IconBoxMultiple as Boxes,
+  IconChartBar as ChartBar,
   IconFileText as FileText,
   IconGitBranch as GitBranch,
+  IconHome as Home,
   IconLayoutDashboard as LayoutDashboard,
   IconMessage as MessageSquareText,
   IconMessageReport as MessageReport,
@@ -16,6 +17,7 @@ import type { FilterOption, FilterState, SynonymDraft, UploadState } from "@/typ
 
 export const workspacePaths = {
   dashboard: "/",
+  operations: "/operations",
   lookup: "/lookup",
   chat: "/chat",
   caseAssist: "/case-assist",
@@ -99,9 +101,16 @@ export const navItems = [
   {
     id: "dashboard",
     path: workspacePaths.dashboard,
-    label: "Dashboard",
+    label: "Home",
+    icon: Home,
+    description: "Search and browse approved SOPs by category, popularity, and latest updates.",
+  },
+  {
+    id: "operations",
+    path: workspacePaths.operations,
+    label: "Operations",
     icon: LayoutDashboard,
-    description: "Triage workload, readiness, and governance signals.",
+    description: "Triage workload, readiness, governance, system health, and reset controls.",
   },
   {
     id: "lookup",
@@ -135,8 +144,8 @@ export const navItems = [
     id: "collections",
     path: workspacePaths.collections,
     label: "Collections",
-    icon: Boxes,
-    description: "Operational groupings by audience, task, channel, owner, and risk.",
+    icon: ChartBar,
+    description: "Browse SOP libraries, process groups, ownership, and operational coverage.",
   },
   {
     id: "documents",
@@ -194,15 +203,19 @@ export const documentWorkflowItems = documentWorkflowStepIds.map((id) => navItem
 
 export const navGroups = [
   {
-    label: "Agent surfaces",
-    items: navItems.filter((item) => ["dashboard", "lookup", "chat", "caseAssist", "tools", "collections"].includes(item.id)),
+    label: "SOP portal",
+    items: navItems.filter((item) => ["dashboard", "lookup", "chat", "caseAssist"].includes(item.id)),
   },
   {
-    label: "Review operations",
-    items: navItems.filter((item) => ["feedback", "relations"].includes(item.id)),
+    label: "Libraries",
+    items: navItems.filter((item) => ["collections", "tools"].includes(item.id)),
   },
   {
-    label: "Admin and debug",
+    label: "Operations",
+    items: navItems.filter((item) => ["operations", "feedback", "relations"].includes(item.id)),
+  },
+  {
+    label: "AI admin",
     items: navItems.filter((item) => ["synonyms", "retrieval"].includes(item.id)),
   },
 ] as const;
@@ -214,6 +227,15 @@ export function pathForWorkspace(workspace: Workspace) {
 export function workspaceFromPath(pathname: string): Workspace {
   if (pathname === workspacePaths.chat || pathname.startsWith(`${workspacePaths.chat}/`)) {
     return "chat";
+  }
+  if (pathname === "/search") {
+    return "lookup";
+  }
+  if (pathname.startsWith("/sop/")) {
+    return "lookup";
+  }
+  if (pathname.startsWith("/category/")) {
+    return "collections";
   }
   const current = navItems.find((item) => item.path === pathname);
   return current?.id ?? "dashboard";

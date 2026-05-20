@@ -22,7 +22,7 @@ import {
   IconWand as WandSparkles
 } from "@tabler/icons-react";
 
-import { DraftRetrievalPreview, ExtractionPipelineTrace, PublishTaskList, SopQualityAuditPanel, buildPublishTasks, buildSopQualityAudit } from "@/components/documents-review-insights";
+import { DraftRetrievalPreview, ExtractionPipelineTrace, PublishTaskList, SopQualityAuditPanel, buildPublishTasks, buildSopQualityAudit, readablePublishFailure } from "@/components/documents-review-insights";
 import { DocumentFact, ReadinessCheck } from "@/components/operations";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -379,6 +379,8 @@ export function DocumentsWorkspace({
   const publishTasks = buildPublishTasks({
     missingWorkflowUnits,
     pageOnlySourceRefUnacknowledged,
+    publishReadiness,
+    publishReadinessLoading,
     readinessChecks,
     selectedDocument,
     workflowGraphIssueCount,
@@ -1760,9 +1762,9 @@ export function DocumentsWorkspace({
                         <div className="mt-3 rounded-lg border bg-muted/15 p-3">
                           <p className="text-xs leading-5 text-muted-foreground">{publishBlockReason}</p>
                           {isInspectedVersion && (!readinessPassed || backendPublishBlocked) ? (
-                            <Button className="mt-2 h-8 px-3" onClick={() => setDocumentStep("readiness")} size="sm" type="button" variant="secondary">
+                            <Button className="mt-2 h-8 px-3" onClick={() => setDocumentStep(backendPublishBlocked ? "backendGate" : "readiness")} size="sm" type="button" variant="secondary">
                               <ShieldCheck data-icon="inline-start" className="size-3.5" />
-                              Open Checklist
+                              {backendPublishBlocked ? "Open API gate" : "Open Checklist"}
                             </Button>
                           ) : null}
                         </div>
@@ -3772,58 +3774,6 @@ function sourceReference(unit: ExtractionUnit) {
     return `page ${unit.source_page}`;
   }
   return "";
-}
-
-function readablePublishFailure(failure: string) {
-  if (/^\d+_units_need_review$/.test(failure)) {
-    return "Units still need review";
-  }
-  if (/^\d+_page_only_source_refs_need_ack$/.test(failure)) {
-    return "Page-only source refs need acknowledgement";
-  }
-  if (/^\d+_units_missing_source_refs$/.test(failure)) {
-    return "Units are missing source refs";
-  }
-  if (/^\d+_degraded_units_need_manual_curation$/.test(failure)) {
-    return "Degraded units need manual curation";
-  }
-  if (failure.startsWith("workflow_graph_has_") && failure.includes("decision_edges_need_review")) {
-    return "Decision branches need review";
-  }
-  if (failure.startsWith("workflow_v3_missing_visible_steps") || failure.startsWith("workflow_graph_missing_visible_steps")) {
-    return "Workflow graph is missing visible steps";
-  }
-  if (failure.startsWith("workflow_v3_question_node_not_decision") || failure.startsWith("workflow_graph_question_steps_not_decisions")) {
-    return "Visible decision was not extracted as a decision";
-  }
-  if (failure.startsWith("workflow_v3_missing_visible_edges")) {
-    return "Workflow graph is missing visible arrows";
-  }
-  if (failure.includes("summary_like")) {
-    return "Workflow graph looks like a summary";
-  }
-  const known: Record<string, string> = {
-    archived_version: "Archived version cannot publish",
-    extraction_failed_validation: "Extraction failed validation",
-    historical_sheets_without_current_effective_date: "Historical source needs current effective date",
-    missing_effective_from: "Effective date is missing",
-    missing_full_sop_layer: "Document overview layer is missing",
-    missing_owner_team: "Owner team is missing",
-    missing_production_atomic_units: "Production atomic units are missing",
-    missing_review_frequency: "Review frequency is missing",
-    missing_last_reviewed_at: "Last reviewed date is missing",
-    missing_next_review_due: "Next review due date is missing",
-    missing_risk_level: "Risk level is missing",
-    high_risk_review_due_in_past: "High-risk review due date is overdue",
-    missing_workflow_graph: "Workflow graph is missing",
-    no_extraction_units: "No extraction units",
-    workflow_graph_acknowledgement_reason_missing: "Graph acknowledgement needs a reason",
-    workflow_graph_decision_edges_missing: "Decision edges are missing",
-    workflow_graph_low_confidence: "Workflow graph confidence needs acknowledgement",
-    workflow_graph_missing_edges: "Workflow graph has no edges",
-    workflow_graph_needs_review: "Workflow graph unit needs review",
-  };
-  return known[failure] ?? failure.replace(/_/g, " ");
 }
 
 function GovernanceSelect({

@@ -24,6 +24,21 @@ export function useSearch() {
   });
 }
 
+export function useSOPList() {
+  return useQuery({
+    queryKey: queryKeys.sops,
+    queryFn: () => apiGet<{ items: SOP[] }>("/api/v1/sops"),
+  });
+}
+
+export function useSOPDetail(id?: string) {
+  return useQuery({
+    enabled: Boolean(id),
+    queryKey: queryKeys.sop(id ?? ""),
+    queryFn: () => apiGet<SOP>(`/api/v1/sops/${id}`),
+  });
+}
+
 export function useSOP() {
   return useMutation({
     mutationFn: (id: string) => apiGet<SOP>(`/api/v1/sops/${id}`),

@@ -3,14 +3,17 @@ import { createRootRoute, createRoute, createRouter, Navigate } from "@tanstack/
 import { App } from "@/App";
 import { workspacePaths } from "@/constants";
 import { CaseAssistPage } from "@/pages/case-assist-page";
+import { CategoryPage } from "@/pages/category-page";
 import { ChatPage } from "@/pages/chat-page";
 import { CollectionsPage } from "@/pages/collections-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { DocumentsPage } from "@/pages/documents-page";
 import { FeedbackPage } from "@/pages/feedback-page";
 import { LookupPage } from "@/pages/lookup-page";
+import { PortalPage } from "@/pages/portal-page";
 import { RelationsPage } from "@/pages/relations-page";
 import { RetrievalPage } from "@/pages/retrieval-page";
+import { SOPDetailPage } from "@/pages/sop-detail-page";
 import { SynonymsPage } from "@/pages/synonyms-page";
 import { ToolsPage } from "@/pages/tools-page";
 
@@ -22,6 +25,12 @@ const rootRoute = createRootRoute({
 const dashboardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: workspacePaths.dashboard,
+  component: PortalPage,
+});
+
+const operationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: workspacePaths.operations,
   component: DashboardPage,
 });
 
@@ -29,6 +38,24 @@ const lookupRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: workspacePaths.lookup,
   component: LookupPage,
+});
+
+const searchRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/search",
+  component: LookupPage,
+});
+
+const sopDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/sop/$sopId",
+  component: SOPDetailPage,
+});
+
+const categoryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/category/$categoryKey",
+  component: CategoryPage,
 });
 
 const chatRoute = createRoute({
@@ -111,7 +138,11 @@ const retrievalRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   dashboardRoute,
+  operationsRoute,
   lookupRoute,
+  searchRoute,
+  sopDetailRoute,
+  categoryRoute,
   chatRoute,
   chatSessionRoute,
   caseAssistRoute,

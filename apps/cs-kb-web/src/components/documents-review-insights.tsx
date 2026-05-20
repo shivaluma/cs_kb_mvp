@@ -14,7 +14,7 @@ import { EmptyPanel, StatusBadge } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionStageOutput, VersionSummary, ExtractionUnit } from "@/types";
+import type { DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionStageOutput, PublishReadiness, VersionSummary, ExtractionUnit } from "@/types";
 
 type ReadinessCheckLike = {
   detail: string;
@@ -548,6 +548,8 @@ function artifactSummary(output: ExtractionStageOutput) {
 export function buildPublishTasks({
   missingWorkflowUnits,
   pageOnlySourceRefUnacknowledged,
+  publishReadiness,
+  publishReadinessLoading,
   readinessChecks,
   selectedDocument,
   workflowGraphIssueCount,
@@ -556,6 +558,8 @@ export function buildPublishTasks({
 }: {
   missingWorkflowUnits: WorkflowRequirementLike[];
   pageOnlySourceRefUnacknowledged: number;
+  publishReadiness?: PublishReadiness | null;
+  publishReadinessLoading?: boolean;
   readinessChecks: ReadinessCheckLike[];
   selectedDocument: DocumentSummary | null;
   workflowGraphIssueCount: number;
@@ -565,7 +569,8 @@ export function buildPublishTasks({
   if (!selectedDocument) {
     return [];
   }
-  const tasks: PublishTask[] = readinessChecks
+  const tasks: PublishTask[] = backendPublishTasks(publishReadiness, publishReadinessLoading);
+  tasks.push(...readinessChecks
     .filter((check) => !check.passed)
     .map((check) => ({
       action: readinessActionForCheck(check.label),
@@ -573,7 +578,7 @@ export function buildPublishTasks({
       id: `readiness-${check.label}`,
       severity: readinessSeverityForCheck(check.label),
       title: check.label,
-    }));
+    })));
 
   if (workflowGraphIssueCount > 0 && !workflowGraphIssuesAcknowledged && !tasks.some((task) => task.id === "graph-topology")) {
     tasks.unshift(...workflowGraphTasks(workflowGraphUnit, workflowGraphIssueCount));
@@ -600,6 +605,31 @@ export function buildPublishTasks({
   }
 
   return tasks;
+}
+
+function backendPublishTasks(publishReadiness?: PublishReadiness | null, loading?: boolean): PublishTask[] {
+  if (loading) {
+    return [
+      {
+        action: "Wait for the API dry-run result before publishing.",
+        detail: "The backend publish gate is still checking this version.",
+        id: "backend-publish-gate-checking",
+        severity: "info",
+        title: "Backend publish gate checking",
+      },
+    ];
+  }
+  if (!publishReadiness || publishReadiness.ready) {
+    return [];
+  }
+  const failures = publishReadiness.failures.length ? publishReadiness.failures : ["unknown_backend_publish_blocker"];
+  return failures.map((failure, index) => ({
+    action: backendPublishFailureAction(failure),
+    detail: failure,
+    id: `backend-publish-gate-${failure}-${index}`,
+    severity: "blocker",
+    title: readablePublishFailure(failure),
+  }));
 }
 
 function workflowGraphTasks(graphUnit: ExtractionUnit | undefined, issueCount: number): PublishTask[] {
@@ -970,6 +1000,18 @@ export function PublishTaskList({ ready, tasks }: { ready: boolean; tasks: Publi
               </div>
             </article>
           ))
+        ) : !ready ? (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
+            <div className="flex items-start gap-3">
+              <TriangleAlert className="mt-0.5 size-4 text-destructive" />
+              <div>
+                <p className="text-sm font-semibold text-destructive">Publish readiness is blocked</p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  The local checklist is clean, but the API dry-run has not returned a ready state. Open the API tab and refresh the gate result.
+                </p>
+              </div>
+            </div>
+          </div>
         ) : (
           <div className="rounded-xl border bg-secondary/30 p-4">
             <div className="flex items-start gap-3">
@@ -1153,6 +1195,80 @@ function readinessActionForCheck(label: string) {
     "Workflow graph reviewed": "Open Workflow graph, use Decision branch review for Yes/No edges, use Uncertain edges to acknowledge topology warnings, then approve the graph unit.",
   };
   return actions[label] ?? "Resolve this readiness check before publishing.";
+}
+
+export function readablePublishFailure(failure: string) {
+  if (/^\d+_units_need_review$/.test(failure)) {
+    return "Units still need review";
+  }
+  if (/^\d+_page_only_source_refs_need_ack$/.test(failure)) {
+    return "Page-only source refs need acknowledgement";
+  }
+  if (/^\d+_units_missing_source_refs$/.test(failure)) {
+    return "Units are missing source refs";
+  }
+  if (/^\d+_degraded_units_need_manual_curation$/.test(failure)) {
+    return "Degraded units need manual curation";
+  }
+  if (failure.startsWith("workflow_graph_has_") && failure.includes("decision_edges_need_review")) {
+    return "Decision branches need review";
+  }
+  if (failure.startsWith("workflow_v3_missing_visible_steps") || failure.startsWith("workflow_graph_missing_visible_steps")) {
+    return "Workflow graph is missing visible steps";
+  }
+  if (failure.startsWith("workflow_v3_question_node_not_decision") || failure.startsWith("workflow_graph_question_steps_not_decisions")) {
+    return "Visible decision was not extracted as a decision";
+  }
+  if (failure.startsWith("workflow_v3_missing_visible_edges")) {
+    return "Workflow graph is missing visible arrows";
+  }
+  if (failure.includes("summary_like")) {
+    return "Workflow graph looks like a summary";
+  }
+  const known: Record<string, string> = {
+    archived_version: "Archived version cannot publish",
+    extraction_failed_validation: "Extraction failed validation",
+    high_risk_review_due_in_past: "High-risk review due date is overdue",
+    historical_sheets_without_current_effective_date: "Historical source needs current effective date",
+    missing_effective_from: "Effective date is missing",
+    missing_full_sop_layer: "Document overview layer is missing",
+    missing_last_reviewed_at: "Last reviewed date is missing",
+    missing_next_review_due: "Next review due date is missing",
+    missing_owner_team: "Owner team is missing",
+    missing_production_atomic_units: "Production atomic units are missing",
+    missing_review_frequency: "Review frequency is missing",
+    missing_risk_level: "Risk level is missing",
+    missing_workflow_graph: "Workflow graph is missing",
+    no_extraction_units: "No extraction units",
+    workflow_graph_acknowledgement_reason_missing: "Graph acknowledgement needs a reason",
+    workflow_graph_decision_edges_missing: "Decision edges are missing",
+    workflow_graph_low_confidence: "Workflow graph confidence needs acknowledgement",
+    workflow_graph_missing_edges: "Workflow graph has no edges",
+    workflow_graph_needs_review: "Workflow graph unit needs review",
+  };
+  return known[failure] ?? failure.replace(/_/g, " ");
+}
+
+function backendPublishFailureAction(failure: string) {
+  if (/^\d+_units_need_review$/.test(failure)) {
+    return "Open Units, filter Needs review, then approve or reject every blocking unit after source review.";
+  }
+  if (/^\d+_units_missing_source_refs$/.test(failure)) {
+    return "Open Evidence or Units and add source references to each production unit before publishing.";
+  }
+  if (failure === "missing_owner_team") {
+    return "Set owner_team on the document metadata or governance fields.";
+  }
+  if (failure === "missing_effective_from" || failure === "historical_sheets_without_current_effective_date") {
+    return "Confirm the current effective date on the document or relevant units.";
+  }
+  if (failure === "extraction_failed_validation") {
+    return "Re-run extraction or manually curate structured units so document metadata is no longer marked failed.";
+  }
+  if (failure.includes("workflow_graph") || failure.startsWith("workflow_v3_")) {
+    return "Open Graph/API details, review topology and decision branches, then acknowledge or fix the graph.";
+  }
+  return "Open the API gate details, inspect the backend failure code, then update the blocking metadata or unit review state.";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -2,6 +2,8 @@ import type { FilterState } from "@/types";
 
 export const queryKeys = {
   homepage: ["homepage"] as const,
+  sops: ["sops"] as const,
+  sop: (id: string) => ["sop", id] as const,
   systemHealth: ["system-health"] as const,
   adminResetStatus: ["admin-reset-status"] as const,
   documents: ["ai-documents"] as const,

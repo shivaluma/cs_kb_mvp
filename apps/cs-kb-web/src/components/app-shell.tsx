@@ -82,7 +82,7 @@ function MainSidebar({ workspace }: { workspace: Workspace }) {
 						<SidebarGroupLabel>{group.label}</SidebarGroupLabel>
 						<SidebarGroupContent>
 							<SidebarMenu>
-								{group.label === "Review operations" ? (
+								{group.label === "Operations" ? (
 									<DocumentWorkflowNav
 										onNavigate={closeMobile}
 										workspace={workspace}
@@ -426,7 +426,7 @@ export function AppShell({
 										<div key={group.label}>
 											<div className="px-2 pb-1 text-[11px] font-medium text-muted-foreground">{group.label}</div>
 											<div className="space-y-1">
-												{group.label === "Review operations" ? (
+												{group.label === "Operations" ? (
 													<div className="mb-1 rounded-lg border bg-muted/15 p-1.5">
 														<div className="flex items-center justify-between gap-2 px-2 pb-1 text-[11px] font-medium text-muted-foreground">
 															<span>Document workflow</span>

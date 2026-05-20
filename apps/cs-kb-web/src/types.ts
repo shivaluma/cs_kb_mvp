@@ -19,9 +19,14 @@ export type SOP = {
   updated_at: string;
   current_version: {
     id: string;
+    sop_id?: string;
     version_number: number;
     status: string;
+    effective_from?: string;
+    created_by?: string;
+    approved_by?: string;
     change_summary: string;
+    published_at?: string;
     sections: {
       when_to_apply: string;
       input_requirements: string;
