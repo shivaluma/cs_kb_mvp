@@ -132,6 +132,37 @@ class IndexSOPVersionRequest(BaseModel):
     metadata: SOPMetadata
 
 
+class AdminResetStatus(BaseModel):
+    enabled: bool
+    required_confirmation: str
+    destructive_tables: list[str]
+    preserved_tables: list[str]
+    row_counts: dict[str, int]
+    group_counts: dict[str, int]
+    embedding_dimensions: int
+    embedding_column_dimensions: int | None = None
+    embedding_new_column_dimensions: int | None = None
+    warning: str = ""
+
+
+class AdminResetRequest(BaseModel):
+    confirmation: str
+    actor: str = "cs-ops-ui"
+    reason: str = ""
+
+
+class AdminResetResponse(BaseModel):
+    reset_id: str
+    status: str
+    actor: str
+    deleted_counts: dict[str, int]
+    group_counts: dict[str, int]
+    preserved_tables: list[str]
+    embedding_dimensions: int
+    embedding_column_dimensions: int | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DocumentMetadata(BaseModel):
     audience: list[str] = Field(default_factory=list)
     vertical: str = ""

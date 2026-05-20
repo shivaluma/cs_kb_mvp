@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   IconAlertTriangle as AlertTriangle,
   IconArrowRight as ArrowRight,
@@ -17,19 +18,35 @@ import {
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { ActionItem, HealthPill, StatStrip } from "@/components/operations";
 import { SearchBar } from "@/components/search-bar";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatDate } from "@/lib/format";
-import type { DocumentSummary, FeedbackQueueItem, OpsAnalyticsResponse, ServiceHealth, SystemHealth } from "@/types";
+import type { AdminResetStatus, DocumentSummary, FeedbackQueueItem, OpsAnalyticsResponse, ServiceHealth, SystemHealth } from "@/types";
 import type { Workspace } from "@/constants";
 
 export function DashboardWorkspace({
   documents,
   feedbackItems,
+  adminResetStatus,
+  isAdminResetStatusLoading,
+  isResettingData,
   isSystemHealthLoading,
   opsAnalytics,
+  onMagicReset,
   onRunSearch,
   onWorkspaceChange,
   query,
@@ -37,10 +54,14 @@ export function DashboardWorkspace({
   setQuery,
   systemHealth,
 }: {
+  adminResetStatus?: AdminResetStatus;
   documents: DocumentSummary[];
   feedbackItems: FeedbackQueueItem[];
+  isAdminResetStatusLoading: boolean;
+  isResettingData: boolean;
   isSystemHealthLoading: boolean;
   opsAnalytics?: OpsAnalyticsResponse;
+  onMagicReset: (confirmation: string) => void;
   onRunSearch: () => void;
   onWorkspaceChange: (workspace: Workspace) => void;
   query: string;
@@ -153,8 +174,12 @@ export function DashboardWorkspace({
 
         <TabsContent value="system">
           <SystemHealthPanel
+            adminResetStatus={adminResetStatus}
             health={systemHealth}
+            isAdminResetStatusLoading={isAdminResetStatusLoading}
             isLoading={isSystemHealthLoading}
+            isResettingData={isResettingData}
+            onMagicReset={onMagicReset}
             onRefresh={refetchSystemHealth}
           />
         </TabsContent>
@@ -263,12 +288,20 @@ function UsageSignals({
 }
 
 function SystemHealthPanel({
+  adminResetStatus,
   health,
+  isAdminResetStatusLoading,
   isLoading,
+  isResettingData,
+  onMagicReset,
   onRefresh,
 }: {
+  adminResetStatus?: AdminResetStatus;
   health?: SystemHealth;
+  isAdminResetStatusLoading: boolean;
   isLoading: boolean;
+  isResettingData: boolean;
+  onMagicReset: (confirmation: string) => void;
   onRefresh: () => void;
 }) {
   const services = health?.services ?? [];
@@ -344,6 +377,12 @@ function SystemHealthPanel({
             />
           </CardContent>
         </Card>
+        <AdminResetPanel
+          isLoading={isAdminResetStatusLoading}
+          isResetting={isResettingData}
+          onReset={onMagicReset}
+          status={adminResetStatus}
+        />
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
             <CardTitle>Debug order</CardTitle>
@@ -365,6 +404,124 @@ function SystemHealthPanel({
         </Card>
       </aside>
     </div>
+  );
+}
+
+function AdminResetPanel({
+  isLoading,
+  isResetting,
+  onReset,
+  status,
+}: {
+  isLoading: boolean;
+  isResetting: boolean;
+  onReset: (confirmation: string) => void;
+  status?: AdminResetStatus;
+}) {
+  const [open, setOpen] = useState(false);
+  const [typedConfirmation, setTypedConfirmation] = useState("");
+  const requiredConfirmation = status?.required_confirmation ?? "";
+  const totalRows = Object.values(status?.row_counts ?? {}).reduce((sum, count) => sum + count, 0);
+  const canOpen = Boolean(status?.enabled) && !isLoading;
+  const canConfirm = canOpen && typedConfirmation === requiredConfirmation && !isResetting;
+
+  function closeDialog(nextOpen: boolean) {
+    setOpen(nextOpen);
+    if (!nextOpen) {
+      setTypedConfirmation("");
+    }
+  }
+
+  return (
+    <Card className="rounded-xl border-destructive/25">
+      <CardHeader className="border-b pb-4">
+        <div className="flex items-start gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-destructive/30 bg-destructive/10">
+            <AlertTriangle className="size-4 text-destructive" />
+          </div>
+          <div className="min-w-0">
+            <CardTitle>Magic reset</CardTitle>
+            <CardDescription className="mt-1 leading-5">
+              Clears uploaded KB data, generated chunks, chats, telemetry, and search documents; preserves curated synonym and taxonomy tables.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3 pt-4">
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="rounded-lg border bg-muted/20 p-2">
+            <div className="text-muted-foreground">Rows in scope</div>
+            <div className="mt-1 text-sm font-semibold tabular-nums">{isLoading ? "..." : formatRowCount(totalRows)}</div>
+          </div>
+          <div className="rounded-lg border bg-muted/20 p-2">
+            <div className="text-muted-foreground">Vector schema</div>
+            <div className="mt-1 text-sm font-semibold tabular-nums">
+              {status?.embedding_dimensions ? `${status.embedding_dimensions}d` : "..."}
+            </div>
+          </div>
+        </div>
+        {status?.group_counts ? (
+          <div className="grid gap-1.5 text-xs text-muted-foreground">
+            {Object.entries(status.group_counts).map(([group, count]) => (
+              <div className="flex items-center justify-between rounded-md bg-muted/25 px-2 py-1" key={group}>
+                <span>{group.replace(/_/g, " ")}</span>
+                <span className="font-medium tabular-nums text-foreground">{formatRowCount(count)}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {status?.warning ? (
+          <p className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+            {status.warning}
+          </p>
+        ) : null}
+        <AlertDialog open={open} onOpenChange={closeDialog}>
+          <AlertDialogTrigger asChild>
+            <Button className="w-full" disabled={!canOpen || isResetting} type="button" variant="destructive">
+              <WandSparkles data-icon="inline-start" className="size-4" />
+              {isResetting ? "Resetting data" : "Magic reset data"}
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Reset all knowledge data?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This removes source documents, SOP versions, chunks, extraction jobs, chat history, audit telemetry, collection items, tools, action templates, and Meilisearch documents. It also rebuilds the chunk embedding column at the configured dimension.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="space-y-3">
+              <div className="rounded-lg border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
+                Type <span className="font-semibold text-foreground">{requiredConfirmation}</span> to confirm.
+              </div>
+              <Input
+                autoComplete="off"
+                autoFocus
+                onChange={(event) => setTypedConfirmation(event.target.value)}
+                placeholder={requiredConfirmation}
+                value={typedConfirmation}
+              />
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={isResetting}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                className="border-destructive bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20"
+                disabled={!canConfirm}
+                onClick={(event) => {
+                  if (!canConfirm) {
+                    event.preventDefault();
+                    return;
+                  }
+                  onReset(typedConfirmation);
+                  closeDialog(false);
+                }}
+              >
+                {isResetting ? "Resetting" : "Confirm reset"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -423,6 +580,10 @@ function serviceLabel(name: string) {
     qdrant: "Qdrant",
   };
   return labels[name] ?? name.replace(/_/g, " ");
+}
+
+function formatRowCount(value: number) {
+  return new Intl.NumberFormat("en-US").format(value);
 }
 
 function ContentHealth({

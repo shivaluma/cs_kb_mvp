@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-from psycopg import Connection
+from psycopg import Connection, sql
 from psycopg.rows import dict_row, tuple_row
 from psycopg_pool import ConnectionPool
 
@@ -119,6 +119,45 @@ DEFAULT_KB_COLLECTIONS = (
     ("vip-customer-handling", "VIP Customer Handling", "risk"),
     ("tool-directory", "Tool Directory", "tool"),
     ("product-updates", "Product Updates", "domain"),
+)
+ADMIN_RESET_TABLE_GROUPS: dict[str, tuple[str, ...]] = {
+    "knowledge_base": (
+        "ai_document_sources",
+        "ai_document_relations",
+        "ai_chunks",
+        "ai_document_versions",
+        "ai_documents",
+        "kb_sop_versions",
+        "kb_sops",
+    ),
+    "extraction": (
+        "extraction_stage_outputs",
+        "extraction_jobs",
+    ),
+    "operations": (
+        "kb_collection_items",
+        "kb_collections",
+        "tool_links",
+        "action_templates",
+    ),
+    "chat": (
+        "ai_chat_messages",
+        "ai_chat_sessions",
+    ),
+    "telemetry": (
+        "ai_retrieval_events",
+        "ai_chat_events",
+        "ai_audit_events",
+        "search_synonym_suggestions",
+    ),
+}
+ADMIN_RESET_PRESERVED_TABLES = (
+    "taxonomy_intents",
+    "search_synonym_groups",
+    "search_synonym_terms",
+)
+ADMIN_RESET_TABLES = tuple(
+    dict.fromkeys(table for tables in ADMIN_RESET_TABLE_GROUPS.values() for table in tables)
 )
 
 
@@ -581,6 +620,146 @@ def health_check() -> dict[str, Any]:
         "latency_ms": int((time.perf_counter() - start) * 1000),
         "detail": "Postgres and pgvector schema are reachable",
     }
+
+
+def admin_reset_status() -> dict[str, Any]:
+    with connection() as conn:
+        row_counts = table_counts_tx(conn, ADMIN_RESET_TABLES)
+        return {
+            "enabled": settings.admin_reset_enabled,
+            "required_confirmation": settings.admin_reset_confirmation,
+            "destructive_tables": list(ADMIN_RESET_TABLES),
+            "preserved_tables": list(ADMIN_RESET_PRESERVED_TABLES),
+            "row_counts": row_counts,
+            "group_counts": group_counts(row_counts),
+            "embedding_dimensions": settings.embedding_dimensions,
+            "embedding_column_dimensions": embedding_column_dimensions_tx(conn, "embedding"),
+            "embedding_new_column_dimensions": embedding_column_dimensions_tx(conn, "embedding_new"),
+            "warning": (
+                ""
+                if settings.admin_reset_enabled
+                else "Set CS_KB_ENABLE_MAGIC_RESET=true on the AI service to enable destructive resets."
+            ),
+        }
+
+
+def reset_application_data(actor: str, reason: str = "") -> dict[str, Any]:
+    if settings.embedding_dimensions <= 0:
+        raise ValueError("invalid_embedding_dimensions")
+    reset_id = str(uuid.uuid4())
+    clean_actor = pg_text(actor).strip() or "cs-ops-ui"
+    clean_reason = pg_text(reason).strip()
+    warnings: list[str] = []
+    with connection() as conn:
+        with conn.transaction():
+            deleted_counts = table_counts_tx(conn, ADMIN_RESET_TABLES)
+            existing_tables = existing_tables_tx(conn, ADMIN_RESET_TABLES)
+            if existing_tables:
+                conn.execute(
+                    sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
+                        sql.SQL(", ").join(sql.Identifier(table) for table in existing_tables)
+                    )
+                )
+            reset_ai_chunk_embedding_schema_tx(conn)
+            ensure_kb_index_schema(conn)
+            seed_search_taxonomy(conn)
+            audit_tx(
+                conn,
+                actor=clean_actor,
+                action="admin_magic_reset",
+                entity_type="system",
+                entity_id=reset_id,
+                metadata={
+                    "reason": clean_reason,
+                    "deleted_counts": deleted_counts,
+                    "embedding_dimensions": settings.embedding_dimensions,
+                    "preserved_tables": list(ADMIN_RESET_PRESERVED_TABLES),
+                },
+            )
+    with connection() as conn:
+        embedding_dimensions = embedding_column_dimensions_tx(conn, "embedding")
+        if embedding_dimensions != settings.embedding_dimensions:
+            warnings.append(f"embedding_dimension_mismatch:{embedding_dimensions}:{settings.embedding_dimensions}")
+    return {
+        "reset_id": reset_id,
+        "status": "reset",
+        "actor": clean_actor,
+        "deleted_counts": deleted_counts,
+        "group_counts": group_counts(deleted_counts),
+        "preserved_tables": list(ADMIN_RESET_PRESERVED_TABLES),
+        "embedding_dimensions": settings.embedding_dimensions,
+        "embedding_column_dimensions": embedding_dimensions,
+        "warnings": warnings,
+    }
+
+
+def table_counts_tx(conn: Connection[Any], table_names: tuple[str, ...]) -> dict[str, int]:
+    counts: dict[str, int] = {table: 0 for table in table_names}
+    for table in existing_tables_tx(conn, table_names):
+        row = conn.execute(
+            sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table))
+        ).fetchone()
+        counts[table] = int(row[0] if row else 0)
+    return counts
+
+
+def existing_tables_tx(conn: Connection[Any], table_names: tuple[str, ...]) -> list[str]:
+    if not table_names:
+        return []
+    rows = conn.execute(
+        """
+        SELECT tablename
+        FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename = ANY(%s)
+        """,
+        (list(table_names),),
+    ).fetchall()
+    existing = {str(row[0]) for row in rows}
+    return [table for table in table_names if table in existing]
+
+
+def group_counts(row_counts: dict[str, int]) -> dict[str, int]:
+    return {
+        group: sum(int(row_counts.get(table, 0)) for table in tables)
+        for group, tables in ADMIN_RESET_TABLE_GROUPS.items()
+    }
+
+
+def reset_ai_chunk_embedding_schema_tx(conn: Connection[Any]) -> None:
+    if "ai_chunks" not in existing_tables_tx(conn, ("ai_chunks",)):
+        return
+    dimension = int(settings.embedding_dimensions)
+    conn.execute("DROP INDEX IF EXISTS idx_ai_chunks_embedding_hnsw")
+    conn.execute("DROP INDEX IF EXISTS idx_ai_chunks_embedding_new_hnsw")
+    conn.execute("ALTER TABLE ai_chunks DROP COLUMN IF EXISTS embedding")
+    conn.execute("ALTER TABLE ai_chunks DROP COLUMN IF EXISTS embedding_new")
+    conn.execute(f"ALTER TABLE ai_chunks ADD COLUMN embedding vector({dimension}) NOT NULL")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_chunks_embedding_hnsw ON ai_chunks USING hnsw (embedding vector_cosine_ops)"
+    )
+
+
+def embedding_column_dimensions_tx(conn: Connection[Any], column_name: str) -> int | None:
+    if column_name not in {"embedding", "embedding_new"}:
+        raise ValueError("invalid_embedding_column")
+    row = conn.execute(
+        """
+        SELECT a.atttypmod
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = 'ai_chunks'
+          AND a.attname = %s
+          AND NOT a.attisdropped
+        """,
+        (column_name,),
+    ).fetchone()
+    if not row:
+        return None
+    value = row[0]
+    return int(value) if value else None
 
 
 def ensure_search_taxonomy_schema(conn: Connection[Any]) -> None:

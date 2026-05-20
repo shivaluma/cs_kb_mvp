@@ -690,6 +690,20 @@ func (s *Store) DeleteSOPFromMeili(ctx context.Context, sopID string) error {
 	return s.meiliRequest(ctx, http.MethodDelete, "/indexes/sops/documents/"+sopID, nil, nil)
 }
 
+func (s *Store) ClearSearchIndexes(ctx context.Context) map[string]string {
+	indexes := []string{"sops", "ai_documents", "ai_chunks"}
+	results := make(map[string]string, len(indexes))
+	for _, index := range indexes {
+		if err := s.meiliRequest(ctx, http.MethodDelete, "/indexes/"+index+"/documents", nil, nil); err != nil {
+			results[index] = err.Error()
+			s.logger.WarnContext(ctx, "clear meilisearch index failed", "index", index, "error", err)
+			continue
+		}
+		results[index] = "cleared"
+	}
+	return results
+}
+
 func scanSOP(row pgx.Row) (model.SOP, error) {
 	var sop model.SOP
 	var audienceJSON, tagsJSON, caseReasonsJSON, metricsJSON, sectionsJSON []byte

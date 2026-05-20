@@ -18,6 +18,9 @@ from app.ingestion import prepare_document_version, preview_document_metadata
 from app.retrieval import retrieve
 from app.search_labels import embedding_text_for_unit, meaningful_search_label
 from app.schemas import (
+    AdminResetRequest,
+    AdminResetResponse,
+    AdminResetStatus,
     BulkReviewVersionRequest,
     AssignRelationRequest,
     ChatSessionCreateRequest,
@@ -121,6 +124,23 @@ def healthz() -> dict[str, Any]:
         "retrieval_store": "postgres_pgvector",
         "services": services,
     }
+
+
+@app.get("/ai/v1/admin/reset-status", response_model=AdminResetStatus)
+def admin_reset_status() -> AdminResetStatus:
+    return AdminResetStatus(**repository.admin_reset_status())
+
+
+@app.post("/ai/v1/admin/reset-data", response_model=AdminResetResponse)
+def admin_reset_data(payload: AdminResetRequest) -> AdminResetResponse:
+    if not settings.admin_reset_enabled:
+        raise HTTPException(status_code=403, detail="admin_magic_reset_disabled")
+    if payload.confirmation != settings.admin_reset_confirmation:
+        raise HTTPException(status_code=409, detail="admin_magic_reset_confirmation_mismatch")
+    try:
+        return AdminResetResponse(**repository.reset_application_data(payload.actor, payload.reason))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/ai/v1/chat/model-routes")

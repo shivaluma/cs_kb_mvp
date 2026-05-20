@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from app.config import DEFAULT_EMBEDDING_MODEL, Settings
+from app.config import ADMIN_RESET_CONFIRMATION, DEFAULT_EMBEDDING_MODEL, Settings
 
 
 class EmbeddingConfigTest(unittest.TestCase):
@@ -36,6 +36,19 @@ class EmbeddingConfigTest(unittest.TestCase):
 
         self.assertEqual(settings.openrouter_api_key, "openrouter-key")
         self.assertEqual(settings.embedding_api_key, "openrouter-key")
+
+    def test_magic_reset_is_disabled_by_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            settings = Settings()
+
+        self.assertFalse(settings.admin_reset_enabled)
+        self.assertEqual(settings.admin_reset_confirmation, ADMIN_RESET_CONFIRMATION)
+
+    def test_magic_reset_requires_explicit_enable(self) -> None:
+        with patch.dict(os.environ, {"CS_KB_ENABLE_MAGIC_RESET": "true"}, clear=True):
+            settings = Settings()
+
+        self.assertTrue(settings.admin_reset_enabled)
 
 
 if __name__ == "__main__":

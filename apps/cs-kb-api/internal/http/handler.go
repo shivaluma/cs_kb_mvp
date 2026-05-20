@@ -53,6 +53,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/search/synonym-suggestions/generate", h.proxyAI("/ai/v1/search/synonym-suggestions/generate"))
 	mux.HandleFunc("POST /api/v1/search/synonym-suggestions/{id}/accept", h.proxyAISynonymSuggestionAccept)
 	mux.HandleFunc("POST /api/v1/ai/suggest", h.aiSuggest)
+	mux.HandleFunc("GET /api/v1/ai/admin/reset-status", h.proxyAI("/ai/v1/admin/reset-status"))
+	mux.HandleFunc("POST /api/v1/ai/admin/reset-data", h.proxyAIAdminReset)
 	mux.HandleFunc("GET /api/v1/ai/documents", h.proxyAI("/ai/v1/documents"))
 	mux.HandleFunc("GET /api/v1/ai/relations", h.proxyAI("/ai/v1/relations"))
 	mux.HandleFunc("POST /api/v1/ai/relations", h.proxyAI("/ai/v1/relations"))
@@ -446,6 +448,66 @@ func (h *Handler) proxyAIDocumentUploadAsync(w http.ResponseWriter, r *http.Requ
 
 func (h *Handler) proxyAIDocumentMetadataPreview(w http.ResponseWriter, r *http.Request) {
 	h.proxyAIWithBody("/ai/v1/documents/metadata-preview", 90*time.Second, nil)(w, r)
+}
+
+func (h *Handler) proxyAIAdminReset(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	target := strings.TrimRight(h.cfg.AIBaseURL, "/") + "/ai/v1/admin/reset-data"
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request_body"})
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "AI admin reset proxy request build failed", "target", target, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ai_proxy_request_failed"})
+		return
+	}
+	req.Header = r.Header.Clone()
+	req.Header.Del("Host")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 75 * time.Second}).Do(req)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "AI admin reset proxy request failed", "target", target, "duration_ms", time.Since(start).Milliseconds(), "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_service_unavailable"})
+		return
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "AI admin reset proxy response read failed", "target", target, "status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds(), "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "ai_proxy_read_failed"})
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		for key, values := range resp.Header {
+			if strings.EqualFold(key, "Content-Length") {
+				continue
+			}
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(respBody)
+		h.logProxyCompletion(r.Context(), "AI admin reset proxy completed", target, resp.StatusCode, time.Since(start), respBody)
+		return
+	}
+
+	meiliReset := h.store.ClearSearchIndexes(r.Context())
+	var decoded map[string]any
+	if err := json.Unmarshal(respBody, &decoded); err != nil {
+		writeJSON(w, resp.StatusCode, map[string]any{
+			"status":             "reset",
+			"meilisearch_reset":  meiliReset,
+			"ai_response_unread": string(respBody),
+		})
+		return
+	}
+	decoded["meilisearch_reset"] = meiliReset
+	writeJSON(w, resp.StatusCode, decoded)
+	h.logProxyCompletion(r.Context(), "AI admin reset proxy completed", target, resp.StatusCode, time.Since(start), respBody)
 }
 
 func (h *Handler) proxyAIDocumentArchive(w http.ResponseWriter, r *http.Request) {

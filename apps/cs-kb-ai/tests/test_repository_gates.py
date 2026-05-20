@@ -87,6 +87,17 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertEqual(repository.median_from_sorted([1000, 3000, 9000]), 3000)
         self.assertEqual(repository.median_from_sorted([1000, 5000]), 3000)
 
+    def test_admin_reset_preserves_curated_search_taxonomy(self) -> None:
+        self.assertIn("ai_chunks", repository.ADMIN_RESET_TABLES)
+        self.assertIn("ai_chat_sessions", repository.ADMIN_RESET_TABLES)
+        self.assertIn("search_synonym_suggestions", repository.ADMIN_RESET_TABLES)
+        self.assertNotIn("search_synonym_groups", repository.ADMIN_RESET_TABLES)
+        self.assertIn("search_synonym_groups", repository.ADMIN_RESET_PRESERVED_TABLES)
+        counts = {table: 1 for table in repository.ADMIN_RESET_TABLES}
+        grouped = repository.group_counts(counts)
+        self.assertGreater(grouped["knowledge_base"], 0)
+        self.assertGreater(grouped["chat"], 0)
+
     def test_force_approve_promotes_candidate_unit_types(self) -> None:
         self.assertEqual(repository.promoted_unit_type("candidate_rule", "policy_rule"), "policy_rule")
         self.assertEqual(repository.promoted_unit_type("candidate_table_row", "policy_table"), "policy_rule")

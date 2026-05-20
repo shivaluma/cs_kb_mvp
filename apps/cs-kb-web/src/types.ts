@@ -75,6 +75,32 @@ export type SystemHealth = {
   services: ServiceHealth[];
 };
 
+export type AdminResetStatus = {
+  enabled: boolean;
+  required_confirmation: string;
+  destructive_tables: string[];
+  preserved_tables: string[];
+  row_counts: Record<string, number>;
+  group_counts: Record<string, number>;
+  embedding_dimensions: number;
+  embedding_column_dimensions?: number | null;
+  embedding_new_column_dimensions?: number | null;
+  warning?: string;
+};
+
+export type AdminResetResponse = {
+  reset_id: string;
+  status: "reset";
+  actor: string;
+  deleted_counts: Record<string, number>;
+  group_counts: Record<string, number>;
+  preserved_tables: string[];
+  embedding_dimensions: number;
+  embedding_column_dimensions?: number | null;
+  warnings: string[];
+  meilisearch_reset?: Record<string, string>;
+};
+
 export type AISuggestion = {
   answer: string;
   suggested_sops: Array<{

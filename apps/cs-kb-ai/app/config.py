@@ -5,6 +5,7 @@ import os
 
 EMBEDDING_DIMENSIONS = 1536
 DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
+ADMIN_RESET_CONFIRMATION = "RESET CS KB DATA"
 
 
 def first_non_empty(*values: str | None) -> str:
@@ -12,6 +13,13 @@ def first_non_empty(*values: str | None) -> str:
         if value and value.strip():
             return value.strip()
     return ""
+
+
+def env_bool(key: str, default: bool = False) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class Settings:
@@ -79,6 +87,11 @@ class Settings:
         self.embedding_model = first_non_empty(os.getenv("EMBEDDING_MODEL"), DEFAULT_EMBEDDING_MODEL)
         embedding_provider = os.getenv("EMBEDDING_PROVIDER", "").strip().lower()
         self.embedding_provider = embedding_provider or ("openrouter" if self.embedding_api_key else "local_hash")
+        self.admin_reset_enabled = env_bool("CS_KB_ENABLE_MAGIC_RESET", False)
+        self.admin_reset_confirmation = (
+            os.getenv("CS_KB_ADMIN_RESET_CONFIRMATION", ADMIN_RESET_CONFIRMATION).strip()
+            or ADMIN_RESET_CONFIRMATION
+        )
 
 
 settings = Settings()
