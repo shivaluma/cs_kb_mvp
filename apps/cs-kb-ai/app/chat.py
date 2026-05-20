@@ -519,6 +519,7 @@ def chat_session_failure_response(
         retrieval_trace={
             "strategy": "chat_session_exception_fallback",
             "error_type": exc.__class__.__name__,
+            "error_message": safe_error_message(exc),
             "retrieval_query_used": request.retrieval_query != payload.question,
         },
         answer_scope=build_answer_scope(payload.question).model_dump(),
@@ -527,6 +528,10 @@ def chat_session_failure_response(
         model_used="",
         model_reason="session_exception_fallback",
     )
+
+
+def safe_error_message(exc: Exception) -> str:
+    return re.sub(r"\s+", " ", str(exc or "")).strip()[:300]
 
 
 def contextual_retrieval_query(

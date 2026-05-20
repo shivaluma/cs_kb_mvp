@@ -226,11 +226,31 @@ def truncated_text(value: str, limit: int) -> tuple[str, bool, int]:
 
 def json_preview(value: Any, limit: int = MAX_AI_BREAKDOWN_JSON_CHARS) -> dict[str, Any]:
     try:
-        text = json.dumps(value, ensure_ascii=False, default=lambda item: item.model_dump() if hasattr(item, "model_dump") else str(item))
+        text = safe_json_dumps(value)
     except TypeError:
         text = str(value)
     preview, truncated, chars = truncated_text(text, limit)
     return {"chars": chars, "json": preview, "truncated": truncated}
+
+
+def safe_json_dumps(value: Any) -> str:
+    return json.dumps(json_safe(value), ensure_ascii=False, allow_nan=False)
+
+
+def json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, float):
+        if value != value or value in {float("inf"), float("-inf")}:
+            return None
+        return value
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if hasattr(value, "model_dump"):
+        return json_safe(value.model_dump(mode="json"))
+    return str(value)
 
 
 def ai_prompt_preview(prompt: str) -> dict[str, Any]:
@@ -1733,7 +1753,7 @@ def generate_grounded_answer(
                     source_ref,
                     f"Heading: {result.heading}",
                     f"Source file: {result.source_filename}",
-                    f"Metadata: {json.dumps(metadata, ensure_ascii=False)}",
+                    f"Metadata: {safe_json_dumps(metadata)}",
                     f"Content: {result.content[:1800]}",
                 ]
             )
@@ -1787,7 +1807,7 @@ def generate_grounded_answer(
                     f"Recent user context, for intent resolution only, not policy evidence:\n{recent_user_text or '(none)'}\n\n"
                     f"Previous assistant answer summary, for resolving follow-up references only, not policy evidence. Verify every claim against SOURCES before answering:\n{recent_assistant_text or '(none)'}\n\n"
                     f"Session summary, for intent resolution only, not policy evidence:\n{session_summary_text or '(none)'}\n\n"
-                    f"Answer scope contract:\n{json.dumps(answer_scope.model_dump(), ensure_ascii=False)}\n\n"
+                    f"Answer scope contract:\n{safe_json_dumps(answer_scope.model_dump())}\n\n"
                     "Scope instructions:\n"
                     "- Nếu is_narrow=true, answer tối đa 1-2 câu, chỉ trả procedural field được hỏi.\n"
                     "- Không include branch nằm trong excluded_branch_types, kể cả branch đó có trong SOURCES.\n"

@@ -73,6 +73,26 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
                     warnings=[*warnings, "no_reliable_source"],
                     latency_ms=latency_ms,
                 )
+        except Exception as exc:
+            warnings.append(f"vector_search_failed:{exc.__class__.__name__}")
+            if request.mode == "vector":
+                latency_ms = repository.log_retrieval(
+                    request.query,
+                    request.filters.model_dump(),
+                    request.mode,
+                    0,
+                    started_at,
+                )
+                return RetrievalResponse(
+                    query=request.query,
+                    normalized_query=normalized_query,
+                    query_expansion=query_expansion,
+                    mode=request.mode,
+                    results=[],
+                    citations=[],
+                    warnings=[*warnings, "no_reliable_source"],
+                    latency_ms=latency_ms,
+                )
 
     if request.mode == "lexical":
         fused_rows = rows_from_single_mode(lexical_rows, "lexical", search_limit)

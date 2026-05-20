@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import patch
 
 from app.answer_scope import AnswerScope, PolicyFacets, policy_applicability_debug
@@ -17,7 +19,7 @@ from app.chat import (
     should_use_recent_context,
     updated_session_summary,
 )
-from app.openrouter import enforce_answer_grounding_contract
+from app.openrouter import enforce_answer_grounding_contract, safe_json_dumps
 from app.schemas import (
     ChatSessionCreateRequest,
     ChatSessionMessageRequest,
@@ -72,9 +74,23 @@ class ChatRetrievalTest(unittest.TestCase):
 
         self.assertEqual(result["response"].confidence, 0)
         self.assertIn("chat_session_generation_failed:RuntimeError", result["response"].warnings)
+        self.assertEqual(result["response"].retrieval_trace["error_message"], "boom")
         self.assertEqual(inserted_messages[0]["role"], "user")
         self.assertEqual(inserted_messages[1]["role"], "assistant")
         self.assertIn("Không thể tạo câu trả lời", inserted_messages[1]["content"])
+
+    def test_grounded_prompt_metadata_json_handles_non_json_native_values(self) -> None:
+        payload = {
+            "score": Decimal("1.25"),
+            "created_at": datetime(2026, 5, 20, tzinfo=timezone.utc),
+            "items": {Decimal("2.5")},
+        }
+
+        text = safe_json_dumps(payload)
+
+        self.assertIn('"score": "1.25"', text)
+        self.assertIn('"created_at": "2026-05-20 00:00:00+00:00"', text)
+        self.assertIn('"2.5"', text)
 
     def test_issue_router_match_expands_approved_target_sop(self) -> None:
         router = retrieval_result("router-chunk", "issue_router_unit", score=0.7)
