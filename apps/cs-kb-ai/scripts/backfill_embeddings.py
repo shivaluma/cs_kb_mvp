@@ -29,11 +29,20 @@ def main() -> int:
     parser.add_argument("--swap", action="store_true", help="Swap embedding_new into embedding after backfill is complete")
     parser.add_argument("--allow-local", action="store_true", help="Allow local_hash embeddings for dev/test backfills")
     parser.add_argument("--dry-run", action="store_true", help="Print pending counts without writing")
+    parser.add_argument("--status", action="store_true", help="Print embedding dimension status and exit")
+    parser.add_argument("--reset-new", action="store_true", help="Drop/recreate embedding_new if it exists with the wrong dimension")
     args = parser.parse_args()
 
     if settings.embedding_dimensions <= 0:
         print("EMBEDDING_DIMENSIONS must be positive", file=sys.stderr)
         return 1
+
+    with repository.connection() as conn:
+        conn.row_factory = dict_row
+        if args.status:
+            print_status(conn)
+            return 0
+
     if not remote_embedding_configured() and not args.allow_local:
         print(
             "Remote embedding provider is not configured. Set OPENROUTER_API_KEY/EMBEDDING_API_KEY "
@@ -44,7 +53,7 @@ def main() -> int:
 
     with repository.connection() as conn:
         conn.row_factory = dict_row
-        ensure_embedding_new_column(conn, args.dry_run)
+        ensure_embedding_new_column(conn, args.dry_run, args.reset_new)
         pending = pending_count(conn)
         print(f"pending_chunks={pending} embedding_dimensions={settings.embedding_dimensions}")
         if args.dry_run:
@@ -64,9 +73,29 @@ def main() -> int:
     return 0
 
 
-def ensure_embedding_new_column(conn: Any, dry_run: bool) -> None:
+def print_status(conn: Any) -> None:
+    print(f"runtime_embedding_provider={settings.embedding_provider}")
+    print(f"runtime_embedding_model={settings.embedding_model}")
+    print(f"runtime_embedding_dimensions={settings.embedding_dimensions}")
+    print(f"embedding_column_dimensions={embedding_column_dimensions(conn, 'embedding') or ''}")
+    print(f"embedding_new_column_dimensions={embedding_column_dimensions(conn, 'embedding_new') or ''}")
+    print(f"embedding_vector_dims={json.dumps(vector_dimension_counts(conn, 'embedding'), sort_keys=True)}")
+    print(f"embedding_new_vector_dims={json.dumps(vector_dimension_counts(conn, 'embedding_new'), sort_keys=True)}")
+    print(f"metadata_embedding_dimensions={json.dumps(metadata_dimension_counts(conn), sort_keys=True)}")
+    print(f"pending_chunks={pending_count(conn)}")
+
+
+def ensure_embedding_new_column(conn: Any, dry_run: bool, reset_new: bool) -> None:
     if dry_run:
         return
+    current_dims = embedding_column_dimensions(conn, "embedding_new")
+    if current_dims and current_dims != settings.embedding_dimensions:
+        if not reset_new:
+            raise RuntimeError(
+                f"embedding_new_dimension_mismatch:{current_dims}:{settings.embedding_dimensions}; "
+                "rerun with --reset-new to recreate staging column"
+            )
+        conn.execute("ALTER TABLE ai_chunks DROP COLUMN embedding_new")
     conn.execute(f"ALTER TABLE ai_chunks ADD COLUMN IF NOT EXISTS embedding_new vector({settings.embedding_dimensions})")
 
 
@@ -89,6 +118,59 @@ def embedding_new_column_exists(conn: Any) -> bool:
         """
     ).fetchone()
     return bool(row["exists"])
+
+
+def embedding_column_dimensions(conn: Any, column_name: str) -> int | None:
+    if column_name not in {"embedding", "embedding_new"}:
+        raise ValueError("invalid_embedding_column")
+    row = conn.execute(
+        """
+        SELECT a.atttypmod
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = 'ai_chunks'
+          AND a.attname = %s
+          AND NOT a.attisdropped
+        """,
+        (column_name,),
+    ).fetchone()
+    if not row:
+        return None
+    value = row.get("atttypmod")
+    return int(value) if value else None
+
+
+def vector_dimension_counts(conn: Any, column_name: str) -> dict[str, int]:
+    if column_name not in {"embedding", "embedding_new"}:
+        raise ValueError("invalid_embedding_column")
+    if not embedding_column_dimensions(conn, column_name):
+        return {}
+    rows = conn.execute(
+        f"""
+        SELECT vector_dims({column_name})::text AS dims,
+               COUNT(*) AS count
+        FROM ai_chunks
+        WHERE {column_name} IS NOT NULL
+        GROUP BY 1
+        ORDER BY 1
+        """
+    ).fetchall()
+    return {str(row["dims"]): int(row["count"]) for row in rows}
+
+
+def metadata_dimension_counts(conn: Any) -> dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT COALESCE(metadata->>'embedding_dimensions', '') AS dims,
+               COUNT(*) AS count
+        FROM ai_chunks
+        GROUP BY 1
+        ORDER BY 1
+        """
+    ).fetchall()
+    return {str(row["dims"] or "missing"): int(row["count"]) for row in rows}
 
 
 def fetch_batch(conn: Any, batch_size: int) -> list[dict[str, Any]]:
@@ -153,6 +235,9 @@ def embedding_input(row: dict[str, Any]) -> str:
 
 
 def swap_embedding_columns(conn: Any) -> None:
+    current_dims = embedding_column_dimensions(conn, "embedding_new")
+    if current_dims != settings.embedding_dimensions:
+        raise RuntimeError(f"embedding_new_dimension_mismatch:{current_dims}:{settings.embedding_dimensions}")
     with conn.transaction():
         conn.execute("DROP INDEX IF EXISTS idx_ai_chunks_embedding_hnsw")
         conn.execute("ALTER TABLE ai_chunks DROP COLUMN embedding")
