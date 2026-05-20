@@ -27,6 +27,7 @@ from app.schemas import ChatSessionMessageRequest, GroundedChatRequest, Grounded
 
 DIRECT_SOP_UNIT_TYPES = {
     "full_sop",
+    "source_evidence_section",
     "policy_rule",
     "exception_rule",
     "handling_rule",
@@ -64,6 +65,7 @@ SOURCE_ROLE_ORDER = {
     "action_template": 3,
     "tool_link": 4,
     "parent_sop": 5,
+    "source_evidence": 6,
 }
 SOURCE_GROUP_LABELS = {
     "direct_sop": "Direct SOP",
@@ -71,7 +73,8 @@ SOURCE_GROUP_LABELS = {
     "related_sop": "Related SOP",
     "action_template": "Action templates",
     "tool_link": "Tools",
-    "parent_sop": "Parent SOP",
+    "parent_sop": "Document overview",
+    "source_evidence": "Source evidence",
 }
 @dataclass(frozen=True)
 class ChatModelSelection:
@@ -649,6 +652,8 @@ def source_role(result: RetrievalResult) -> str:
     if role:
         return role
     unit_type = str(metadata.get("unit_type") or result.section)
+    if metadata.get("source_evidence_only") is True or unit_type == "source_evidence_section":
+        return "source_evidence"
     if unit_type == "full_sop":
         return "parent_sop"
     if unit_type == "tool_link":

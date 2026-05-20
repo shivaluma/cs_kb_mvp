@@ -728,13 +728,13 @@ export function buildSopQualityAudit({
     highRiskUnitCount > 0 || documentType.includes("policy") || documentType.includes("workflow") ? "high" : validationRuleCount > 0 ? "medium" : "low";
 
   if (fullSopUnit) {
-    strengths.push("Full SOP layer exists");
+    strengths.push("Document overview layer exists");
   } else {
     issues.push({
       category: "completeness",
-      issue: "Missing full SOP page",
+      issue: "Missing document overview",
       severity: "critical",
-      suggestedFix: "Create a document-level full_sop layer so CS can read context, training notes, and audit history.",
+      suggestedFix: "Create a document-level full_sop overview so CS can orient before using atomic units and source evidence.",
     });
   }
 
@@ -1144,7 +1144,7 @@ function readinessActionForCheck(label: string) {
     "Atomic retrieval units": "Create or convert searchable atomic units from the source evidence.",
     "Atomic units reviewed": "Filter to Needs review, then mark reviewed or approve after checking source evidence.",
     "Effective date reviewed": "Add or confirm effective_from on the document or relevant high-risk units.",
-    "Full SOP page": "Re-extract or manually create a full_sop document layer before publish.",
+    "Document overview": "Re-extract or manually create a full_sop overview layer before publish.",
     "High-risk warning acknowledged": "Add/review risk, validation, warning, or security units from source evidence.",
     "Owner assigned": "Set owner_team so future changes have operational ownership.",
     "Required workflow units": "Complete required workflow units from the dedicated workflow panel.",

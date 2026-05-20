@@ -223,7 +223,7 @@ export function LookupWorkspace({
                     ) : null}
                     {(groupedResults.parent.length > 0 || listSource.length > 0) ? (
                       <div className="space-y-2">
-                        <ResultGroupHeader count={groupedResults.parent.length + listSource.length} title="Parent SOP" />
+                        <ResultGroupHeader count={groupedResults.parent.length + listSource.length} title="Document overview" />
                         {groupedResults.parent.map((match) => (
                           <DocumentMatchButton
                             key={match.chunk_id}
@@ -241,6 +241,21 @@ export function LookupWorkspace({
                             onCopyAnswer={() => copyAnswer(item.snippet)}
                             onOpen={() => onOpenSOP(item.sop_id)}
                             selected={selected?.id === item.sop_id}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                    {groupedResults.sourceEvidence.length > 0 ? (
+                      <div className="space-y-2">
+                        <ResultGroupHeader count={groupedResults.sourceEvidence.length} title="Source evidence" />
+                        {groupedResults.sourceEvidence.map((match) => (
+                          <DocumentMatchButton
+                            key={match.chunk_id}
+                            match={match}
+                            onClick={() => onSelectDocumentMatch(match)}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => openFullSop(match)}
+                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
                           />
                         ))}
                       </div>
@@ -275,7 +290,7 @@ export function LookupWorkspace({
                             <div className="mt-3 flex flex-wrap gap-2">
                               <Badge variant="secondary">grounded</Badge>
                               <Badge variant="outline">v{item.version}</Badge>
-                              <Button className="h-7 px-2" onClick={() => onOpenSOP(item.sop_id)} size="sm" type="button" variant="outline">Open full SOP</Button>
+                              <Button className="h-7 px-2" onClick={() => onOpenSOP(item.sop_id)} size="sm" type="button" variant="outline">Open source</Button>
                             </div>
                           </article>
                         ))}
@@ -330,6 +345,7 @@ function DocumentMatchButton({
   const scope = String(match.metadata.retrieval_scope ?? "unit");
   const unitType = String(match.metadata.unit_type ?? match.section);
   const isDocumentLayer = scope === "document" || unitType === "full_sop";
+  const isSourceEvidence = scope === "source_evidence" || unitType === "source_evidence_section" || match.metadata.source_evidence_only === true;
   const facts = operationalFacts(match.metadata).slice(0, 4);
   return (
     <article
@@ -341,7 +357,7 @@ function DocumentMatchButton({
       <div className="flex items-start justify-between gap-2">
         <h3 className="min-w-0 text-sm font-semibold leading-5">{match.heading || match.title}</h3>
         <Badge className="shrink-0" variant={isDocumentLayer ? "secondary" : "outline"}>
-          {isDocumentLayer ? "Full SOP" : "Quick answer"}
+          {isDocumentLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer"}
         </Badge>
       </div>
       <p className="mt-1 truncate text-xs text-muted-foreground">From: {match.title}</p>
@@ -370,7 +386,7 @@ function DocumentMatchButton({
           Quick answer
         </Button>
         <Button className="h-7 px-2" onClick={onOpenFullSop} size="sm" type="button" variant="outline">
-          Full SOP
+          Source
         </Button>
         <Button className="h-7 px-2" onClick={onCopyAnswer} size="sm" type="button" variant="ghost">
           <Copy data-icon="inline-start" className="size-3.5" />
@@ -406,7 +422,7 @@ function SopResultCard({
       <MetaLine className="mt-3" items={[`v${item.version}`, item.category, item.vertical, formatDate(item.updated_at)]} />
       <div className="mt-3 flex flex-wrap gap-2">
         <Button className="h-7 px-2" onClick={onOpen} size="sm" type="button" variant="outline">
-          Open full SOP
+          Open source
         </Button>
         <Button className="h-7 px-2" onClick={onCopyAnswer} size="sm" type="button" variant="ghost">
           <Copy data-icon="inline-start" className="size-3.5" />
@@ -431,6 +447,8 @@ function groupRetrievalResults(results: RetrievalResult[]) {
     (groups, result) => {
       if (isDocumentLayer(result)) {
         groups.parent.push(result);
+      } else if (isSourceEvidenceMatch(result)) {
+        groups.sourceEvidence.push(result);
       } else if (isIssueRouterMatch(result)) {
         groups.issueRouter.push(result);
       } else if (isToolMatch(result)) {
@@ -450,6 +468,7 @@ function groupRetrievalResults(results: RetrievalResult[]) {
       tool: [] as RetrievalResult[],
       action: [] as RetrievalResult[],
       parent: [] as RetrievalResult[],
+      sourceEvidence: [] as RetrievalResult[],
       related: [] as RetrievalResult[],
     },
   );
@@ -459,6 +478,12 @@ function isDocumentLayer(match: RetrievalResult) {
   const scope = String(match.metadata.retrieval_scope ?? "unit");
   const unitType = String(match.metadata.unit_type ?? match.section);
   return scope === "document" || unitType === "full_sop";
+}
+
+function isSourceEvidenceMatch(match: RetrievalResult) {
+  const scope = String(match.metadata.retrieval_scope ?? "unit");
+  const unitType = String(match.metadata.unit_type ?? match.section);
+  return scope === "source_evidence" || unitType === "source_evidence_section" || match.metadata.source_evidence_only === true;
 }
 
 function isIssueRouterMatch(match: RetrievalResult) {
@@ -505,6 +530,7 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
   const scope = String(match.metadata.retrieval_scope ?? "unit");
   const unitType = String(match.metadata.unit_type ?? match.section);
   const isDocumentLayer = scope === "document" || unitType === "full_sop";
+  const isSourceEvidence = scope === "source_evidence" || unitType === "source_evidence_section" || match.metadata.source_evidence_only === true;
   const facts = operationalFacts(match.metadata);
   return (
     <Card className="rounded-xl">
@@ -512,7 +538,7 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-2">
-              <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{isDocumentLayer ? "Full SOP" : "Quick answer"}</Badge>
+              <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{isDocumentLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer"}</Badge>
             </div>
             <CardTitle className="text-xl md:text-2xl">{match.heading || match.title}</CardTitle>
             <CardDescription className="mt-2 max-w-[72ch] text-sm leading-6">
@@ -532,7 +558,7 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
       </CardHeader>
       <CardContent className="space-y-5 pt-4">
         <section>
-          <SectionTitle title={isDocumentLayer ? "Full SOP page" : "Atomic knowledge unit"} />
+          <SectionTitle title={isDocumentLayer ? "Document overview" : isSourceEvidence ? "Source evidence section" : "Atomic knowledge unit"} />
           <p className="mt-3 whitespace-pre-wrap rounded-xl border bg-muted/25 p-4 text-sm leading-7">{match.content}</p>
         </section>
         {facts.length > 0 ? (
@@ -546,7 +572,7 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
           </section>
         ) : null}
         <section className="grid gap-3 md:grid-cols-2">
-          <GovernanceItem label="Parent SOP" value={match.title} />
+          <GovernanceItem label="Source document" value={match.title} />
           <GovernanceItem label="Document ID" value={match.document_id} />
           <GovernanceItem label="Version ID" value={match.version_id} />
           <GovernanceItem label="Chunk ID" value={match.chunk_id} />

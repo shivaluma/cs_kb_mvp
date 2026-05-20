@@ -35,7 +35,8 @@ UNIT_TYPE_LABELS = {
     "vip_overlay_rule": "VIP overlay",
     "product_update_note": "Product update",
     "workflow_graph": "Workflow graph",
-    "full_sop": "SOP",
+    "full_sop": "Document overview",
+    "source_evidence_section": "Source evidence",
 }
 
 

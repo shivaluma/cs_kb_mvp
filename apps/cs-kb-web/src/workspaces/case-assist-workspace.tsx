@@ -325,7 +325,7 @@ function CaseAssistDetail({
             <Button asChild className="h-8 rounded-full px-3" onClick={onOpenFullSop} size="sm" type="button" variant="outline">
               <a href={`/lookup?q=${encodeURIComponent(candidate.parentTitle || candidate.title)}&chunk=${encodeURIComponent(candidate.chunkId)}`}>
                 <FileText data-icon="inline-start" className="size-3.5" />
-                Open full SOP
+                Open source
               </a>
             </Button>
           </div>
@@ -751,7 +751,7 @@ function roleLabel(role: CaseAssistCandidate["sourceRole"]) {
     issue_router: "Issue router",
     action_template: "Action template",
     tool_link: "Tool link",
-    parent_sop: "Parent SOP",
+    parent_sop: "Document overview",
     related_sop: "Related SOP",
   };
   return labels[role];

@@ -202,7 +202,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
 
         ingestion.extract_rule_table_units = fake_rule_extractor
 
-        _raw, _digest, _chunks, _warnings, enrichment = ingestion.prepare_document_version(
+        _raw, _digest, chunks, warnings, enrichment = ingestion.prepare_document_version(
             filename="Quy định xác minh địa chỉ email.docx",
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             data=docx_email_verification_bytes(),
@@ -246,7 +246,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         ingestion.format_source_evidence_view = fake_source_formatter
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
 
-        _raw, _digest, _chunks, _warnings, enrichment = ingestion.prepare_document_version(
+        _raw, _digest, chunks, warnings, enrichment = ingestion.prepare_document_version(
             filename="Quy định xác minh địa chỉ email.docx",
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             data=docx_email_verification_bytes(),
@@ -266,6 +266,15 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(source_view["payload"]["format"], "markdown")
         self.assertIn("Dòng nguồn đã được format", source_view["payload"]["markdown"])
         self.assertEqual(breakdown["payload"]["selected_flow"], "source_evidence_view")
+        unit_types = [chunk["metadata"].get("unit_type") for chunk in chunks]
+        self.assertIn("source_evidence_section", unit_types)
+        self.assertIn("source_evidence_sections_created", warnings)
+        source_section = next(chunk for chunk in chunks if chunk["metadata"].get("unit_type") == "source_evidence_section")
+        self.assertEqual(source_section["metadata"]["retrieval_scope"], "source_evidence")
+        self.assertTrue(source_section["metadata"]["source_evidence_only"])
+        full_sop = next(chunk for chunk in chunks if chunk["metadata"].get("unit_type") == "full_sop")
+        self.assertEqual(full_sop["metadata"]["document_layer_role"], "overview")
+        self.assertTrue(full_sop["metadata"]["full_source_in_source_evidence_sections"])
 
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
@@ -610,7 +619,8 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         )
 
         self.assertIn("openrouter_refine_used", warnings)
-        self.assertTrue(all(chunk["metadata"].get("llm_refined") is True for chunk in chunks))
+        delivery_chunks = [chunk for chunk in chunks if chunk["metadata"].get("source_evidence_only") is not True]
+        self.assertTrue(all(chunk["metadata"].get("llm_refined") is True for chunk in delivery_chunks))
         self.assertTrue(any("refined lookup alias" in chunk["metadata"].get("aliases", []) for chunk in chunks))
         refinement = next(artifact for artifact in enrichment["pipeline_artifacts"] if artifact["artifact_type"] == "refinement_report")
         self.assertEqual(refinement["payload"]["llm"]["llm_refine_status"], "completed")

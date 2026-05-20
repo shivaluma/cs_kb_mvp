@@ -298,7 +298,7 @@ export function DocumentsPage({ surface = "review" }: { surface?: DocumentsSurfa
           reportError(
             force
               ? "Force publish failed. Confirm this is an editable draft version and retry."
-              : "Publish blocked. Finish readiness checks first: full SOP, reviewed units, source refs, workflow graph, owner, effective date, and high-risk review SLA.",
+              : "Publish blocked. Finish readiness checks first: document overview, reviewed units, source refs, workflow graph, owner, effective date, and high-risk review SLA.",
           ),
       },
     );
@@ -333,10 +333,10 @@ export function DocumentsPage({ surface = "review" }: { surface?: DocumentsSurfa
           reportNotice(
             reviewStatus === "approved"
               ? scope === "atomic"
-                ? "Atomic retrieval units approved. Review the full SOP page separately before publishing."
+                ? "Atomic retrieval units approved. Review the document overview separately before publishing."
                 : "Extraction units approved. Publish gate still validates source refs, owner, effective date, and graph requirements."
               : scope === "atomic"
-                ? "Atomic retrieval units marked reviewed. Review the full SOP page separately before publishing."
+                ? "Atomic retrieval units marked reviewed. Review the document overview separately before publishing."
                 : "Extraction units marked reviewed. Lead can publish after the remaining readiness checks pass.",
           );
         },

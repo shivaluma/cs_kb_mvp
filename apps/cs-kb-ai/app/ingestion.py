@@ -197,6 +197,7 @@ def prepare_document_version(
         raw_context["kb_index_plan"] = kb_index_plan
         pipeline_artifacts.append(stage_artifact("plan", "kb_index_plan", kb_index_plan))
 
+    source_view_payload: dict[str, Any] = {}
     if raw_text.strip() and classification.document_type in AI_STRUCTURED_DOCUMENT_TYPES:
         source_view_token = start_ai_breakdown_capture()
         try:
@@ -341,6 +342,28 @@ def prepare_document_version(
             error=refinement_error,
         )
     )
+    source_evidence_chunks, source_evidence_report = build_source_evidence_section_chunks(
+        filename=filename,
+        raw_text=raw_text,
+        classification=classification,
+        source_view_payload=source_view_payload,
+        existing_chunks=source_chunks,
+    )
+    if source_evidence_chunks:
+        source_chunks = annotate_document_overview_coverage(
+            source_chunks,
+            raw_text=raw_text,
+            source_evidence_report=source_evidence_report,
+        )
+        source_evidence_report["document_overview_low_coverage"] = any(
+            bool((chunk.metadata or {}).get("document_overview_low_coverage"))
+            for chunk in source_chunks
+        )
+        source_chunks = reindex_local_chunks([*source_chunks, *source_evidence_chunks])
+        warnings.append("source_evidence_sections_created")
+        if source_evidence_report.get("document_overview_low_coverage"):
+            warnings.append("document_overview_low_coverage")
+        pipeline_artifacts.append(stage_artifact("map", "source_evidence_sections", source_evidence_report))
 
     extraction_status = "degraded" if any(chunk.metadata.get("extraction_status") == "degraded" for chunk in source_chunks) else "structured"
     lifecycle_status = "degraded_structured_draft" if extraction_status == "degraded" else "structured_draft"
@@ -4506,6 +4529,7 @@ def evaluate_refinement_report(chunks: list[Any], document_type: str) -> dict[st
         metadata for metadata in metadata_items
         if str(metadata.get("retrieval_scope") or "") != "document"
         and str(metadata.get("unit_type") or "") != "full_sop"
+        and metadata.get("source_evidence_only") is not True
         and not str(metadata.get("unit_type") or "").startswith("candidate_")
     ]
     missing_fields: list[str] = []
@@ -4772,7 +4796,13 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
         extraction_status = str(chunk.metadata.get("extraction_status") or enrichment.get("extraction_status") or "structured")
         review_status = str(chunk.metadata.get("review_status") or "needs_review")
         publish_blocked = bool(chunk.metadata.get("publish_blocked") or extraction_status == "degraded")
-        index_eligible = extraction_status in {"structured", "manually_curated"} and review_status == "approved" and not publish_blocked
+        source_evidence_only = chunk.metadata.get("source_evidence_only") is True or unit_type == "source_evidence_section"
+        index_eligible = (
+            extraction_status in {"structured", "manually_curated"}
+            and review_status == "approved"
+            and not publish_blocked
+            and not source_evidence_only
+        )
         parent_unit_id = str(
             chunk.metadata.get("parent_unit_id")
             or chunk.metadata.get("rule_id")
@@ -5254,6 +5284,140 @@ def structuring_plan_payload(classification: Any, source_chunks: list[Any], raw_
     }
 
 
+def build_source_evidence_section_chunks(
+    *,
+    filename: str,
+    raw_text: str,
+    classification: Any,
+    source_view_payload: dict[str, Any] | None,
+    existing_chunks: list[Any],
+) -> tuple[list[Chunk], dict[str, Any]]:
+    payload = source_view_payload if isinstance(source_view_payload, dict) else {}
+    formatted_text = str(payload.get("markdown") or "").strip()
+    source_text = formatted_text or str(raw_text or "").strip()
+    if not source_text:
+        return [], {
+            "status": "skipped",
+            "reason": "empty_source_text",
+            "raw_text_chars": len(raw_text or ""),
+            "formatted_chars": 0,
+            "section_count": 0,
+        }
+
+    base_chunks = chunk_text(source_text, target_tokens=360, overlap_tokens=0)
+    max_sections = 80
+    source_chunks: list[Chunk] = []
+    formatter = str(payload.get("formatter") or ("local_source_text" if not formatted_text else "unknown_formatter"))
+    model = str(payload.get("model") or "")
+    coverage_report = payload.get("coverage_report") if isinstance(payload.get("coverage_report"), dict) else {}
+    raw_chars = len(raw_text or "")
+    formatted_chars = len(source_text)
+    source_text_kind = "formatted_markdown" if formatted_text else "raw_text"
+    for offset, chunk in enumerate(base_chunks[:max_sections]):
+        content = str(chunk.content or "").strip()
+        if not content:
+            continue
+        heading = str(chunk.heading or "").strip() or f"Source evidence {offset + 1}"
+        section_ref = {
+            "source_type": "source_evidence",
+            "source_file": filename,
+            "section_index": offset + 1,
+            "line_start": max(1, offset + 1),
+            "line_end": max(1, offset + 1),
+            "derived_from": source_text_kind,
+        }
+        lower_filename = filename.lower()
+        if lower_filename.endswith(".docx"):
+            section_ref["paragraph_index"] = offset
+        elif lower_filename.endswith(".pdf"):
+            section_ref["page"] = 1
+        elif lower_filename.endswith((".xlsx", ".xlsm", ".xls")):
+            section_ref["sheet"] = "source"
+            section_ref["row_start"] = max(1, offset + 1)
+            section_ref["row_end"] = max(1, offset + 1)
+        source_chunks.append(
+            Chunk(
+                chunk_index=len(existing_chunks) + len(source_chunks),
+                section="source_evidence",
+                heading=heading[:240],
+                content=content,
+                token_count=len(tokenize(content)),
+                metadata={
+                    "unit_type": "source_evidence_section",
+                    "retrieval_scope": "source_evidence",
+                    "answer_role": "evidence_context",
+                    "source_evidence_only": True,
+                    "document_layer_role": "source_evidence",
+                    "document_type": classification.document_type,
+                    "source_type": classification.source_type,
+                    "structure_type": "source_evidence",
+                    "source_filename": filename,
+                    "source_text_kind": source_text_kind,
+                    "source_view_formatter": formatter,
+                    **({"source_view_model": model} if model else {}),
+                    "review_status": "approved",
+                    "confidence": 1.0 if formatted_text else 0.9,
+                    "requires_human_review": False,
+                    "extraction_status": "structured",
+                    "extraction_lifecycle_status": "source_evidence_indexed",
+                    "publish_blocked": False,
+                    "publish_blocked_reason": "",
+                    "source_refs": [section_ref],
+                    "source_ref_quality": "structured",
+                    "source_ref_acknowledged": True,
+                    "production_ready_source_refs": True,
+                    "section_path": chunk.metadata.get("section_path") or [heading],
+                },
+            )
+        )
+
+    report = {
+        "status": "completed" if source_chunks else "skipped",
+        "reason": "" if source_chunks else "chunking_produced_no_sections",
+        "raw_text_chars": raw_chars,
+        "formatted_chars": formatted_chars,
+        "source_text_kind": source_text_kind,
+        "formatter": formatter,
+        "section_count": len(source_chunks),
+        "source_sections_truncated": len(base_chunks) > max_sections,
+        "coverage_report": coverage_report,
+    }
+    return source_chunks, report
+
+
+def annotate_document_overview_coverage(
+    chunks: list[Any],
+    *,
+    raw_text: str,
+    source_evidence_report: dict[str, Any],
+) -> list[Any]:
+    raw_chars = max(1, len(raw_text or ""))
+    section_count = int(source_evidence_report.get("section_count") or 0)
+    output: list[Any] = []
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        unit_type = str(metadata.get("unit_type") or chunk.section or "")
+        retrieval_scope = str(metadata.get("retrieval_scope") or "")
+        if unit_type == "full_sop" or retrieval_scope == "document":
+            overview_chars = len(str(chunk.content or ""))
+            coverage_ratio = min(1.0, overview_chars / raw_chars)
+            metadata.update(
+                {
+                    "document_layer_role": "overview",
+                    "answer_role": metadata.get("answer_role") or "overview_context",
+                    "full_source_in_source_evidence_sections": section_count > 0,
+                    "source_evidence_section_count": section_count,
+                    "source_evidence_text_kind": source_evidence_report.get("source_text_kind"),
+                    "document_overview_chars": overview_chars,
+                    "raw_text_chars": len(raw_text or ""),
+                    "document_overview_coverage_ratio": round(coverage_ratio, 4),
+                    "document_overview_low_coverage": bool(section_count > 0 and len(raw_text or "") >= 1200 and coverage_ratio < 0.65),
+                }
+            )
+        output.append(replace_chunk_metadata(chunk, metadata))
+    return output
+
+
 def verification_report_payload(chunks: list[dict[str, Any]], document_type: str) -> dict[str, Any]:
     hard_blockers: list[str] = []
     warnings: list[str] = []
@@ -5305,6 +5469,7 @@ def extraction_quality_checks(chunks: list[dict[str, Any]], metadata_items: list
         metadata for metadata in metadata_items
         if str(metadata.get("retrieval_scope") or "") != "document"
         and str(metadata.get("unit_type") or "") != "full_sop"
+        and metadata.get("source_evidence_only") is not True
     ]
     call_chat_metadata = [
         metadata for metadata in atomic_metadata

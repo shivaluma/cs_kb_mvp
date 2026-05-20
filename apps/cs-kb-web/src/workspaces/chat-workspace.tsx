@@ -878,7 +878,8 @@ function sourceRoleLabel(role: string) {
     related_sop: "Related SOP",
     action_template: "Action template",
     tool_link: "Tool",
-    parent_sop: "Parent SOP",
+    parent_sop: "Document overview",
+    source_evidence: "Source evidence",
   };
   return labels[role] ?? role;
 }

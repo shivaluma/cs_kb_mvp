@@ -33,6 +33,7 @@ const contentTypeUnitTypes: Record<string, string[]> = {
   tool_link: ["tool_link"],
   action_template: ["quick_action_rule"],
   full_sop: ["full_sop"],
+  source_evidence: ["source_evidence_section"],
 };
 
 export function toSearchResult(sop: SOP): SearchResult {

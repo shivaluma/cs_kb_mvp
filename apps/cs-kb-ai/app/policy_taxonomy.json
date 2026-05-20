@@ -157,7 +157,7 @@
       "email_collection": ["email_collection"],
       "escalation": ["escalation"]
     },
-    "document_context_unit_types": ["full_sop", "workflow_overview", "workflow_graph"],
+    "document_context_unit_types": ["full_sop", "workflow_overview", "workflow_graph", "source_evidence_section"],
     "exception_unit_types": ["exception_rule"],
     "fallback_branch_types": ["email_missing", "retry_policy", "failed_contact"],
     "downstream_workflow_stages": ["post_call_notification", "rating_escalation", "evidence_submission"],
@@ -212,6 +212,7 @@
     "operational_note": 0.28,
     "warning": 0.24,
     "full_sop": 0.18,
+    "source_evidence_section": 0.12,
     "workflow_overview": 0.18,
     "workflow_graph": 0.18,
     "macro_script": 0.16

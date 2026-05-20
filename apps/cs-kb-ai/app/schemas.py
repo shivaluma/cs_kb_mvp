@@ -64,6 +64,7 @@ ChatModelRoute = Literal[
 ]
 ExtractionUnitType = Literal[
     "full_sop",
+    "source_evidence_section",
     "routing_rule",
     "operational_instruction",
     "policy_rule",

@@ -19,6 +19,7 @@ import type { ExtractionUnit, ExtractionUnitUpdate } from "@/types";
 
 const UNIT_TYPES = [
   "full_sop",
+  "source_evidence_section",
   "workflow_overview",
   "workflow_graph",
   "verification_dependency",

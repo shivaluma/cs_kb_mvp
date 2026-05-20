@@ -1737,6 +1737,8 @@ def generate_grounded_answer(
             "channel": result.metadata.get("channel"),
             "branch_type": result.metadata.get("branch_type"),
             "answer_type": result.metadata.get("answer_type"),
+            "answer_role": result.metadata.get("answer_role"),
+            "source_evidence_only": result.metadata.get("source_evidence_only"),
             "chat_match_penalties": result.metadata.get("chat_match_penalties"),
             "chat_scope_unasked_branches": result.metadata.get("chat_scope_unasked_branches"),
             "policy_facets": result.metadata.get("policy_facets"),
@@ -1783,6 +1785,7 @@ def generate_grounded_answer(
                     "Giữ nguyên wording vận hành nhạy cảm từ source khi có thể, nhất là các cụm như 'chưa thể hỗ trợ', 'từ chối hỗ trợ', 'KHÔNG cần chuyển case', thời hạn, điều kiện Yes/No, tên queue/tool/email. "
                     "Không đổi nhẹ wording làm thay đổi mức độ policy, ví dụ không tự đổi 'chưa thể hỗ trợ' thành 'từ chối hỗ trợ' nếu source không dùng cụm đó. "
                     "Nguồn có metadata chat_source_role=issue_router/tool_link/action_template chỉ là context điều hướng/tool/action, không đủ để kết luận policy nếu không có direct_sop hoặc related_sop. "
+                    "Nguồn có source_evidence_only=true là source text/audit evidence, không phải atomic policy unit; chỉ dùng để kiểm tra wording hoặc bối cảnh, không dùng một mình để tạo procedural claim. "
                     "Nếu chỉ có context index/tool/action mà không có source role direct_sop hoặc related_sop, phải nói chưa đủ SOP được link để trả lời chắc chắn. "
                     "Kỷ luật scope cho SOP vận hành: xác định đúng field user hỏi (ví dụ kênh liên hệ, số lần retry, SLA, escalation), trả lời field đó trước và không kéo thêm nhánh fallback/exception/retry/email/SLA/case/escalation nếu user không hỏi. "
                     "Một claim vừa phải được source hỗ trợ vừa phải đúng scope câu hỏi; supported-but-out-of-scope thì loại khỏi answer và có thể ghi vào excluded_source_indices/claim_grounding. "

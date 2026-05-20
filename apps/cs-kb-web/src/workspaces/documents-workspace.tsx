@@ -234,15 +234,16 @@ export function DocumentsWorkspace({
   const documentLayerUnits = extractionUnits.filter(isDocumentLayer);
   const activeDocumentLayerUnits = activeExtractionUnits.filter(isDocumentLayer);
   const fullSopUnit = activeDocumentLayerUnits.find((unit) => unit.unit_type === "full_sop") ?? activeDocumentLayerUnits[0];
+  const sourceEvidenceUnits = extractionUnits.filter(isSourceEvidenceUnit);
   const workflowGraphUnit = activeExtractionUnits.find(isWorkflowGraphUnit);
-  const workflowGraphUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && isWorkflowGraphUnit(unit));
+  const workflowGraphUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && !isSourceEvidenceUnit(unit) && isWorkflowGraphUnit(unit));
   const workflowGraph = workflowGraphUnit?.metadata.workflow_graph as WorkflowGraphMetadata | undefined;
   const sourceEvidenceView = useMemo(() => sourceEvidenceViewPayload(extractionPipeline), [extractionPipeline]);
   const workflowGraphValidationErrors = workflowGraph?.validation_errors ?? workflowGraphUnit?.metadata.graph_validation_errors ?? [];
   const workflowGraphUncertainEdges = workflowGraph?.uncertain_edges ?? workflowGraphUnit?.metadata.uncertain_edges ?? [];
   const workflowEdgeReviewSummary = buildWorkflowEdgeReviewSummary(workflowGraph, workflowGraphUnit);
-  const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && !isWorkflowGraphUnit(unit));
-  const activeAtomicUnits = activeExtractionUnits.filter((unit) => !isDocumentLayer(unit) && !isWorkflowGraphUnit(unit));
+  const atomicUnits = extractionUnits.filter((unit) => !isDocumentLayer(unit) && !isSourceEvidenceUnit(unit) && !isWorkflowGraphUnit(unit));
+  const activeAtomicUnits = activeExtractionUnits.filter((unit) => !isDocumentLayer(unit) && !isSourceEvidenceUnit(unit) && !isWorkflowGraphUnit(unit));
   const suggestedUploadCollection = collections.find((collection) => collection.slug === upload.suggestedCollectionSlug);
   const selectedIsArchived = selectedDocument?.status === "archived";
   const pendingReviewCount = extractionUnits.filter((unit) => unit.review_status === "needs_review").length;
@@ -314,7 +315,7 @@ export function DocumentsWorkspace({
   const readinessChecks = [
     {
       detail: fullSopUnit ? fullSopUnit.title : "Missing document-level layer",
-      label: "Full SOP page",
+      label: "Document overview",
       passed: Boolean(fullSopUnit),
     },
     {
@@ -1017,7 +1018,7 @@ export function DocumentsWorkspace({
               <DocumentFact label="State" value={selectedIsArchived ? "Archived" : selectedDocument ? "Active" : "-"} />
               <DocumentFact label="Version" value={selectedDocument?.latest_version_number ? `v${selectedDocument.latest_version_number}` : "-"} />
               <DocumentFact label="Confidence" value={selectedDocument?.latest_extraction_confidence ? `${Math.round(selectedDocument.latest_extraction_confidence * 100)}%` : "-"} />
-              <DocumentFact label="Layers" value={extractionUnits.length ? `1 page + ${atomicUnits.length} units` : "-"} />
+              <DocumentFact label="Layers" value={extractionUnits.length ? `1 overview + ${atomicUnits.length} units + ${sourceEvidenceUnits.length} source sections` : "-"} />
             </div>
           </CardContent>
         </Card>
@@ -1379,23 +1380,24 @@ export function DocumentsWorkspace({
               <CardHeader className="border-b pb-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <CardTitle>Full SOP page</CardTitle>
-                    <CardDescription>Document-level layer for reading, training, and audit. Atomic units remain below for retrieval.</CardDescription>
+                    <CardTitle>Document overview</CardTitle>
+                    <CardDescription>Short document-level summary for routing and parent context. Full source text remains in Source evidence.</CardDescription>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Badge variant="secondary">document layer</Badge>
+                    <Badge variant="secondary">overview layer</Badge>
                     <Badge variant="outline">{atomicUnits.length} atomic units</Badge>
+                    {sourceEvidenceUnits.length ? <Badge variant="outline">{sourceEvidenceUnits.length} source sections</Badge> : null}
                     {validationRuleCount ? <Badge variant="outline">{validationRuleCount} validation rules</Badge> : null}
                   </div>
                 </div>
               </CardHeader>
               <CardContent className="pt-4">
                 {!selectedDocument ? (
-                  <EmptyPanel icon={BookOpen} title="Select a document" text="Choose a source document to preview the composed SOP page." compact />
+                  <EmptyPanel icon={BookOpen} title="Select a document" text="Choose a source document to preview the overview layer." compact />
                 ) : extractionUnitsLoading ? (
                   <div className="flex items-center gap-2 rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
                     <Loader2 className="size-4 animate-spin" />
-                    Loading SOP page
+                    Loading document overview
                   </div>
                 ) : fullSopUnit ? (
                   <article className="rounded-xl border bg-muted/20 p-4">
@@ -1407,7 +1409,7 @@ export function DocumentsWorkspace({
                     <p className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-sm leading-7 text-muted-foreground">{fullSopUnit.content}</p>
                   </article>
                 ) : (
-                  <EmptyPanel icon={Layers3} title="No full SOP layer" text="This version only has atomic retrieval units. Re-extract to create a document-level page." compact />
+                  <EmptyPanel icon={Layers3} title="No document overview" text="This version only has atomic retrieval units. Re-extract to create a document-level overview." compact />
                 )}
               </CardContent>
             </Card>
@@ -3744,6 +3746,10 @@ function isDocumentLayer(unit: ExtractionUnit) {
   return unit.unit_type === "full_sop" || unit.metadata.retrieval_scope === "document";
 }
 
+function isSourceEvidenceUnit(unit: ExtractionUnit) {
+  return unit.unit_type === "source_evidence_section" || unit.metadata.source_evidence_only === true || unit.metadata.retrieval_scope === "source_evidence";
+}
+
 function isWorkflowGraphUnit(unit: ExtractionUnit) {
   return unit.unit_type === "workflow_graph" || Boolean(unit.metadata.workflow_graph);
 }
@@ -3801,7 +3807,7 @@ function readablePublishFailure(failure: string) {
     extraction_failed_validation: "Extraction failed validation",
     historical_sheets_without_current_effective_date: "Historical source needs current effective date",
     missing_effective_from: "Effective date is missing",
-    missing_full_sop_layer: "Full SOP layer is missing",
+    missing_full_sop_layer: "Document overview layer is missing",
     missing_owner_team: "Owner team is missing",
     missing_production_atomic_units: "Production atomic units are missing",
     missing_review_frequency: "Review frequency is missing",
@@ -4071,7 +4077,7 @@ function buildWorkflowBulkEdgeReviewUpdate(
 
 function workflowRequirementGuidance(unitType: string) {
   const guidance: Record<string, string> = {
-    workflow_overview: "Short document-level workflow summary for quick orientation. It should not replace the full SOP page.",
+    workflow_overview: "Short document-level workflow summary for quick orientation. It should not replace source evidence.",
     verification_dependency: "Dependency or prerequisite evidence, for example which source rule, account verification rule, or related policy must be checked first.",
     decision_point: "A decision question with clear branch outcomes. For workflow diagrams, Yes/No paths should be human-confirmed.",
     decision_rule: "A decision question with clear branch outcomes. For workflow diagrams, Yes/No paths should be human-confirmed.",

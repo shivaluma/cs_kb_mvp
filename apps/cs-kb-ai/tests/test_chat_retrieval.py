@@ -250,6 +250,19 @@ class ChatRetrievalTest(unittest.TestCase):
         parent_rows.assert_not_called()
         self.assertTrue(bundle.trace["parent_context_skipped_by_scope"])
 
+    def test_source_evidence_section_is_not_policy_source(self) -> None:
+        source = retrieval_result(
+            "source-evidence",
+            "source_evidence_section",
+            score=0.8,
+            heading="Formatted source section",
+            content="Raw SOP wording preserved for audit.",
+        )
+        source.metadata["retrieval_scope"] = "source_evidence"
+        source.metadata["source_evidence_only"] = True
+
+        self.assertFalse(has_policy_source([source]))
+
     def test_grounded_chat_prunes_unasked_fallback_branch_from_answer(self) -> None:
         result = retrieval_result(
             "source",

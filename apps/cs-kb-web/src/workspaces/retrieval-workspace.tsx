@@ -182,13 +182,14 @@ function RetrievalResultCard({ result }: { result: RetrievalResult }) {
   const scope = String(result.metadata.retrieval_scope ?? "unit");
   const unitType = String(result.metadata.unit_type ?? result.section);
   const isDocumentLayer = scope === "document" || unitType === "full_sop";
+  const isSourceEvidence = scope === "source_evidence" || unitType === "source_evidence_section" || result.metadata.source_evidence_only === true;
   return (
     <article className="rounded-xl border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={isDocumentLayer ? "secondary" : "outline"}>
-              {isDocumentLayer ? "Full SOP" : "Quick answer"}
+              {isDocumentLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer"}
             </Badge>
           </div>
           <h3 className="mt-2 text-sm font-semibold">{result.heading || result.title}</h3>
@@ -203,7 +204,7 @@ function RetrievalResultCard({ result }: { result: RetrievalResult }) {
       </div>
       <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{result.content}</p>
       <div className="mt-3 rounded-lg bg-muted/35 px-2 py-1 text-[11px] text-muted-foreground">
-        Citation: {isDocumentLayer ? "full SOP page" : "atomic unit"} chunk {result.chunk_index}, {result.version_id}
+        Citation: {isDocumentLayer ? "document overview" : isSourceEvidence ? "source evidence" : "atomic unit"} chunk {result.chunk_index}, {result.version_id}
       </div>
     </article>
   );

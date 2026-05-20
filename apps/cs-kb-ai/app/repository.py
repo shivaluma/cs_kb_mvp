@@ -2258,17 +2258,19 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
             failures.append("extraction_failed_validation")
         unit_type = str(metadata.get("unit_type") or row.get("section") or "")
         retrieval_scope = str(metadata.get("retrieval_scope") or "")
-        if retrieval_scope != "document" and unit_type != "full_sop" and not unit_type.startswith("candidate_"):
+        source_evidence_only = metadata.get("source_evidence_only") is True or unit_type == "source_evidence_section"
+        if retrieval_scope != "document" and unit_type != "full_sop" and not unit_type.startswith("candidate_") and not source_evidence_only:
             atomic_units += 1
         if is_degraded_unconverted(metadata):
             degraded_unconverted += 1
         text = normalize_phrase(" ".join([str(row.get("heading") or ""), str(row.get("content") or ""), json.dumps(metadata, ensure_ascii=False)]))
-        governance_failures.extend(high_risk_governance_failures(metadata, document_metadata, text, version["document_type"]))
+        if not source_evidence_only:
+            governance_failures.extend(high_risk_governance_failures(metadata, document_metadata, text, version["document_type"]))
         if unit_type:
             workflow_unit_status_by_type[unit_type] = workflow_unit_status_by_type.get(unit_type, False) or is_reviewed_status(metadata.get("review_status"))
         required_unit_types.update(required_unit_types_from_metadata(metadata))
         has_full_sop = has_full_sop or unit_type == "full_sop" or retrieval_scope == "document"
-        pending_units += 1 if review_status == "needs_review" else 0
+        pending_units += 1 if review_status == "needs_review" and not source_evidence_only else 0
         has_owner = has_owner or bool(metadata.get("owner_team"))
         has_effective_from = has_effective_from or bool(metadata.get("effective_from"))
         has_historical_sheets = has_historical_sheets or bool(metadata.get("historical_sheets"))
@@ -2285,7 +2287,7 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
             workflow_graph_quality_errors.extend(workflow_graph_decision_edge_failures(metadata))
         if version["document_type"] == "workflow_diagram" and workflow_source_ref_ack_missing(metadata):
             workflow_source_ack_missing += 1
-        if not has_required_source_ref(version["document_type"], metadata):
+        if not source_evidence_only and not has_required_source_ref(version["document_type"], metadata):
             missing_source_refs += 1
 
     if not has_full_sop:
