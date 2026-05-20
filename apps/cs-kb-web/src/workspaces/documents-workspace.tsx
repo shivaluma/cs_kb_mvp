@@ -32,7 +32,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { EmptyPanel, Field, StatusBadge } from "@/components/common";
+import { EmptyPanel, Field, MetaLine, StatusBadge, TagSummary } from "@/components/common";
 import { DatePicker } from "@/components/date-picker";
 import { ExtractionReviewEditor } from "@/components/extraction-review-editor";
 import { API_BASE_URL } from "@/config";
@@ -903,18 +903,20 @@ export function DocumentsWorkspace({
                     >
                       <div className="flex items-start justify-between gap-3">
                         <h3 className="min-w-0 text-sm font-medium leading-5">{document.title}</h3>
-                        <div className="flex shrink-0 items-center gap-1.5">
-                          {document.status === "archived" ? <Badge variant="outline">Archived</Badge> : null}
-                          <Badge variant="outline">v{document.latest_version_number ?? "-"}</Badge>
-                        </div>
+                        {document.status === "archived" ? <Badge className="shrink-0" variant="outline">Archived</Badge> : null}
                       </div>
                       <p className="truncate text-xs text-muted-foreground">{document.source_filename}</p>
-                        <div className="flex flex-wrap gap-2">
-                          <StatusBadge status={document.latest_review_status ?? "needs_review"} />
-                          <Badge variant="outline">{document.latest_document_type ?? "unknown"}</Badge>
-                          {extractionIssue(document) ? <Badge variant="destructive">extraction failed</Badge> : null}
-                          {document.status === "archived" ? <Badge variant="outline">lookup excluded</Badge> : null}
-                        </div>
+                      <div className="flex flex-wrap gap-2">
+                        <StatusBadge status={document.latest_review_status ?? "needs_review"} />
+                        {extractionIssue(document) ? <Badge variant="destructive">extraction failed</Badge> : null}
+                        {document.status === "archived" ? <Badge variant="outline">lookup excluded</Badge> : null}
+                      </div>
+                      <MetaLine
+                        items={[
+                          `v${document.latest_version_number ?? "-"}`,
+                          document.latest_document_type ?? "unknown",
+                        ]}
+                      />
                     </button>
                   ))
                 )}
@@ -936,6 +938,15 @@ export function DocumentsWorkspace({
                 <CardDescription className="mt-1 truncate">
                   {selectedDocument?.source_filename ?? "Choose from the source queue to review versions, extraction units, and indexed chunks."}
                 </CardDescription>
+                {selectedDocument ? (
+                  <MetaLine
+                    className="mt-1"
+                    items={[
+                      `v${selectedDocument.latest_version_number ?? "-"}`,
+                      selectedDocument.latest_document_type ?? "unknown type",
+                    ]}
+                  />
+                ) : null}
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button asChild size="sm" type="button" variant="outline">
@@ -946,7 +957,6 @@ export function DocumentsWorkspace({
                     <Badge variant={selectedIsArchived ? "outline" : "secondary"}>
                       {selectedIsArchived ? "archived source" : "active source"}
                     </Badge>
-                    <Badge variant="outline">{selectedDocument.latest_document_type ?? "unknown type"}</Badge>
                     <Button
                       disabled={busyKey === "archive-document" || selectedIsArchived}
                       onClick={() => onArchiveDocument(selectedDocument)}
@@ -993,18 +1003,12 @@ export function DocumentsWorkspace({
                 <div className="flex items-start gap-3">
                   <TriangleAlert className="mt-0.5 size-4 text-destructive" />
                   <div className="min-w-0">
-                    <p className="text-sm font-semibold text-destructive">Extraction failed, source evidence saved</p>
+                    <p className="text-sm font-semibold text-destructive">{selectedExtractionIssue.title}</p>
                     <p className="mt-1 break-words text-xs leading-5 text-destructive/90">{selectedExtractionIssue.reason}</p>
                     {selectedExtractionIssue.warnings.length ? (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {selectedExtractionIssue.warnings.slice(0, 4).map((warning) => (
-                          <Badge className="max-w-full truncate" key={warning} variant="outline">{warning}</Badge>
-                        ))}
-                      </div>
+                      <TagSummary className="mt-2" items={selectedExtractionIssue.warnings} maxItems={3} />
                     ) : null}
-                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                      Review can continue from raw extracted text, but publish is blocked until structured AI extraction succeeds.
-                    </p>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedExtractionIssue.guidance}</p>
                   </div>
                 </div>
               </div>
@@ -1149,11 +1153,13 @@ export function DocumentsWorkspace({
                   <CardDescription>Edit, reject, approve, or acknowledge source references before publish.</CardDescription>
                 </div>
                 {reviewStats.total ? (
-                  <div className="flex flex-wrap gap-2">
-                    <Badge variant="secondary">{reviewStats.reviewed}/{reviewStats.total} reviewed</Badge>
-                    <Badge variant="outline">{reviewStats.security} security notes</Badge>
-                    <Badge variant="outline">{atomicUnits.length} retrieval units</Badge>
-                  </div>
+                  <MetaLine
+                    items={[
+                      `${reviewStats.reviewed}/${reviewStats.total} reviewed`,
+                      `${reviewStats.security} security notes`,
+                      `${atomicUnits.length} retrieval units`,
+                    ]}
+                  />
                 ) : null}
               </div>
             </CardHeader>
@@ -1615,15 +1621,20 @@ export function DocumentsWorkspace({
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant="secondary">v{version.version_number}</Badge>
                             <StatusBadge status={version.status} />
                             <Badge variant={indexingFailed ? "destructive" : publishedReady ? "secondary" : "outline"}>{publishState}</Badge>
-                            <Badge variant="outline">{version.review_status ?? "needs_review"}</Badge>
                           </div>
                           <p className="mt-2 text-sm font-medium">{version.change_summary || "No change summary"}</p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {version.chunk_count} chunks, confidence {Math.round((version.extraction_confidence ?? 0) * 100)}%, {formatDate(version.created_at)}
-                          </p>
+                          <MetaLine
+                            className="mt-1"
+                            items={[
+                              `v${version.version_number}`,
+                              version.review_status ?? "needs_review",
+                              `${version.chunk_count} chunks`,
+                              `${Math.round((version.extraction_confidence ?? 0) * 100)}% confidence`,
+                              formatDate(version.created_at),
+                            ]}
+                          />
                         </div>
                         {version.status !== "published" ? (
                           <div className="flex shrink-0 flex-col items-end gap-2">
@@ -1803,12 +1814,14 @@ export function DocumentsWorkspace({
                   {chunks.map((chunk) => (
                     <article className="py-4" key={chunk.chunk_id}>
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge variant="secondary">chunk {chunk.chunk_index}</Badge>
-                          <Badge variant="outline">{chunk.section}</Badge>
-                          <Badge variant="outline">{String(chunk.metadata.retrieval_scope ?? "unit")}</Badge>
-                          <Badge variant="outline">{chunk.token_count} tokens</Badge>
-                        </div>
+                        <MetaLine
+                          items={[
+                            `chunk ${chunk.chunk_index}`,
+                            chunk.section,
+                            String(chunk.metadata.retrieval_scope ?? "unit"),
+                            `${chunk.token_count} tokens`,
+                          ]}
+                        />
                         <span className="font-mono text-[10px] text-muted-foreground">{chunk.chunk_id.slice(0, 8)}</span>
                       </div>
                       {chunk.heading ? <h4 className="mt-3 text-sm font-semibold">{chunk.heading}</h4> : null}
@@ -2016,19 +2029,80 @@ function extractionIssue(document: DocumentSummary | null) {
   if (!document) {
     return null;
   }
-  const status = String(document.metadata?.extraction_status ?? "");
-  const error = String(document.metadata?.extraction_error ?? "");
-  const warnings = Array.isArray(document.metadata?.extraction_warnings)
-    ? document.metadata.extraction_warnings.map(String).filter(Boolean)
+  const metadata = document.metadata ?? {};
+  const status = String(metadata.extraction_status ?? "");
+  const error = String(metadata.extraction_error ?? "");
+  const aiError = String(metadata.ai_error ?? "");
+  const publishBlocked = metadata.publish_blocked === true || String(metadata.publish_blocked ?? "") === "true";
+  const publishBlockedReason = String(metadata.publish_blocked_reason ?? "");
+  const warnings = Array.isArray(metadata.extraction_warnings)
+    ? metadata.extraction_warnings.map(String).filter(Boolean)
     : [];
-  if (!status.startsWith("failed") && !error && !warnings.some((warning) => warning.includes("failed") || warning.includes("openrouter"))) {
-    return null;
+
+  if (status.startsWith("failed") || error) {
+    return {
+      guidance: "Review can continue from raw extracted text, but publish is blocked until structured extraction succeeds.",
+      reason: error || aiError || warnings.find(isHardExtractionWarning) || "Extraction failed before structured units were created.",
+      status,
+      title: "Extraction failed, source evidence saved",
+      warnings: warnings.filter(isDisplayableExtractionWarning),
+    };
   }
-  return {
-    reason: error || warnings[0] || "Extraction failed before structured units were created.",
-    status,
-    warnings,
-  };
+
+  if (status === "degraded" || isStructuringPublishBlock(publishBlocked, publishBlockedReason)) {
+    return {
+      guidance: "Review the extracted units, then approve or force-approve after manual curation to make this SOP publish-ready.",
+      reason: aiError || publishBlockedReason || warnings.find(isHardExtractionWarning) || "Structured extraction needs manual curation.",
+      status,
+      title: "Extraction needs manual curation",
+      warnings: warnings.filter(isDisplayableExtractionWarning),
+    };
+  }
+
+  if (warnings.some(isHardExtractionWarning)) {
+    return {
+      guidance: "Check the extraction pipeline details before publishing this SOP.",
+      reason: warnings.find(isHardExtractionWarning) ?? "Extraction warning requires review.",
+      status,
+      title: "Extraction warning requires review",
+      warnings: warnings.filter(isDisplayableExtractionWarning),
+    };
+  }
+
+  return null;
+}
+
+function isStructuringPublishBlock(publishBlocked: boolean, reason: string) {
+  if (!publishBlocked) {
+    return false;
+  }
+  return [
+    "structured_ai_extraction_failed",
+    "ai_structuring_failed_requires_manual_curation",
+    "manual_review_required",
+  ].some((signal) => reason.includes(signal));
+}
+
+function isHardExtractionWarning(warning: string) {
+  const normalized = warning.toLowerCase();
+  return (
+    (normalized.startsWith("ai_") && normalized.includes("failed")) ||
+    normalized.includes("structuring_failed") ||
+    normalized.includes("extraction_failed")
+  );
+}
+
+function isDisplayableExtractionWarning(warning: string) {
+  if (isHardExtractionWarning(warning)) {
+    return true;
+  }
+  return ![
+    "openrouter_rule_table_extraction_used",
+    "openrouter_refine_used",
+    "openrouter_source_evidence_formatter_used",
+    "source_evidence_formatter_not_object",
+    "effective_from_missing_needs_review",
+  ].some((signal) => warning.includes(signal));
 }
 
 function ValidationPill({ text, valid }: { text: string; valid: boolean }) {
@@ -2202,13 +2276,18 @@ function SourceDocumentView({
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary">source view</Badge>
-              {sourceEvidenceView?.formatter ? <Badge variant="outline">AI formatted</Badge> : <Badge variant="outline">local format</Badge>}
-              <Badge variant="outline">v{selectedVersion?.version_number ?? "-"}</Badge>
             </div>
             <CardTitle className="mt-3">{sourceEvidenceView?.title || selectedDocument?.source_filename || "Source document"}</CardTitle>
             <CardDescription>
               Read the source as a clean SOP view. Switch to raw when auditing extraction fidelity.
             </CardDescription>
+            <MetaLine
+              className="mt-1"
+              items={[
+                sourceEvidenceView?.formatter ? "AI formatted" : "local format",
+                `v${selectedVersion?.version_number ?? "-"}`,
+              ]}
+            />
           </div>
           <div className="flex rounded-lg border bg-muted/20 p-1">
             <Button className="h-8 px-3" onClick={() => setMode("formatted")} size="sm" type="button" variant={mode === "formatted" ? "secondary" : "ghost"}>
@@ -2412,10 +2491,15 @@ function SourceViewer({
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary">source evidence</Badge>
           {selectedDocument.status === "archived" ? <Badge variant="outline">archived</Badge> : null}
-          <Badge variant="outline">v{selectedVersion?.version_number ?? "-"}</Badge>
-          <Badge variant="outline">{selectedDocument.latest_document_type ?? "unknown"}</Badge>
         </div>
         <h3 className="mt-3 line-clamp-2 text-sm font-semibold">{selectedDocument.source_filename}</h3>
+        <MetaLine
+          className="mt-1"
+          items={[
+            `v${selectedVersion?.version_number ?? "-"}`,
+            selectedDocument.latest_document_type ?? "unknown",
+          ]}
+        />
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
           {selectedDocument.status === "archived"
             ? "Historical source evidence is preserved for audit. It is excluded from active lookup."
@@ -2438,13 +2522,7 @@ function SourceViewer({
             Source page image is not available for this version. Raw extraction is shown below.
           </div>
         ) : null}
-        {references.length ? (
-          <div className="flex flex-wrap gap-2">
-            {references.map((reference) => (
-              <Badge key={reference} variant="outline">{reference}</Badge>
-            ))}
-          </div>
-        ) : null}
+        <TagSummary items={references} maxItems={4} />
         <div className="flex rounded-lg border bg-background p-1">
           <Button className="h-7 flex-1 px-2 text-xs" onClick={() => setMode("formatted")} size="sm" type="button" variant={mode === "formatted" ? "secondary" : "ghost"}>
             Formatted

@@ -22,6 +22,7 @@ import {
   Fact,
   FilterGrid,
   GovernanceItem,
+  MetaLine,
   MacroCopyButton,
   ResultSkeleton,
   SectionTitle,
@@ -339,9 +340,20 @@ function DocumentMatchButton({
     >
       <div className="flex items-start justify-between gap-2">
         <h3 className="min-w-0 text-sm font-semibold leading-5">{match.heading || match.title}</h3>
-        <Badge className="shrink-0" variant="outline">v{match.version_number}</Badge>
+        <Badge className="shrink-0" variant={isDocumentLayer ? "secondary" : "outline"}>
+          {isDocumentLayer ? "Full SOP" : "Quick answer"}
+        </Badge>
       </div>
       <p className="mt-1 truncate text-xs text-muted-foreground">From: {match.title}</p>
+      <MetaLine
+        className="mt-1"
+        items={[
+          `v${match.version_number}`,
+          unitType,
+          String(match.metadata.review_status ?? "approved"),
+          match.rank_source.join(" + "),
+        ]}
+      />
       <p className="mt-1 line-clamp-2 text-sm leading-5 text-muted-foreground">{match.content}</p>
       {facts.length > 0 ? (
         <div className="mt-2 grid gap-x-3 gap-y-1 rounded-md bg-muted/25 px-2 py-1.5 md:grid-cols-2">
@@ -353,12 +365,6 @@ function DocumentMatchButton({
           ))}
         </div>
       ) : null}
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{isDocumentLayer ? "Full SOP" : "Quick answer"}</Badge>
-        <Badge variant="secondary">{unitType}</Badge>
-        <Badge variant="outline">{String(match.metadata.review_status ?? "approved")}</Badge>
-        <Badge variant="outline">{match.rank_source.join(" + ")}</Badge>
-      </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
         <Button className="h-7 px-2" onClick={onClick} size="sm" type="button" variant="outline">
           Quick answer
@@ -395,14 +401,9 @@ function SopResultCard({
     >
       <div className="flex items-start justify-between gap-3">
         <h3 className="min-w-0 text-sm font-semibold leading-5">{item.title}</h3>
-        <Badge variant="secondary">v{item.version}</Badge>
       </div>
       <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">{item.snippet}</p>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Badge variant="outline">{item.category}</Badge>
-        <Badge variant="outline">{item.vertical}</Badge>
-        <span className="text-xs text-muted-foreground">{formatDate(item.updated_at)}</span>
-      </div>
+      <MetaLine className="mt-3" items={[`v${item.version}`, item.category, item.vertical, formatDate(item.updated_at)]} />
       <div className="mt-3 flex flex-wrap gap-2">
         <Button className="h-7 px-2" onClick={onOpen} size="sm" type="button" variant="outline">
           Open full SOP
@@ -512,14 +513,12 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{isDocumentLayer ? "Full SOP" : "Quick answer"}</Badge>
-              <Badge variant="secondary">approved document</Badge>
-              <Badge variant="outline">v{match.version_number}</Badge>
-              <Badge variant="outline">{unitType}</Badge>
             </div>
             <CardTitle className="text-xl md:text-2xl">{match.heading || match.title}</CardTitle>
             <CardDescription className="mt-2 max-w-[72ch] text-sm leading-6">
               From: {match.title}, {match.source_filename}
             </CardDescription>
+            <MetaLine className="mt-1" items={["approved document", `v${match.version_number}`, unitType]} />
           </div>
           <div className="rounded-xl border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
             score {match.score.toFixed(4)}
@@ -636,11 +635,11 @@ function SOPDetail({
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <Badge variant="secondary">{selected.code}</Badge>
-              <Badge variant="outline">v{selectedVersion.version_number}</Badge>
               <Badge variant="secondary">published</Badge>
             </div>
             <CardTitle className="text-xl md:text-2xl">{selected.title}</CardTitle>
             <CardDescription className="mt-2 max-w-[72ch] text-sm leading-6">{selected.summary}</CardDescription>
+            <MetaLine className="mt-1" items={[`v${selectedVersion.version_number}`]} />
           </div>
           <Button onClick={onAskAI} type="button" variant="outline">
             <Sparkles data-icon="inline-start" className="size-4 text-muted-foreground" />

@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { DatePicker } from "@/components/date-picker";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { MetaLine } from "@/components/common";
 import { nextReviewDueIso, withReviewFrequencyDates } from "@/lib/date";
 import { cn } from "@/lib/utils";
 import type { ExtractionUnit, ExtractionUnitUpdate } from "@/types";
@@ -176,16 +177,23 @@ export function ExtractionReviewEditor({
       data-testid={`extraction-unit-${unit.unit_id}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="secondary">{unit.unit_type}</Badge>
-          <Badge variant={unit.review_status === "approved" ? "secondary" : unit.review_status === "reviewed" ? "outline" : "destructive"}>
-            {unit.review_status}
-          </Badge>
-          <Badge variant="outline">{Math.round(unit.confidence * 100)}% confidence</Badge>
-          {unit.source_sheet ? <Badge variant="outline">{unit.source_sheet}</Badge> : null}
-          {unit.source_row ? <Badge variant="outline">row {unit.source_row}</Badge> : null}
-          {unit.source_page ? <Badge variant="outline">page {unit.source_page}</Badge> : null}
-          {disabled ? <Badge variant="outline">read-only published version</Badge> : null}
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={unit.review_status === "approved" ? "secondary" : unit.review_status === "reviewed" ? "outline" : "destructive"}>
+              {unit.review_status}
+            </Badge>
+            {disabled ? <Badge variant="outline">read-only published version</Badge> : null}
+          </div>
+          <MetaLine
+            className="mt-1"
+            items={[
+              unit.unit_type,
+              `${Math.round(unit.confidence * 100)}% confidence`,
+              unit.source_sheet,
+              unit.source_row ? `row ${unit.source_row}` : null,
+              unit.source_page ? `page ${unit.source_page}` : null,
+            ]}
+          />
         </div>
         <span className="font-mono text-[10px] text-muted-foreground">unit {unit.unit_index}</span>
       </div>

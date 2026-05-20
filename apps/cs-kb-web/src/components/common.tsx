@@ -1,4 +1,4 @@
-import { useMemo, useState, type ElementType } from "react";
+import { useMemo, useState, type ComponentProps, type ElementType } from "react";
 import {
   IconRobot as Bot,
   IconCircleCheck as CheckCircle2,
@@ -30,6 +30,82 @@ import type {
   Macro,
   SearchResult,
 } from "@/types";
+
+type MetadataItem = string | number | false | null | undefined;
+type BadgeVariant = ComponentProps<typeof Badge>["variant"];
+
+function normalizeMetadataItems(items: MetadataItem[]) {
+  return items
+    .filter((item): item is string | number => item !== false && item !== null && item !== undefined)
+    .map((item) => String(item).trim())
+    .filter(Boolean);
+}
+
+export function MetaLine({
+  className,
+  items,
+  maxItems = 5,
+}: {
+  className?: string;
+  items: MetadataItem[];
+  maxItems?: number;
+}) {
+  const values = normalizeMetadataItems(items);
+  if (!values.length) {
+    return null;
+  }
+  const visible = values.slice(0, maxItems);
+  const hidden = Math.max(values.length - visible.length, 0);
+
+  return (
+    <div className={cn("flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-5 text-muted-foreground", className)}>
+      {visible.map((item, index) => (
+        <span className="inline-flex min-w-0 items-center gap-x-2" key={`${item}-${index}`}>
+          {index > 0 ? <span className="text-border">•</span> : null}
+          <span className="max-w-full truncate">{item}</span>
+        </span>
+      ))}
+      {hidden ? (
+        <span className="inline-flex items-center gap-x-2">
+          <span className="text-border">•</span>
+          <span>+{hidden} more</span>
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+export function TagSummary({
+  className,
+  items,
+  maxItems = 4,
+  variant = "outline",
+}: {
+  className?: string;
+  items: MetadataItem[];
+  maxItems?: number;
+  variant?: BadgeVariant;
+}) {
+  const values = normalizeMetadataItems(items);
+  if (!values.length) {
+    return null;
+  }
+  const visible = values.slice(0, maxItems);
+  const hidden = Math.max(values.length - visible.length, 0);
+
+  return (
+    <div className={cn("flex min-w-0 flex-wrap items-center gap-1.5", className)}>
+      {visible.map((item, index) => (
+        <Badge className="max-w-full truncate" key={`${item}-${index}`} variant={variant}>
+          {item}
+        </Badge>
+      ))}
+      {hidden ? (
+        <span className="rounded-full px-1.5 text-xs leading-5 text-muted-foreground">+{hidden}</span>
+      ) : null}
+    </div>
+  );
+}
 
 export function FilterSelect({
   label,
@@ -194,18 +270,11 @@ export function ResultButton({
         <h3 className="min-w-0 text-sm font-semibold leading-5">
           {item.title}
         </h3>
-        <Badge variant="secondary">v{item.version}</Badge>
       </div>
       <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
         {item.snippet}
       </p>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Badge variant="outline">{item.category}</Badge>
-        <Badge variant="outline">{item.vertical}</Badge>
-        <span className="text-xs text-muted-foreground">
-          {formatDate(item.updated_at)}
-        </span>
-      </div>
+      <MetaLine className="mt-3" items={[`v${item.version}`, item.category, item.vertical, formatDate(item.updated_at)]} />
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
         <div
           className="h-full rounded-full bg-primary"

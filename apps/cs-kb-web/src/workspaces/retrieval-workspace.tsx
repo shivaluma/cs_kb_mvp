@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SearchBar } from "@/components/search-bar";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { EmptyPanel, EmptyResults, FilterGrid } from "@/components/common";
+import { EmptyPanel, EmptyResults, FilterGrid, MetaLine } from "@/components/common";
 import type { FilterOption, FilterState, RetrievalResponse, RetrievalResult } from "@/types";
 
 export function RetrievalWorkspace({
@@ -190,14 +190,10 @@ function RetrievalResultCard({ result }: { result: RetrievalResult }) {
             <Badge variant={isDocumentLayer ? "secondary" : "outline"}>
               {isDocumentLayer ? "Full SOP" : "Quick answer"}
             </Badge>
-            <Badge variant="secondary">v{result.version_number}</Badge>
-            <Badge variant="outline">{unitType}</Badge>
-            {result.rank_source.map((source) => (
-              <Badge key={source} variant="outline">{source}</Badge>
-            ))}
           </div>
           <h3 className="mt-2 text-sm font-semibold">{result.heading || result.title}</h3>
           <p className="mt-1 text-xs text-muted-foreground">From: {result.title}, {result.source_filename}</p>
+          <MetaLine className="mt-1" items={[`v${result.version_number}`, unitType, result.rank_source.join(" + ")]} />
         </div>
         <div className="text-right text-xs text-muted-foreground">
           <div>score {result.score.toFixed(4)}</div>

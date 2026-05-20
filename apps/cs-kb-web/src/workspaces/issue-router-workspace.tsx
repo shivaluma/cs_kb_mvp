@@ -5,6 +5,7 @@ import {
 } from "@tabler/icons-react";
 
 import { Badge } from "@/components/ui/badge";
+import { MetaLine, TagSummary } from "@/components/common";
 import { OperationalFeedbackButtons } from "@/components/operational-feedback";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -146,18 +147,16 @@ export function IssueRouterWorkspace({
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge>{item.relation_status || "approved unit"}</Badge>
                   {item.risk_level ? <Badge variant="outline">{item.risk_level} risk</Badge> : null}
-                  {item.collection ? <Badge variant="outline">{item.collection}</Badge> : null}
                 </div>
+                <MetaLine items={[item.collection]} />
                 <CardTitle className="text-base">{item.title}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4 text-sm">
                 <p className="line-clamp-4 whitespace-pre-line text-muted-foreground">{item.content}</p>
-                <div className="flex flex-wrap gap-2">
-                  {item.audience.map((value) => <Badge key={value} variant="secondary">{value}</Badge>)}
-                  {item.vertical.map((value) => <Badge key={value} variant="secondary">{value}</Badge>)}
-                  {item.case_type.map((value) => <Badge key={value} variant="outline">{value}</Badge>)}
-                  {item.task_type.map((value) => <Badge key={value} variant="outline">{value}</Badge>)}
-                </div>
+                <TagSummary
+                  items={[...item.audience, ...item.vertical, ...item.case_type, ...item.task_type]}
+                  maxItems={5}
+                />
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className="rounded-md border p-3">
                     <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
