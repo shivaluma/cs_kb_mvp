@@ -6,7 +6,6 @@ import {
   IconFolder as Folder,
   IconMessage as MessageSquareText,
   IconSearch as Search,
-  IconSparkles as Sparkles,
 } from "@tabler/icons-react";
 
 import { EmptyPanel, MetaLine, TagSummary } from "@/components/common";
@@ -42,61 +41,54 @@ export function PortalWorkspace({
 }) {
   const publishedSops = uniqueSops([...sops, ...homepage.recently_updated, ...homepage.most_viewed]);
   const popularSops = uniqueSops([...homepage.most_viewed, ...publishedSops].sort(compareByViews)).slice(0, 4);
-  const recentSops = uniqueSops([...homepage.recently_updated, ...publishedSops].sort(compareByUpdatedAt)).slice(0, 5);
+  const recentSops = uniqueSops([...homepage.recently_updated, ...publishedSops].sort(compareByUpdatedAt)).slice(0, 6);
   const categoryGroups = buildCategoryGroups(publishedSops, homepage).slice(0, 8);
-  const quickQueries = buildQuickQueries(analytics, publishedSops, categoryGroups).slice(0, 10);
-  const updatedThisWeek = publishedSops.filter((sop) => daysSince(sop.updated_at) <= 7).length;
-  const totalViews = publishedSops.reduce((sum, sop) => sum + (sop.analytics?.views ?? 0), 0);
+  const quickQueries = buildQuickQueries(analytics, publishedSops, categoryGroups).slice(0, 8);
+  const totalPublished = publishedSops.length;
 
   return (
-    <div className="space-y-5">
-      <section className="rounded-2xl border bg-card p-4 md:p-5">
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
-          <div className="min-w-0 space-y-4">
-            <div className="space-y-2">
-              <Badge variant="secondary">published SOP portal</Badge>
-              <h2 className="max-w-3xl text-2xl font-semibold tracking-tight md:text-3xl">
-                Find the approved handling path before opening a case response.
-              </h2>
-              <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-                Search, browse, or jump into grounded chat using the same approved SOP index agents use in production.
-              </p>
-            </div>
-            <SearchBar
-              actionLabel="Search SOP"
-              id="portal-sop-search"
-              loading={loading}
-              onChange={setQuery}
-              onSearch={() => onSearch(query)}
-              placeholder="Search case reason, policy, channel, macro, or customer issue"
-              value={query}
-            />
-            <div className="flex flex-wrap gap-2">
-              {quickQueries.map((item) => (
-                <button
-                  className="rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-                  key={item}
-                  onClick={() => {
-                    setQuery(item);
-                    onSearch(item);
-                  }}
-                  type="button"
-                >
-                  {item}
-                </button>
-              ))}
-              {!quickQueries.length ? (
-                <span className="text-xs leading-7 text-muted-foreground">Upload and publish SOPs to populate quick searches.</span>
-              ) : null}
-            </div>
-          </div>
-          <div className="grid content-start gap-2 sm:grid-cols-2 xl:grid-cols-1">
-            <PortalMetric label="Published SOPs" value={publishedSops.length} />
-            <PortalMetric label="Categories" value={categoryGroups.length} />
-            <PortalMetric label="Updated this week" value={updatedThisWeek} />
-            <PortalMetric label="Recorded views" value={totalViews} />
-          </div>
+    <div className="mx-auto max-w-6xl space-y-8">
+      <section className="space-y-4">
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">SOP portal</p>
+          <h2 className="max-w-2xl text-xl font-semibold leading-tight tracking-tight md:text-2xl">
+            Find the approved handling path before opening a case response.
+          </h2>
+          <p className="max-w-[65ch] text-sm leading-6 text-muted-foreground">
+            {totalPublished
+              ? `${totalPublished} published SOP${totalPublished === 1 ? "" : "s"} across ${categoryGroups.length} categor${categoryGroups.length === 1 ? "y" : "ies"}. Search, browse, or jump into grounded chat.`
+              : "Publish SOPs from Documents to populate the portal."}
+          </p>
         </div>
+
+        <SearchBar
+          actionLabel="Search SOPs"
+          id="portal-sop-search"
+          loading={loading}
+          onChange={setQuery}
+          onSearch={() => onSearch(query)}
+          placeholder="Search case reason, policy, channel, macro, or customer issue"
+          value={query}
+        />
+
+        {quickQueries.length ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-muted-foreground">Try:</span>
+            {quickQueries.map((item) => (
+              <button
+                className="rounded-full border bg-background px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+                key={item}
+                onClick={() => {
+                  setQuery(item);
+                  onSearch(item);
+                }}
+                type="button"
+              >
+                {item}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       {!loading && !publishedSops.length ? (
@@ -108,11 +100,11 @@ export function PortalWorkspace({
         />
       ) : null}
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(22rem,0.75fr)]">
-        <div className="space-y-4">
+      {popularSops.length ? (
+        <section className="space-y-3">
           <SectionHeader
             actionLabel="Open lookup"
-            icon={Sparkles}
+            icon={BookOpen}
             onAction={() => onSearch(query || quickQueries[0] || "")}
             title="Pinned and popular"
           />
@@ -120,66 +112,62 @@ export function PortalWorkspace({
             {popularSops.map((sop) => (
               <SOPPortalCard key={sop.id} onOpen={() => onOpenSOP(sop)} sop={sop} />
             ))}
-            {loading && popularSops.length === 0 ? (
-              <LoadingBlock label="Loading published SOPs..." />
-            ) : null}
+            {loading && popularSops.length === 0 ? <LoadingBlock label="Loading published SOPs…" /> : null}
           </div>
-        </div>
+        </section>
+      ) : null}
 
-        <aside className="space-y-4">
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.6fr)]">
+        <section className="space-y-3">
+          <SectionHeader icon={Clock} title="Recent activity" />
+          <SOPActivityList
+            emptyLabel="No recent SOP activity."
+            onOpenSOP={onOpenSOP}
+            sops={recentSops}
+          />
+        </section>
+
+        <aside className="space-y-3">
           <SectionHeader icon={Folder} title="Browse category" />
-          <div className="grid gap-2">
-            {categoryGroups.map((group) => (
+          <div className="overflow-hidden rounded-lg border bg-card">
+            {categoryGroups.map((group, index) => (
               <button
-                className="flex items-center justify-between gap-3 rounded-xl border bg-card px-3 py-3 text-left transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+                className={cn(
+                  "flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                  index > 0 && "border-t",
+                )}
                 key={group.key}
                 onClick={() => onOpenCategory(group.key)}
                 type="button"
               >
                 <span className="min-w-0">
-                  <span className="block truncate text-sm font-semibold">{group.label}</span>
-                  <span className="block text-xs text-muted-foreground">{group.count} approved SOP{group.count === 1 ? "" : "s"}</span>
+                  <span className="block truncate text-sm font-medium">{group.label}</span>
+                  <span className="block text-xs text-muted-foreground">
+                    {group.count} SOP{group.count === 1 ? "" : "s"}
+                  </span>
                 </span>
                 <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
               </button>
             ))}
             {!loading && !categoryGroups.length ? (
-              <LoadingBlock label="Categories appear after SOPs are published." />
+              <div className="px-3 py-6 text-sm text-muted-foreground">Categories appear after SOPs are published.</div>
             ) : null}
           </div>
         </aside>
-      </section>
+      </div>
 
-      <section className="grid gap-4 xl:grid-cols-2">
-        <div className="space-y-4">
-          <SectionHeader icon={Clock} title="Recently updated" />
-          <SOPCompactList emptyLabel="No recent SOP updates." onOpenSOP={onOpenSOP} sops={recentSops} />
-        </div>
-        <div className="space-y-4">
-          <SectionHeader icon={Eye} title="Most accessed" />
-          <SOPCompactList emptyLabel="Usage appears after agents open SOPs." onOpenSOP={onOpenSOP} sops={popularSops} showViews />
-        </div>
-      </section>
-
-      <section className="flex flex-col gap-3 rounded-2xl border bg-muted/25 p-4 md:flex-row md:items-center md:justify-between">
-        <div>
+      <section className="flex flex-col gap-3 rounded-lg border bg-muted/20 px-4 py-3 md:flex-row md:items-center md:justify-between">
+        <div className="min-w-0">
           <h3 className="text-sm font-semibold">Need scoped reasoning?</h3>
-          <p className="mt-1 text-sm text-muted-foreground">Start chat from the current search phrase and keep the answer grounded to published SOPs.</p>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            Start chat from the current search phrase, grounded to published SOPs only.
+          </p>
         </div>
         <Button onClick={() => onOpenChat(query || quickQueries[0] || "")} type="button" variant="outline">
           <MessageSquareText data-icon="inline-start" className="size-4" />
           Open SOP Chat
         </Button>
       </section>
-    </div>
-  );
-}
-
-function PortalMetric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-xl border bg-background/70 px-3 py-2">
-      <div className="text-lg font-semibold tabular-nums">{value.toLocaleString()}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
     </div>
   );
 }
@@ -196,13 +184,13 @@ function SectionHeader({
   title: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex items-end justify-between gap-3">
       <div className="flex min-w-0 items-center gap-2">
-        <Icon className="size-4 shrink-0 text-muted-foreground" />
-        <h3 className="truncate text-sm font-semibold">{title}</h3>
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        <h3 className="truncate text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
       </div>
       {actionLabel && onAction ? (
-        <Button className="h-8 px-2" onClick={onAction} size="sm" type="button" variant="ghost">
+        <Button className="h-7 px-2 text-xs" onClick={onAction} size="sm" type="button" variant="ghost">
           {actionLabel}
           <ArrowRight data-icon="inline-end" className="size-3.5" />
         </Button>
@@ -213,71 +201,76 @@ function SectionHeader({
 
 function SOPPortalCard({ onOpen, sop }: { onOpen: () => void; sop: SOP }) {
   return (
-    <article className="rounded-xl border bg-card p-4">
+    <button
+      className="group/card w-full rounded-lg border bg-card p-4 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+      onClick={onOpen}
+      type="button"
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <MetaLine items={[sop.code, `v${sop.current_version.version_number}`, sop.category]} maxItems={3} />
-          <h3 className="mt-2 line-clamp-2 text-base font-semibold leading-6">{sop.title}</h3>
+          <h3 className="mt-1.5 line-clamp-2 text-sm font-semibold leading-snug">{sop.title}</h3>
         </div>
-        <Badge className="shrink-0" variant="secondary">{sop.current_version.status}</Badge>
+        <ArrowRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover/card:translate-x-0.5" />
       </div>
       <p className="mt-2 line-clamp-2 text-sm leading-6 text-muted-foreground">{sop.summary}</p>
-      <TagSummary className="mt-3" items={[...sop.case_reasons, ...sop.tags]} maxItems={3} />
-      <div className="mt-4 flex items-center justify-between gap-3">
-        <MetaLine items={[formatDate(sop.updated_at), `${sop.analytics.views} views`]} maxItems={2} />
-        <Button className="h-8 px-2" onClick={onOpen} size="sm" type="button" variant="outline">
-          Open
-          <ArrowRight data-icon="inline-end" className="size-3.5" />
-        </Button>
-      </div>
-    </article>
+      <TagSummary className="mt-2.5" items={[...sop.case_reasons, ...sop.tags]} maxItems={3} />
+      <MetaLine
+        className="mt-3"
+        items={[formatDate(sop.updated_at), `${sop.analytics?.views ?? 0} view${(sop.analytics?.views ?? 0) === 1 ? "" : "s"}`]}
+        maxItems={2}
+      />
+    </button>
   );
 }
 
-function SOPCompactList({
+function SOPActivityList({
   emptyLabel,
   onOpenSOP,
-  showViews = false,
   sops,
 }: {
   emptyLabel: string;
   onOpenSOP: (sop: SOP) => void;
-  showViews?: boolean;
   sops: SOP[];
 }) {
   return (
-    <div className="overflow-hidden rounded-xl border bg-card">
+    <div className="overflow-hidden rounded-lg border bg-card">
       {sops.map((sop, index) => (
         <button
           className={cn(
-            "grid w-full grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+            "group/row grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-3 py-2.5 text-left transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
             index > 0 && "border-t",
           )}
           key={sop.id}
           onClick={() => onOpenSOP(sop)}
           type="button"
         >
-          <span className="flex size-8 items-center justify-center rounded-lg bg-muted text-xs font-semibold tabular-nums text-muted-foreground">
-            {index + 1}
-          </span>
           <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold">{sop.title}</span>
-            <MetaLine items={[sop.category, formatDate(sop.updated_at)]} maxItems={2} />
+            <span className="block truncate text-sm font-medium">{sop.title}</span>
+            <MetaLine
+              className="mt-0.5"
+              items={[sop.category, formatDate(sop.updated_at), `${sop.analytics?.views ?? 0} views`]}
+              maxItems={3}
+            />
           </span>
-          <span className="shrink-0 text-xs text-muted-foreground">
-            {showViews ? `${sop.analytics.views} views` : `v${sop.current_version.version_number}`}
+          <span className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Badge variant="outline">v{sop.current_version.version_number}</Badge>
+            <ArrowRight className="size-4 text-muted-foreground/60 transition-transform group-hover/row:translate-x-0.5" />
           </span>
         </button>
       ))}
       {sops.length === 0 ? (
-        <div className="px-3 py-6 text-sm text-muted-foreground">{emptyLabel}</div>
+        <div className="flex items-center gap-2 px-3 py-6 text-sm text-muted-foreground">
+          <Eye className="size-4" />
+          {emptyLabel}
+        </div>
       ) : null}
     </div>
   );
 }
 
 function LoadingBlock({ label }: { label: string }) {
-  return <div className="rounded-xl border border-dashed px-3 py-6 text-sm text-muted-foreground">{label}</div>;
+  return <div className="rounded-lg border border-dashed px-3 py-6 text-sm text-muted-foreground">{label}</div>;
 }
 
 type CategoryGroup = {
@@ -341,12 +334,4 @@ function compareByViews(left: SOP, right: SOP) {
 
 function compareByUpdatedAt(left: SOP, right: SOP) {
   return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
-}
-
-function daysSince(value: string) {
-  const timestamp = new Date(value).getTime();
-  if (!Number.isFinite(timestamp)) {
-    return Number.POSITIVE_INFINITY;
-  }
-  return (Date.now() - timestamp) / 86_400_000;
 }

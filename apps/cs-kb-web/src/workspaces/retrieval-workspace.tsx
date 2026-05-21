@@ -132,45 +132,64 @@ export function RetrievalWorkspace({
 
 function QueryExpansionPanel({ retrieval }: { retrieval: RetrievalResponse | null }) {
   return (
-    <Card className="rounded-xl">
-      <CardHeader className="border-b pb-4">
+    <Card className="rounded-xl" size="sm">
+      <CardHeader>
         <CardTitle>Query expansion</CardTitle>
         <CardDescription>Synonym matches and normalized query before ranking.</CardDescription>
       </CardHeader>
-      <CardContent className="pt-4">
+      <CardContent>
         {!retrieval ? (
-          <EmptyPanel icon={WandSparkles} title="No expansion yet" text="Run retrieval to see DB-managed synonym matches." compact />
+          <EmptyPanel
+            compact
+            icon={WandSparkles}
+            text="Run retrieval to see DB-managed synonym matches."
+            title="No expansion yet"
+          />
         ) : (
           <div className="space-y-3">
-            <div className="rounded-xl border bg-muted/25 p-3">
-              <p className="text-xs font-medium text-muted-foreground">Normalized query</p>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Normalized query
+              </p>
               <p className="mt-1 break-words text-sm">{retrieval.normalized_query}</p>
             </div>
-            <div className="flex flex-wrap gap-2">
-              {retrieval.query_expansion.expansions.length === 0 ? (
-                <Badge variant="outline">no expansion</Badge>
-              ) : (
-                retrieval.query_expansion.expansions.map((item) => (
-                  <Badge key={item} variant="secondary">
-                    {item}
-                  </Badge>
-                ))
-              )}
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Expansions
+              </p>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {retrieval.query_expansion.expansions.length === 0 ? (
+                  <Badge variant="outline">no expansion</Badge>
+                ) : (
+                  retrieval.query_expansion.expansions.map((item) => (
+                    <Badge key={item} variant="secondary">
+                      {item}
+                    </Badge>
+                  ))
+                )}
+              </div>
             </div>
-            <div className="space-y-2">
-              {retrieval.query_expansion.matched_synonyms.map((match) => (
-                <div className="rounded-xl border p-3" key={`${match.group_id}-${match.canonical_key}`}>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="secondary">{match.canonical_key}</Badge>
-                    <Badge variant="outline">{match.synonym_type}</Badge>
-                    {match.domain ? <Badge variant="outline">{match.domain}</Badge> : null}
-                  </div>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    Matched: {match.matched_terms.join(", ") || "canonical key"}
-                  </p>
-                </div>
-              ))}
-            </div>
+            {retrieval.query_expansion.matched_synonyms.length ? (
+              <div className="space-y-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Matched synonyms
+                </p>
+                <ul className="divide-y rounded-md border bg-card">
+                  {retrieval.query_expansion.matched_synonyms.map((match) => (
+                    <li className="space-y-1 p-2.5" key={`${match.group_id}-${match.canonical_key}`}>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge variant="secondary">{match.canonical_key}</Badge>
+                        <Badge variant="outline">{match.synonym_type}</Badge>
+                        {match.domain ? <Badge variant="outline">{match.domain}</Badge> : null}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Matched: {match.matched_terms.join(", ") || "canonical key"}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         )}
       </CardContent>
@@ -182,30 +201,38 @@ function RetrievalResultCard({ result }: { result: RetrievalResult }) {
   const scope = String(result.metadata.retrieval_scope ?? "unit");
   const unitType = String(result.metadata.unit_type ?? result.section);
   const isDocumentLayer = scope === "document" || unitType === "full_sop";
-  const isSourceEvidence = scope === "source_evidence" || unitType === "source_evidence_section" || result.metadata.source_evidence_only === true;
+  const isSourceEvidence =
+    scope === "source_evidence" || unitType === "source_evidence_section" || result.metadata.source_evidence_only === true;
+  const scopeLabel = isDocumentLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer";
   return (
-    <article className="rounded-xl border bg-card p-4">
+    <article className="rounded-lg border bg-card p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={isDocumentLayer ? "secondary" : "outline"}>
-              {isDocumentLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer"}
-            </Badge>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{scopeLabel}</Badge>
+            <Badge variant="outline">v{result.version_number}</Badge>
+            <Badge variant="outline">{unitType}</Badge>
           </div>
-          <h3 className="mt-2 text-sm font-semibold">{result.heading || result.title}</h3>
-          <p className="mt-1 text-xs text-muted-foreground">From: {result.title}, {result.source_filename}</p>
-          <MetaLine className="mt-1" items={[`v${result.version_number}`, unitType, result.rank_source.join(" + ")]} />
+          <h3 className="mt-1.5 text-sm font-semibold leading-snug">{result.heading || result.title}</h3>
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+            From {result.title}
+            {result.source_filename ? ` · ${result.source_filename}` : ""}
+          </p>
+          <MetaLine className="mt-1" items={[result.rank_source.join(" + ")]} />
         </div>
-        <div className="text-right text-xs text-muted-foreground">
-          <div>score {result.score.toFixed(4)}</div>
-          <div>lex {result.lexical_score.toFixed(3)}</div>
-          <div>vec {result.vector_score.toFixed(3)}</div>
-        </div>
+        <dl className="shrink-0 grid grid-cols-[auto_auto] gap-x-2 text-[11px] tabular-nums text-muted-foreground">
+          <dt>score</dt>
+          <dd className="text-right font-medium text-foreground">{result.score.toFixed(4)}</dd>
+          <dt>lex</dt>
+          <dd className="text-right">{result.lexical_score.toFixed(3)}</dd>
+          <dt>vec</dt>
+          <dd className="text-right">{result.vector_score.toFixed(3)}</dd>
+        </dl>
       </div>
-      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{result.content}</p>
-      <div className="mt-3 rounded-lg bg-muted/35 px-2 py-1 text-[11px] text-muted-foreground">
-        Citation: {isDocumentLayer ? "document overview" : isSourceEvidence ? "source evidence" : "atomic unit"} chunk {result.chunk_index}, {result.version_id}
-      </div>
+      <p className="mt-2.5 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{result.content}</p>
+      <p className="mt-2 truncate text-[11px] text-muted-foreground">
+        Citation: chunk {result.chunk_index} · {result.version_id}
+      </p>
     </article>
   );
 }

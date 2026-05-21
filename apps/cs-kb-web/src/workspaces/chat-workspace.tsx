@@ -530,10 +530,24 @@ function Composer({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent align="end" className="w-80">
-                    {routeOptions.map((route) => (
-                      <SelectItem key={route.route} value={route.route}>
-                        {route.label}
-                      </SelectItem>
+                    {groupRouteOptions(routeOptions).map((group) => (
+                      <div className="px-1 py-1" key={group.label}>
+                        <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          {group.label}
+                        </div>
+                        {group.routes.map((route) => (
+                          <SelectItem key={route.route} value={route.route}>
+                            <div className="flex flex-col">
+                              <span className="text-sm font-medium">{route.label}</span>
+                              {route.description ? (
+                                <span className="line-clamp-1 text-[11px] text-muted-foreground">
+                                  {route.description}
+                                </span>
+                              ) : null}
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </div>
                     ))}
                   </SelectContent>
                 </Select>
@@ -869,6 +883,19 @@ function metadataValues(value: unknown) {
   }
   const text = metadataText(value);
   return text ? [text] : [];
+}
+
+function groupRouteOptions(routes: ChatModelRouteConfig[]) {
+  const presets = routes.filter((route) => ["simple", "policy", "high_risk", "complex"].includes(route.route));
+  const manuals = routes.filter((route) => !["simple", "policy", "high_risk", "complex"].includes(route.route));
+  const groups: { label: string; routes: ChatModelRouteConfig[] }[] = [];
+  if (presets.length) {
+    groups.push({ label: "Routed by intent", routes: presets });
+  }
+  if (manuals.length) {
+    groups.push({ label: "Manual override", routes: manuals });
+  }
+  return groups;
 }
 
 function sourceRoleLabel(role: string) {

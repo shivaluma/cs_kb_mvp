@@ -4,9 +4,56 @@ import {
   IconCircleCheck as CheckCircle2
 } from "@tabler/icons-react";
 
+import { Metric } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+
+export type StatItem = {
+  hint?: string;
+  key: string;
+  label: string;
+  statusLabel?: string;
+  tone?: "default" | "warning" | "danger";
+  value: number | string;
+};
+
+export function StatStrip({
+  className,
+  items,
+  size = "md",
+}: {
+  className?: string;
+  items: StatItem[];
+  size?: "sm" | "md" | "lg";
+}) {
+  if (!items.length) {
+    return null;
+  }
+  return (
+    <dl
+      className={cn(
+        "flex flex-wrap items-baseline gap-x-8 gap-y-3 border-b pb-3",
+        className,
+      )}
+    >
+      {items.map((item) => (
+        <Metric
+          hint={item.hint}
+          key={item.key}
+          label={item.label}
+          size={size}
+          tone={item.tone}
+          value={item.value}
+        />
+      ))}
+    </dl>
+  );
+}
+
+export function Stat(props: Omit<StatItem, "key">) {
+  return <Metric hint={props.hint} label={props.label} tone={props.tone} value={props.value} />;
+}
 
 export function KpiCard({
   icon: Icon,
@@ -24,99 +71,14 @@ export function KpiCard({
   value: number | string;
 }) {
   return (
-    <div className="rounded-xl border bg-card p-3">
-      <div className="flex items-start justify-between gap-3">
-        <Icon className={tone === "warning" ? "size-4 text-destructive" : "size-4 text-muted-foreground"} />
+    <div className="min-w-0">
+      <div className="flex items-center justify-between gap-3">
+        <Icon className={cn("size-4", tone === "warning" ? "text-destructive" : "text-muted-foreground")} />
         {trend ? <Badge variant="outline">{trend}</Badge> : null}
       </div>
-      <div className="mt-3 text-2xl font-semibold tabular-nums">{value}</div>
+      <div className="mt-3 text-2xl font-semibold tabular-nums leading-tight">{value}</div>
       <div className="mt-1 text-xs font-medium text-muted-foreground">{label}</div>
-      {note ? <div className="mt-2 text-[11px] text-muted-foreground">{note}</div> : null}
-    </div>
-  );
-}
-
-export type StatItem = {
-  hint?: string;
-  key: string;
-  label: string;
-  statusLabel?: string;
-  tone?: "default" | "warning" | "danger";
-  value: number | string;
-};
-
-export function StatStrip({
-  className,
-  items,
-}: {
-  className?: string;
-  items: StatItem[];
-}) {
-  if (!items.length) {
-    return null;
-  }
-  return (
-    <dl
-      className={cn(
-        "flex flex-wrap items-baseline gap-x-8 gap-y-3 border-b pb-3",
-        className,
-      )}
-    >
-      {items.map((item) => (
-        <Stat
-          hint={item.hint}
-          key={item.key}
-          label={item.label}
-          statusLabel={item.statusLabel}
-          tone={item.tone}
-          value={item.value}
-        />
-      ))}
-    </dl>
-  );
-}
-
-export function Stat({
-  hint,
-  label,
-  statusLabel,
-  tone = "default",
-  value,
-}: {
-  hint?: string;
-  label: string;
-  statusLabel?: string;
-  tone?: "default" | "warning" | "danger";
-  value: number | string;
-}) {
-  const valueClass =
-    tone === "danger"
-      ? "text-destructive"
-      : tone === "warning"
-        ? "text-foreground"
-        : "text-foreground";
-  return (
-    <div className="min-w-[6rem]">
-      <dt className="text-xs font-medium text-muted-foreground">
-        {label}
-        {tone === "warning" || tone === "danger" ? (
-          <span
-            aria-label={statusLabel ?? (tone === "danger" ? "Needs immediate attention" : "Needs review")}
-            title={statusLabel ?? (tone === "danger" ? "Needs immediate attention" : "Needs review")}
-            className={cn(
-              "ms-1.5 inline-block size-1.5 rounded-full align-middle",
-              tone === "danger" ? "bg-destructive" : "bg-amber-500",
-            )}
-            role="img"
-          />
-        ) : null}
-      </dt>
-      <dd className={cn("mt-0.5 text-xl font-semibold tabular-nums leading-7", valueClass)}>
-        {value}
-      </dd>
-      {hint ? (
-        <p className="mt-0.5 text-[11px] text-muted-foreground">{hint}</p>
-      ) : null}
+      {note ? <div className="mt-1.5 text-[11px] leading-snug text-muted-foreground">{note}</div> : null}
     </div>
   );
 }
@@ -135,16 +97,14 @@ export function ActionItem({
   title: string;
 }) {
   return (
-    <div className="rounded-xl border bg-muted/20 p-3">
-      <div className="flex items-start gap-3">
-        <Icon className="mt-0.5 size-4 text-muted-foreground" />
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium">{title}</div>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">{text}</p>
-          <Button className="mt-3" onClick={onClick} size="sm" type="button" variant="outline">
-            {action}
-          </Button>
-        </div>
+    <div className="flex items-start gap-3 rounded-lg border bg-muted/15 p-3">
+      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium leading-snug">{title}</div>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{text}</p>
+        <Button className="mt-2.5" onClick={onClick} size="sm" type="button" variant="outline">
+          {action}
+        </Button>
       </div>
     </div>
   );

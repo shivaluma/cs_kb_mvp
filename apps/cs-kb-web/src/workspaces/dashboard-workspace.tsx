@@ -17,7 +17,6 @@ import {
 
 import { EmptyPanel, StatusBadge } from "@/components/common";
 import { ActionItem, HealthPill, StatStrip } from "@/components/operations";
-import { SearchBar } from "@/components/search-bar";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -47,11 +46,11 @@ export function DashboardWorkspace({
   isSystemHealthLoading,
   opsAnalytics,
   onMagicReset,
-  onRunSearch,
+  onRunSearch: _onRunSearch,
   onWorkspaceChange,
-  query,
+  query: _query,
   refetchSystemHealth,
-  setQuery,
+  setQuery: _setQuery,
   systemHealth,
 }: {
   adminResetStatus?: AdminResetStatus;
@@ -62,11 +61,11 @@ export function DashboardWorkspace({
   isSystemHealthLoading: boolean;
   opsAnalytics?: OpsAnalyticsResponse;
   onMagicReset: (confirmation: string) => void;
-  onRunSearch: () => void;
+  onRunSearch?: () => void;
   onWorkspaceChange: (workspace: Workspace) => void;
-  query: string;
+  query?: string;
   refetchSystemHealth: () => void;
-  setQuery: (query: string) => void;
+  setQuery?: (query: string) => void;
   systemHealth?: SystemHealth;
 }) {
   const activeDocuments = documents.filter((document) => document.status === "active");
@@ -85,21 +84,8 @@ export function DashboardWorkspace({
   const staleDocuments = activeDocuments.filter(isStaleDocument);
   const aiReviewDocuments = activeDocuments.filter((document) => document.latest_review_status !== "approved");
 
-  function runLookup() {
-    onRunSearch();
-    onWorkspaceChange("lookup");
-  }
-
   return (
     <div className="space-y-4">
-      <SearchBar
-        actionLabel="Open lookup"
-        onChange={setQuery}
-        onSearch={runLookup}
-        placeholder="Search SOP, rule, macro, case reason..."
-        value={query}
-      />
-
       <StatStrip
         items={[
           {
@@ -234,22 +220,30 @@ function UsageSignals({
             <CardTitle>Adoption and retrieval quality</CardTitle>
             <CardDescription>Practical signals for whether agents are replacing Excel/email with approved SOP lookup.</CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-3 pt-4 md:grid-cols-2">
-            {metrics.map((metric) => (
-              <div className="rounded-xl border bg-card p-3" key={metric.key}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold">{metric.label}</div>
-                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{metric.detail}</p>
-                  </div>
-                  <Badge variant={metric.tone === "warning" ? "outline" : "secondary"}>{metric.value}</Badge>
-                </div>
-                {metric.target ? <p className="mt-2 text-[11px] text-muted-foreground">Target: {metric.target}</p> : null}
-              </div>
-            ))}
-            {!metrics.length ? (
-              <EmptyPanel icon={Search} title="No usage telemetry yet" text="Lookup, chat, feedback, macro, and tool events will populate this panel." compact />
-            ) : null}
+          <CardContent className="pt-4">
+            {metrics.length ? (
+              <ul className="divide-y">
+                {metrics.map((metric) => (
+                  <li className="flex items-start justify-between gap-4 py-3 first:pt-0 last:pb-0" key={metric.key}>
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold">{metric.label}</div>
+                      <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{metric.detail}</p>
+                      {metric.target ? (
+                        <p className="mt-1 text-[11px] text-muted-foreground">Target: {metric.target}</p>
+                      ) : null}
+                    </div>
+                    <Badge variant={metric.tone === "warning" ? "outline" : "secondary"}>{metric.value}</Badge>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptyPanel
+                compact
+                icon={Search}
+                text="Lookup, chat, feedback, macro, and tool events will populate this panel."
+                title="No usage telemetry yet"
+              />
+            )}
           </CardContent>
         </Card>
       </section>
@@ -260,23 +254,38 @@ function UsageSignals({
             <CardTitle>Feedback pressure</CardTitle>
             <CardDescription>Highest-risk report groups from CS users.</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3 pt-4">
-            {highFeedback.slice(0, 4).map((item) => (
-              <div className="rounded-xl border bg-card p-3" key={item.key}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold">{item.target_title || item.entity_id}</div>
-                    <p className="mt-1 text-xs text-muted-foreground">{item.feedback_label}, {item.count} report{item.count === 1 ? "" : "s"}</p>
-                  </div>
-                  <Badge variant="destructive">High</Badge>
-                </div>
-                <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{item.suggested_action}</p>
-              </div>
-            ))}
-            {highFeedback.length === 0 ? (
-              <EmptyPanel icon={MessageReport} title="No high-risk feedback" text="Wrong, outdated, missing-step, and bad-search reports will appear here." compact />
-            ) : null}
-            <Button className="w-full" onClick={() => onWorkspaceChange("feedback")} type="button" variant="outline">
+          <CardContent className="pt-4">
+            {highFeedback.length ? (
+              <ul className="divide-y">
+                {highFeedback.slice(0, 4).map((item) => (
+                  <li className="space-y-1.5 py-3 first:pt-0" key={item.key}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold">{item.target_title || item.entity_id}</div>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {item.feedback_label}, {item.count} report{item.count === 1 ? "" : "s"}
+                        </p>
+                      </div>
+                      <Badge variant="destructive">High</Badge>
+                    </div>
+                    <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{item.suggested_action}</p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptyPanel
+                compact
+                icon={MessageReport}
+                text="Wrong, outdated, missing-step, and bad-search reports will appear here."
+                title="No high-risk feedback"
+              />
+            )}
+            <Button
+              className="mt-4 w-full"
+              onClick={() => onWorkspaceChange("feedback")}
+              type="button"
+              variant="outline"
+            >
               Open feedback queue
               <ArrowRight data-icon="inline-end" className="size-4" />
             </Button>
@@ -528,20 +537,20 @@ function AdminResetPanel({
 function ServiceHealthRow({ service }: { service: ServiceHealth }) {
   const Icon = serviceIcon(service.name);
   return (
-    <div className="rounded-xl border bg-card p-4">
+    <div className="rounded-lg border bg-card p-3">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-3">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted/30">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted/30">
             <Icon className="size-4 text-muted-foreground" />
           </div>
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">{serviceLabel(service.name)}</div>
-            <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{service.detail}</p>
+            <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">{service.detail}</p>
           </div>
         </div>
         <SystemStatusBadge status={service.status} />
       </div>
-      <div className="mt-4 flex items-center justify-between rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      <div className="mt-3 flex items-center justify-between border-t pt-2 text-xs text-muted-foreground">
         <span>Latency</span>
         <span className="font-medium tabular-nums text-foreground">{service.latency_ms}ms</span>
       </div>

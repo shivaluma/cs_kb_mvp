@@ -1,8 +1,10 @@
+import { useState } from "react";
 import {
   IconCheck as Check,
   IconCopy as Copy,
   IconFileTime as FileClock,
   IconFileText as FileText,
+  IconAdjustmentsHorizontal as SlidersHorizontal,
   IconSearch as Search,
   IconShieldCheck as ShieldCheck,
   IconSparkles as Sparkles
@@ -10,11 +12,10 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { SearchBar } from "@/components/search-bar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SearchBar } from "@/components/search-bar";
 import {
   AISuggestionPanel,
   EmptyPanel,
@@ -32,6 +33,20 @@ import { OperationalFeedbackButtons } from "@/components/operational-feedback";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { AISuggestion, FilterOption, FilterState, Macro, RetrievalResult, SearchResult, SOP } from "@/types";
+
+const GROUP_ORDER: Array<{
+  key: keyof GroupedResults;
+  label: string;
+  accent?: boolean;
+}> = [
+  { key: "exact", label: "Exact rule match", accent: true },
+  { key: "issueRouter", label: "Issue router" },
+  { key: "tool", label: "Tool link" },
+  { key: "action", label: "Action template" },
+  { key: "parent", label: "Document overview" },
+  { key: "sourceEvidence", label: "Source evidence" },
+  { key: "related", label: "Related SOP" },
+];
 
 export function LookupWorkspace({
   aiSuggestion,
@@ -83,6 +98,7 @@ export function LookupWorkspace({
   setQuery: (query: string) => void;
 }) {
   const canSearch = query.trim().length > 0;
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const groupedResults = groupRetrievalResults(semanticResults);
   const aiSuggestedSops = aiSuggestion?.suggested_sops ?? [];
   const selectedCitationMatches =
@@ -90,6 +106,7 @@ export function LookupWorkspace({
       ? [selectedDocumentMatch]
       : [];
   const visibleCount = listSource.length + semanticResults.length + selectedCitationMatches.length + aiSuggestedSops.length;
+  const activeFilterCount = countActiveFilters(filters);
 
   function openFullSop(match: RetrievalResult) {
     const parentMatch = semanticResults.find((item) => item.document_id === match.document_id && isDocumentLayer(item));
@@ -102,302 +119,280 @@ export function LookupWorkspace({
 
   return (
     <div className="space-y-4">
-      <div className="space-y-3">
-        <SearchBar
-          actionLabel="Search"
-          id="sop-search"
-          loading={loading}
-          onChange={setQuery}
-          onSearch={onRunSearch}
-          placeholder="Search SOP, case reason, policy keyword, or natural language question"
-          value={query}
-        />
-        <FilterGrid
-          collectionOptions={collectionOptions}
-          filterOptions={dynamicFilterOptions}
-          filters={filters}
-          onUpdateFilter={onUpdateFilter}
-        />
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <SearchBar
+            actionLabel="Search"
+            id="sop-search"
+            loading={loading}
+            onChange={setQuery}
+            onSearch={onRunSearch}
+            placeholder="Search SOP, case reason, policy keyword, or natural language question"
+            value={query}
+          />
+        </div>
+        <Button
+          aria-expanded={filtersOpen}
+          className="shrink-0"
+          onClick={() => setFiltersOpen((open) => !open)}
+          size="default"
+          type="button"
+          variant="outline"
+        >
+          <SlidersHorizontal data-icon="inline-start" className="size-4" />
+          Filters
+          {activeFilterCount > 0 ? (
+            <Badge className="ms-1" variant="secondary">
+              {activeFilterCount}
+            </Badge>
+          ) : null}
+        </Button>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(22rem,0.72fr)_minmax(34rem,1.28fr)]">
-        <section className="min-w-0">
-          <Card className="rounded-xl">
-          <CardHeader className="border-b pb-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <CardTitle>Results</CardTitle>
-                <CardDescription>{loading ? "Searching approved content" : `${visibleCount} matches from SOPs and published document chunks`}</CardDescription>
-              </div>
-              <Badge variant="outline">published only</Badge>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <ScrollArea className="h-[35rem] pr-3">
-              <div className="space-y-2">
-                {!canSearch ? (
-                  <EmptyPanel icon={Search} title="Enter a query" text="Search results appear after you run a lookup." compact />
-                ) : loading || booting ? (
-                  <ResultSkeleton />
-                ) : visibleCount === 0 ? (
-                  <EmptyResults query={query} />
-                ) : (
-                  <div className="space-y-4">
-                    {selectedCitationMatches.length > 0 ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={selectedCitationMatches.length} title="Selected citation" />
-                        <div className="rounded-xl border bg-secondary/45 p-3 text-xs leading-5 text-secondary-foreground">
-                          Opened from Chat or a citation link. Search results may still be loading or may not match this exact title.
-                        </div>
-                        {selectedCitationMatches.map((match) => (
-                          <DocumentMatchButton
-                            key={match.chunk_id}
-                            match={match}
-                            onClick={() => onSelectDocumentMatch(match)}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => openFullSop(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {groupedResults.exact.length > 0 ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={groupedResults.exact.length} title="Exact rule match" />
-                        {groupedResults.exact.map((match) => (
-                          <DocumentMatchButton
-                            key={match.chunk_id}
-                            match={match}
-                            onClick={() => onSelectDocumentMatch(match)}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => openFullSop(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {groupedResults.issueRouter.length > 0 ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={groupedResults.issueRouter.length} title="Issue Router Match" />
-                        {groupedResults.issueRouter.map((match) => (
-                          <DocumentMatchButton
-                            key={match.chunk_id}
-                            match={match}
-                            onClick={() => onSelectDocumentMatch(match)}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => openFullSop(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {groupedResults.tool.length > 0 ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={groupedResults.tool.length} title="Tool Link" />
-                        {groupedResults.tool.map((match) => (
-                          <DocumentMatchButton
-                            key={match.chunk_id}
-                            match={match}
-                            onClick={() => onSelectDocumentMatch(match)}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => openFullSop(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {groupedResults.action.length > 0 ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={groupedResults.action.length} title="Action Template" />
-                        {groupedResults.action.map((match) => (
-                          <DocumentMatchButton
-                            key={match.chunk_id}
-                            match={match}
-                            onClick={() => onSelectDocumentMatch(match)}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => openFullSop(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {(groupedResults.parent.length > 0 || listSource.length > 0) ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={groupedResults.parent.length + listSource.length} title="Document overview" />
-                        {groupedResults.parent.map((match) => (
-                          <DocumentMatchButton
-                            key={match.chunk_id}
-                            match={match}
-                            onClick={() => onSelectDocumentMatch(match)}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => onSelectDocumentMatch(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                        {listSource.map((item) => (
-                          <SopResultCard
-                            item={item}
-                            key={item.sop_id}
-                            onCopyAnswer={() => copyAnswer(item.snippet)}
-                            onOpen={() => onOpenSOP(item.sop_id)}
-                            selected={selected?.id === item.sop_id}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {groupedResults.sourceEvidence.length > 0 ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={groupedResults.sourceEvidence.length} title="Source evidence" />
-                        {groupedResults.sourceEvidence.map((match) => (
-                          <DocumentMatchButton
-                            key={match.chunk_id}
-                            match={match}
-                            onClick={() => onSelectDocumentMatch(match)}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => openFullSop(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {groupedResults.related.length > 0 ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={groupedResults.related.length} title="Related SOP" />
-                        {groupedResults.related.map((match) => (
-                          <DocumentMatchButton
-                            key={match.chunk_id}
-                            match={match}
-                            onClick={() => onSelectDocumentMatch(match)}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => openFullSop(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {aiSuggestedSops.length > 0 ? (
-                      <div className="space-y-2">
-                        <ResultGroupHeader count={aiSuggestedSops.length} title="AI suggestion" />
-                        {aiSuggestedSops.map((item) => (
-                          <article
-                            className="w-full rounded-xl border bg-muted/20 p-3 text-left"
-                            key={`${item.sop_id}-${item.version}`}
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <h3 className="min-w-0 text-sm font-semibold leading-5">{item.title}</h3>
-                              <Badge variant="outline">{Math.round(item.confidence * 100)}%</Badge>
-                            </div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              <Badge variant="secondary">grounded</Badge>
-                              <Badge variant="outline">v{item.version}</Badge>
-                              <Button className="h-7 px-2" onClick={() => onOpenSOP(item.sop_id)} size="sm" type="button" variant="outline">Open source</Button>
-                            </div>
-                          </article>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-            </ScrollArea>
-          </CardContent>
-        </Card>
-      </section>
-
-      <article className="min-w-0">
-        {selectedDocumentMatch ? (
-          <DocumentMatchDetail match={selectedDocumentMatch} query={query} searchEventId={searchEventId} />
-        ) : selected && selectedVersion ? (
-          <SOPDetail
-            aiSuggestion={aiSuggestion}
-            copied={copied}
-            copyError={copyError}
-            feedbackRate={feedbackRate}
-            onAskAI={onAskAI}
-            onCopyMacro={onCopyMacro}
-            query={query}
-            searchEventId={searchEventId}
-            selected={selected}
-            selectedVersion={selectedVersion}
+      {filtersOpen ? (
+        <div className="rounded-lg border bg-muted/15 p-3">
+          <FilterGrid
+            collectionOptions={collectionOptions}
+            filterOptions={dynamicFilterOptions}
+            filters={filters}
+            onUpdateFilter={onUpdateFilter}
           />
-        ) : (
-          <EmptyPanel icon={Search} title="Select a result" text="Search or choose a SOP/document match to inspect latest published content." />
-        )}
-      </article>
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(22rem,0.7fr)_minmax(34rem,1.3fr)]">
+        <section className="min-w-0">
+          <div className="flex items-baseline justify-between gap-3 pb-2">
+            <h2 className="text-sm font-semibold">
+              {loading ? "Searching…" : canSearch ? `${visibleCount} match${visibleCount === 1 ? "" : "es"}` : "Results"}
+            </h2>
+            <span className="text-xs text-muted-foreground">published only</span>
+          </div>
+
+          <ScrollArea className="h-[calc(100vh-15rem)] pr-3">
+            <div className="space-y-5">
+              {!canSearch ? (
+                <EmptyPanel
+                  compact
+                  icon={Search}
+                  text="Search results appear after you run a lookup."
+                  title="Enter a query"
+                />
+              ) : loading || booting ? (
+                <ResultSkeleton />
+              ) : visibleCount === 0 ? (
+                <EmptyResults query={query} />
+              ) : (
+                <>
+                  {selectedCitationMatches.length > 0 ? (
+                    <ResultGroup count={selectedCitationMatches.length} title="Selected citation">
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Opened from Chat or a citation link. Search results may still be loading or may not match this exact title.
+                      </p>
+                      {selectedCitationMatches.map((match) => (
+                        <DocumentMatchRow
+                          key={match.chunk_id}
+                          match={match}
+                          onCopyAnswer={() => copyAnswer(match.content)}
+                          onOpenFullSop={() => openFullSop(match)}
+                          onSelect={() => onSelectDocumentMatch(match)}
+                          selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                        />
+                      ))}
+                    </ResultGroup>
+                  ) : null}
+
+                  {GROUP_ORDER.map((group) => {
+                    const matches = groupedResults[group.key];
+                    if (group.key === "parent") {
+                      const total = matches.length + listSource.length;
+                      if (total === 0) return null;
+                      return (
+                        <ResultGroup accent={group.accent} count={total} key={group.key} title={group.label}>
+                          {matches.map((match) => (
+                            <DocumentMatchRow
+                              key={match.chunk_id}
+                              match={match}
+                              onCopyAnswer={() => copyAnswer(match.content)}
+                              onOpenFullSop={() => onSelectDocumentMatch(match)}
+                              onSelect={() => onSelectDocumentMatch(match)}
+                              selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                            />
+                          ))}
+                          {listSource.map((item) => (
+                            <SopResultRow
+                              item={item}
+                              key={item.sop_id}
+                              onCopyAnswer={() => copyAnswer(item.snippet)}
+                              onOpen={() => onOpenSOP(item.sop_id)}
+                              selected={selected?.id === item.sop_id}
+                            />
+                          ))}
+                        </ResultGroup>
+                      );
+                    }
+                    if (matches.length === 0) return null;
+                    return (
+                      <ResultGroup accent={group.accent} count={matches.length} key={group.key} title={group.label}>
+                        {matches.map((match) => (
+                          <DocumentMatchRow
+                            key={match.chunk_id}
+                            match={match}
+                            onCopyAnswer={() => copyAnswer(match.content)}
+                            onOpenFullSop={() => openFullSop(match)}
+                            onSelect={() => onSelectDocumentMatch(match)}
+                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                          />
+                        ))}
+                      </ResultGroup>
+                    );
+                  })}
+
+                  {aiSuggestedSops.length > 0 ? (
+                    <ResultGroup count={aiSuggestedSops.length} title="AI suggestion">
+                      {aiSuggestedSops.map((item) => (
+                        <div className="rounded-lg border bg-muted/15 p-3" key={`${item.sop_id}-${item.version}`}>
+                          <div className="flex items-start justify-between gap-3">
+                            <h3 className="min-w-0 text-sm font-semibold leading-snug">{item.title}</h3>
+                            <Badge variant="outline">{Math.round(item.confidence * 100)}%</Badge>
+                          </div>
+                          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                            <Badge variant="secondary">grounded</Badge>
+                            <Badge variant="outline">v{item.version}</Badge>
+                            <Button
+                              className="ms-auto"
+                              onClick={() => onOpenSOP(item.sop_id)}
+                              size="xs"
+                              type="button"
+                              variant="outline"
+                            >
+                              Open source
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </ResultGroup>
+                  ) : null}
+                </>
+              )}
+            </div>
+          </ScrollArea>
+        </section>
+
+        <article className="min-w-0">
+          {selectedDocumentMatch ? (
+            <DocumentMatchDetail match={selectedDocumentMatch} query={query} searchEventId={searchEventId} />
+          ) : selected && selectedVersion ? (
+            <SOPDetail
+              aiSuggestion={aiSuggestion}
+              copied={copied}
+              copyError={copyError}
+              feedbackRate={feedbackRate}
+              onAskAI={onAskAI}
+              onCopyMacro={onCopyMacro}
+              query={query}
+              searchEventId={searchEventId}
+              selected={selected}
+              selectedVersion={selectedVersion}
+            />
+          ) : (
+            <EmptyPanel
+              compact
+              icon={Search}
+              text="Search or choose a SOP/document match to inspect the latest published content."
+              title="Select a result"
+            />
+          )}
+        </article>
       </div>
     </div>
   );
 }
 
-function DocumentMatchButton({
+function ResultGroup({
+  accent,
+  children,
+  count,
+  title,
+}: {
+  accent?: boolean;
+  children: React.ReactNode;
+  count: number;
+  title: string;
+}) {
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between gap-3 px-0.5">
+        <div className="flex items-center gap-2">
+          {accent ? <span className="size-1.5 rounded-full bg-foreground" aria-hidden="true" /> : null}
+          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+        </div>
+        <Badge variant="outline">{count}</Badge>
+      </div>
+      <div className="space-y-1.5">{children}</div>
+    </section>
+  );
+}
+
+function DocumentMatchRow({
   match,
-  onClick,
   onCopyAnswer,
   onOpenFullSop,
+  onSelect,
   selected,
 }: {
   match: RetrievalResult;
-  onClick: () => void;
   onCopyAnswer: () => void;
   onOpenFullSop: () => void;
+  onSelect: () => void;
   selected: boolean;
 }) {
   const scope = String(match.metadata.retrieval_scope ?? "unit");
   const unitType = String(match.metadata.unit_type ?? match.section);
-  const isDocumentLayer = scope === "document" || unitType === "full_sop";
+  const isDocLayer = scope === "document" || unitType === "full_sop";
   const isSourceEvidence = scope === "source_evidence" || unitType === "source_evidence_section" || match.metadata.source_evidence_only === true;
-  const facts = operationalFacts(match.metadata).slice(0, 4);
+  const scopeLabel = isDocLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer";
+
   return (
-    <article
+    <div
       className={cn(
-        "w-full rounded-xl border bg-card p-3 text-left",
-        selected && "border-primary bg-primary/5",
+        "group/row rounded-lg border bg-card text-left transition-colors hover:bg-muted/30 focus-within:ring-3 focus-within:ring-ring/40",
+        selected && "border-foreground/60 bg-muted/40",
       )}
     >
-      <div className="flex items-start justify-between gap-2">
-        <h3 className="min-w-0 text-sm font-semibold leading-5">{match.heading || match.title}</h3>
-        <Badge className="shrink-0" variant={isDocumentLayer ? "secondary" : "outline"}>
-          {isDocumentLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer"}
-        </Badge>
-      </div>
-      <p className="mt-1 truncate text-xs text-muted-foreground">From: {match.title}</p>
-      <MetaLine
-        className="mt-1"
-        items={[
-          `v${match.version_number}`,
-          unitType,
-          String(match.metadata.review_status ?? "approved"),
-          match.rank_source.join(" + "),
-        ]}
-      />
-      <p className="mt-1 line-clamp-2 text-sm leading-5 text-muted-foreground">{match.content}</p>
-      {facts.length > 0 ? (
-        <div className="mt-2 grid gap-x-3 gap-y-1 rounded-md bg-muted/25 px-2 py-1.5 md:grid-cols-2">
-          {facts.map((fact) => (
-            <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-1 text-[11px]" key={fact.label}>
-              <span className="text-muted-foreground">{fact.label}</span>
-              <span className="truncate font-medium">{fact.value}</span>
-            </div>
-          ))}
+      <button
+        aria-pressed={selected}
+        className="block w-full rounded-lg p-3 text-left outline-none"
+        onClick={onSelect}
+        type="button"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <h4 className="min-w-0 text-sm font-semibold leading-snug">{match.heading || match.title}</h4>
+          <Badge className="shrink-0" variant={isDocLayer ? "secondary" : "outline"}>
+            {scopeLabel}
+          </Badge>
         </div>
-      ) : null}
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        <Button className="h-7 px-2" onClick={onClick} size="sm" type="button" variant="outline">
-          Quick answer
+        <p className="mt-1 truncate text-xs text-muted-foreground">From {match.title}</p>
+        <MetaLine
+          className="mt-1"
+          items={[`v${match.version_number}`, unitType, String(match.metadata.review_status ?? "approved"), match.rank_source.join(" + ")]}
+        />
+        <p className="mt-1.5 line-clamp-2 text-sm leading-snug text-muted-foreground">{match.content}</p>
+      </button>
+      <div className="flex items-center gap-1 border-t bg-muted/10 px-2 py-1.5">
+        <Button onClick={onOpenFullSop} size="xs" type="button" variant="ghost">
+          Open source
         </Button>
-        <Button className="h-7 px-2" onClick={onOpenFullSop} size="sm" type="button" variant="outline">
-          Source
-        </Button>
-        <Button className="h-7 px-2" onClick={onCopyAnswer} size="sm" type="button" variant="ghost">
-          <Copy data-icon="inline-start" className="size-3.5" />
+        <Button onClick={onCopyAnswer} size="xs" type="button" variant="ghost">
+          <Copy data-icon="inline-start" className="size-3" />
           Copy
         </Button>
       </div>
-    </article>
+    </div>
   );
 }
 
-function SopResultCard({
+function SopResultRow({
   item,
   onCopyAnswer,
   onOpen,
@@ -409,41 +404,37 @@ function SopResultCard({
   selected: boolean;
 }) {
   return (
-    <article
+    <div
       className={cn(
-        "w-full rounded-xl border bg-card p-3 text-left",
-        selected && "border-primary bg-primary/5",
+        "group/row rounded-lg border bg-card text-left transition-colors hover:bg-muted/30",
+        selected && "border-foreground/60 bg-muted/40",
       )}
     >
-      <div className="flex items-start justify-between gap-3">
-        <h3 className="min-w-0 text-sm font-semibold leading-5">{item.title}</h3>
-      </div>
-      <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">{item.snippet}</p>
-      <MetaLine className="mt-3" items={[`v${item.version}`, item.category, item.vertical, formatDate(item.updated_at)]} />
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Button className="h-7 px-2" onClick={onOpen} size="sm" type="button" variant="outline">
+      <button
+        aria-pressed={selected}
+        className="block w-full rounded-lg p-3 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+        onClick={onOpen}
+        type="button"
+      >
+        <h4 className="min-w-0 text-sm font-semibold leading-snug">{item.title}</h4>
+        <p className="mt-1 line-clamp-2 text-sm leading-snug text-muted-foreground">{item.snippet}</p>
+        <MetaLine className="mt-1.5" items={[`v${item.version}`, item.category, item.vertical, formatDate(item.updated_at)]} />
+      </button>
+      <div className="flex items-center gap-1 border-t bg-muted/10 px-2 py-1.5">
+        <Button onClick={onOpen} size="xs" type="button" variant="ghost">
           Open source
         </Button>
-        <Button className="h-7 px-2" onClick={onCopyAnswer} size="sm" type="button" variant="ghost">
-          <Copy data-icon="inline-start" className="size-3.5" />
-          Copy answer
+        <Button onClick={onCopyAnswer} size="xs" type="button" variant="ghost">
+          <Copy data-icon="inline-start" className="size-3" />
+          Copy
         </Button>
       </div>
-    </article>
-  );
-}
-
-function ResultGroupHeader({ count, title }: { count: number; title: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 px-1">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
-      <Badge variant="outline">{count}</Badge>
     </div>
   );
 }
 
-function groupRetrievalResults(results: RetrievalResult[]) {
-  return results.reduce(
+function groupRetrievalResults(results: RetrievalResult[]): GroupedResults {
+  return results.reduce<GroupedResults>(
     (groups, result) => {
       if (isDocumentLayer(result)) {
         groups.parent.push(result);
@@ -463,16 +454,26 @@ function groupRetrievalResults(results: RetrievalResult[]) {
       return groups;
     },
     {
-      exact: [] as RetrievalResult[],
-      issueRouter: [] as RetrievalResult[],
-      tool: [] as RetrievalResult[],
-      action: [] as RetrievalResult[],
-      parent: [] as RetrievalResult[],
-      sourceEvidence: [] as RetrievalResult[],
-      related: [] as RetrievalResult[],
+      exact: [],
+      issueRouter: [],
+      tool: [],
+      action: [],
+      parent: [],
+      sourceEvidence: [],
+      related: [],
     },
   );
 }
+
+type GroupedResults = {
+  exact: RetrievalResult[];
+  issueRouter: RetrievalResult[];
+  tool: RetrievalResult[];
+  action: RetrievalResult[];
+  parent: RetrievalResult[];
+  sourceEvidence: RetrievalResult[];
+  related: RetrievalResult[];
+};
 
 function isDocumentLayer(match: RetrievalResult) {
   const scope = String(match.metadata.retrieval_scope ?? "unit");
@@ -526,28 +527,37 @@ function isExactRuleMatch(match: RetrievalResult) {
   ].includes(unitType) || match.rank_source.includes("lexical");
 }
 
+function countActiveFilters(filters: FilterState) {
+  return Object.values(filters).filter((value) => value && value !== "all").length;
+}
+
 function DocumentMatchDetail({ match, query, searchEventId }: { match: RetrievalResult; query: string; searchEventId: string }) {
   const scope = String(match.metadata.retrieval_scope ?? "unit");
   const unitType = String(match.metadata.unit_type ?? match.section);
-  const isDocumentLayer = scope === "document" || unitType === "full_sop";
+  const isDocLayer = scope === "document" || unitType === "full_sop";
   const isSourceEvidence = scope === "source_evidence" || unitType === "source_evidence_section" || match.metadata.source_evidence_only === true;
   const facts = operationalFacts(match.metadata);
+  const scopeLabel = isDocLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer";
+
   return (
-    <Card className="rounded-xl">
-      <CardHeader className="space-y-4 border-b pb-4">
-        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+    <article className="rounded-xl border bg-card">
+      <header className="space-y-3 border-b p-5">
+        <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{isDocumentLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer"}</Badge>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge variant={isDocLayer ? "secondary" : "outline"}>{scopeLabel}</Badge>
+              <Badge variant="outline">v{match.version_number}</Badge>
+              <Badge variant="outline">{unitType}</Badge>
             </div>
-            <CardTitle className="text-xl md:text-2xl">{match.heading || match.title}</CardTitle>
-            <CardDescription className="mt-2 max-w-[72ch] text-sm leading-6">
-              From: {match.title}, {match.source_filename}
-            </CardDescription>
-            <MetaLine className="mt-1" items={["approved document", `v${match.version_number}`, unitType]} />
+            <h2 className="mt-2 text-lg font-semibold leading-snug">{match.heading || match.title}</h2>
+            <p className="mt-1 max-w-[65ch] text-sm text-muted-foreground">
+              From {match.title}
+              {match.source_filename ? <span className="text-muted-foreground/70"> · {match.source_filename}</span> : null}
+            </p>
           </div>
-          <div className="rounded-xl border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-            score {match.score.toFixed(4)}
+          <div className="shrink-0 text-right text-[11px] text-muted-foreground">
+            <div>score</div>
+            <div className="font-medium tabular-nums text-foreground">{match.score.toFixed(4)}</div>
           </div>
         </div>
         <div className="grid gap-2 sm:grid-cols-3">
@@ -555,31 +565,36 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
           <Fact icon={ShieldCheck} label="Review" value={String(match.metadata.review_status ?? "approved")} />
           <Fact icon={FileClock} label="Chunk" value={`${match.chunk_index}`} />
         </div>
-      </CardHeader>
-      <CardContent className="space-y-5 pt-4">
+      </header>
+      <div className="space-y-5 p-5">
         <section>
-          <SectionTitle title={isDocumentLayer ? "Document overview" : isSourceEvidence ? "Source evidence section" : "Atomic knowledge unit"} />
-          <p className="mt-3 whitespace-pre-wrap rounded-xl border bg-muted/25 p-4 text-sm leading-7">{match.content}</p>
+          <SectionTitle title={isDocLayer ? "Document overview" : isSourceEvidence ? "Source evidence section" : "Atomic knowledge unit"} />
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-7">{match.content}</p>
         </section>
         {facts.length > 0 ? (
           <section>
             <SectionTitle title="Operational fields" />
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <dl className="mt-2 grid gap-x-6 gap-y-2 md:grid-cols-2">
               {facts.map((fact) => (
-                <GovernanceItem key={fact.label} label={fact.label} value={fact.value} />
+                <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2 text-sm" key={fact.label}>
+                  <dt className="text-muted-foreground">{fact.label}</dt>
+                  <dd className="min-w-0 break-words font-medium">{fact.value}</dd>
+                </div>
               ))}
-            </div>
+            </dl>
           </section>
         ) : null}
-        <section className="grid gap-3 md:grid-cols-2">
-          <GovernanceItem label="Source document" value={match.title} />
-          <GovernanceItem label="Document ID" value={match.document_id} />
-          <GovernanceItem label="Version ID" value={match.version_id} />
-          <GovernanceItem label="Chunk ID" value={match.chunk_id} />
-          <GovernanceItem label="Source file" value={match.source_filename} />
+        <section>
+          <SectionTitle title="Source identifiers" />
+          <dl className="mt-2 grid gap-x-6 gap-y-2 md:grid-cols-2">
+            <GovernanceItem label="Source document" value={match.title} />
+            <GovernanceItem label="Document ID" value={match.document_id} />
+            <GovernanceItem label="Version ID" value={match.version_id} />
+            <GovernanceItem label="Chunk ID" value={match.chunk_id} />
+            <GovernanceItem label="Source file" value={match.source_filename} />
+          </dl>
         </section>
         <OperationalFeedbackButtons
-          className="rounded-xl border bg-muted/15 p-3"
           entityId={match.chunk_id}
           entityType="chunk"
           metadata={{
@@ -592,8 +607,8 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
           sourceTitle={match.title}
           targetTitle={match.heading || match.title}
         />
-      </CardContent>
-    </Card>
+      </div>
+    </article>
   );
 }
 
@@ -655,19 +670,19 @@ function SOPDetail({
   selectedVersion: SOP["current_version"];
 }) {
   return (
-    <Card className="rounded-xl">
-      <CardHeader className="space-y-4 border-b pb-4">
-        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+    <article className="rounded-xl border bg-card">
+      <header className="space-y-3 border-b p-5">
+        <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="mb-2 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               <Badge variant="secondary">{selected.code}</Badge>
-              <Badge variant="secondary">published</Badge>
+              <Badge variant="outline">published</Badge>
+              <Badge variant="outline">v{selectedVersion.version_number}</Badge>
             </div>
-            <CardTitle className="text-xl md:text-2xl">{selected.title}</CardTitle>
-            <CardDescription className="mt-2 max-w-[72ch] text-sm leading-6">{selected.summary}</CardDescription>
-            <MetaLine className="mt-1" items={[`v${selectedVersion.version_number}`]} />
+            <h2 className="mt-2 text-lg font-semibold leading-snug">{selected.title}</h2>
+            <p className="mt-1 max-w-[65ch] text-sm leading-6 text-muted-foreground">{selected.summary}</p>
           </div>
-          <Button onClick={onAskAI} type="button" variant="outline">
+          <Button onClick={onAskAI} size="sm" type="button" variant="outline">
             <Sparkles data-icon="inline-start" className="size-4 text-muted-foreground" />
             Ask AI
           </Button>
@@ -677,57 +692,60 @@ function SOPDetail({
           <Fact icon={ShieldCheck} label="Owner" value={selected.owner_team} />
           <Fact icon={Check} label="Helpful" value={`${feedbackRate || 0}%`} />
         </div>
-      </CardHeader>
-      <CardContent className="space-y-5 pt-4">
+      </header>
+      <div className="space-y-5 p-5">
         <Tabs defaultValue="procedure">
           <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="procedure">Procedure</TabsTrigger>
             <TabsTrigger value="macros">Macros</TabsTrigger>
             <TabsTrigger value="governance">Governance</TabsTrigger>
           </TabsList>
-          <TabsContent className="mt-5 space-y-5" value="procedure">
+          <TabsContent className="mt-4 space-y-5" value="procedure">
             <TextBlock title="When to apply" value={selectedVersion.sections.when_to_apply} />
             <TextBlock title="Input requirements" value={selectedVersion.sections.input_requirements} />
             <section>
               <SectionTitle title="Handling checklist" />
-              <ol className="mt-3 grid gap-2">
+              <ol className="mt-2 space-y-1.5">
                 {selectedVersion.sections.checklist.map((step, index) => (
-                  <li className="grid grid-cols-[2rem_minmax(0,1fr)] gap-3" key={step}>
-                    <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-sm font-semibold text-primary">{index + 1}</span>
-                    <p className="min-w-0 rounded-xl border bg-muted/35 px-3 py-2 text-sm leading-6">{step}</p>
+                  <li className="grid grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-3 text-sm leading-6" key={step}>
+                    <span className="mt-0.5 inline-flex size-6 items-center justify-center rounded-full bg-muted text-xs font-semibold tabular-nums text-muted-foreground">
+                      {index + 1}
+                    </span>
+                    <p className="min-w-0">{step}</p>
                   </li>
                 ))}
               </ol>
             </section>
           </TabsContent>
-          <TabsContent className="mt-5 space-y-3" value="macros">
+          <TabsContent className="mt-4 space-y-2" value="macros">
             {selectedVersion.sections.macro_response.map((macro) => (
-              <div className="rounded-xl border bg-muted/25 p-3" key={macro.title}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="text-sm font-semibold">{macro.title}</h3>
-                    <p className="mt-1 text-sm leading-6 text-muted-foreground">{macro.content}</p>
-                  </div>
-                  <MacroCopyButton macro={macro} onCopyMacro={onCopyMacro} />
+              <div className="flex items-start justify-between gap-3 rounded-lg border bg-muted/15 p-3" key={macro.title}>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold">{macro.title}</h3>
+                  <p className="mt-1 text-sm leading-6 text-muted-foreground">{macro.content}</p>
                 </div>
+                <MacroCopyButton macro={macro} onCopyMacro={onCopyMacro} />
               </div>
             ))}
-            {copied ? <div className="rounded-xl border bg-secondary px-3 py-2 text-sm text-secondary-foreground">Copied: {copied}</div> : null}
-            {copyError ? <div className="rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">{copyError}</div> : null}
+            {copied ? (
+              <div className="rounded-lg border bg-secondary px-3 py-2 text-sm text-secondary-foreground">Copied: {copied}</div>
+            ) : null}
+            {copyError ? (
+              <div className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">{copyError}</div>
+            ) : null}
           </TabsContent>
-          <TabsContent className="mt-5 space-y-4" value="governance">
-            <div className="grid gap-3 md:grid-cols-2">
+          <TabsContent className="mt-4 space-y-3" value="governance">
+            <dl className="grid gap-x-6 gap-y-2 md:grid-cols-2">
               <GovernanceItem label="Change summary" value={selectedVersion.change_summary} />
               <GovernanceItem label="Version ID" value={selectedVersion.id} />
               <GovernanceItem label="Current version pointer" value={selected.current_version_id} />
               <GovernanceItem label="Case reasons" value={selected.case_reasons.join(", ")} />
-            </div>
+            </dl>
           </TabsContent>
         </Tabs>
         {aiSuggestion ? <AISuggestionPanel suggestion={aiSuggestion} /> : null}
         <Separator />
         <OperationalFeedbackButtons
-          className="rounded-xl border bg-muted/15 p-3"
           entityId={selected.current_version_id}
           entityType="sop_version"
           metadata={{
@@ -738,10 +756,10 @@ function SOPDetail({
           sourceTitle={selected.title}
           targetTitle={selected.title}
         />
-        <div className="rounded-xl border bg-muted/20 px-3 py-2">
-          <p className="text-sm text-muted-foreground">Agent script: <span className="text-foreground">{selectedVersion.sections.agent_script}</span></p>
-        </div>
-      </CardContent>
-    </Card>
+        <p className="text-sm text-muted-foreground">
+          Agent script: <span className="text-foreground">{selectedVersion.sections.agent_script}</span>
+        </p>
+      </div>
+    </article>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+
 import {
   IconArrowRight as ArrowRight,
   IconChecklist as Checklist,
@@ -18,7 +19,6 @@ import { EmptyPanel, FilterGrid, SectionTitle } from "@/components/common";
 import { SearchBar } from "@/components/search-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
@@ -134,19 +134,41 @@ export function CaseAssistWorkspace({
     onOpenQuickAnswer(candidate);
   }
 
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const activeFilterCount =
+    Object.values(filters).filter((value) => value && value !== "all").length + (riskLevel && riskLevel !== "all" ? 1 : 0);
+
   return (
     <div className="space-y-4">
-      <div className="space-y-3">
-        <SearchBar
-          actionLabel="Search issue"
-          className="xl:grid-cols-[minmax(0,1fr)_auto]"
-          loading={loading}
-          onChange={setQuery}
-          onSearch={onRunSearch}
-          placeholder="Describe the issue, case reason, customer wording, queue, or policy signal"
-          value={query}
-        />
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px]">
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <SearchBar
+            actionLabel="Search issue"
+            loading={loading}
+            onChange={setQuery}
+            onSearch={onRunSearch}
+            placeholder="Describe the issue, case reason, customer wording, queue, or policy signal"
+            value={query}
+          />
+        </div>
+        <Button
+          aria-expanded={filtersOpen}
+          className="shrink-0"
+          onClick={() => setFiltersOpen((open) => !open)}
+          type="button"
+          variant="outline"
+        >
+          Filters
+          {activeFilterCount > 0 ? (
+            <Badge className="ms-1" variant="secondary">
+              {activeFilterCount}
+            </Badge>
+          ) : null}
+        </Button>
+      </div>
+
+      {filtersOpen ? (
+        <div className="grid gap-3 rounded-lg border bg-muted/15 p-3 xl:grid-cols-[minmax(0,1fr)_180px]">
           <FilterGrid
             collectionOptions={collectionOptions}
             filterOptions={{ ...dynamicFilterOptions, contentType: [{ label: "All approved content", value: "all" }] }}
@@ -168,38 +190,44 @@ export function CaseAssistWorkspace({
             </Select>
           </div>
         </div>
-      </div>
+      ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(23rem,0.82fr)_minmax(36rem,1.18fr)]">
-        <Card className="min-w-0 rounded-xl">
-          <CardHeader className="border-b pb-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <CardTitle>Issue matches</CardTitle>
-                <CardDescription>{loading ? "Searching approved router and SOP units" : `${candidates.length} approved matches`}</CardDescription>
-              </div>
-              <Badge variant="outline">no case ID</Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="pt-3">
-            <ScrollArea className="h-[39rem] pr-3">
-              {!normalizedQuery ? (
-                <EmptyPanel compact icon={Route} text="Type the issue in plain language. Case Assist will compose quick answer, checklist, tools, and related SOPs from approved content." title="Start with the issue" />
-              ) : loading ? (
-                <div className="rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">Searching approved operational index...</div>
-              ) : candidates.length === 0 ? (
-                <div className="rounded-xl border bg-muted/20 p-4 text-sm leading-6 text-muted-foreground">
-                  No approved Case Assist match. Try SOP Lookup for raw keyword search, or submit feedback if this issue should have a router unit.
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {(["direct_sop", "issue_router", "action_template", "tool_link", "parent_sop", "related_sop"] as const).map((role) =>
-                    grouped[role].length ? (
-                      <section className="space-y-2" key={role}>
-                        <div className="flex items-center justify-between px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <div className="grid gap-4 xl:grid-cols-[minmax(22rem,0.78fr)_minmax(36rem,1.22fr)]">
+        <section className="min-w-0">
+          <div className="flex items-baseline justify-between gap-3 pb-2">
+            <h2 className="text-sm font-semibold">
+              {loading ? "Searching…" : `${candidates.length} approved match${candidates.length === 1 ? "" : "es"}`}
+            </h2>
+            <span className="text-xs text-muted-foreground">no case ID</span>
+          </div>
+          <ScrollArea className="h-[calc(100vh-15rem)] pr-3">
+            {!normalizedQuery ? (
+              <EmptyPanel
+                compact
+                icon={Route}
+                text="Type the issue in plain language. Case Assist composes quick answer, checklist, tools, and related SOPs from approved content."
+                title="Start with the issue"
+              />
+            ) : loading ? (
+              <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                Searching approved operational index…
+              </p>
+            ) : candidates.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-4 text-sm leading-6 text-muted-foreground">
+                No approved Case Assist match. Try SOP Lookup for raw keyword search, or submit feedback if this issue should have a router unit.
+              </p>
+            ) : (
+              <div className="space-y-5">
+                {(["direct_sop", "issue_router", "action_template", "tool_link", "parent_sop", "related_sop"] as const).map((role) =>
+                  grouped[role].length ? (
+                    <section className="space-y-2" key={role}>
+                      <div className="flex items-center justify-between gap-3 px-0.5">
+                        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                           {roleLabel(role)}
-                          <Badge variant="outline">{grouped[role].length}</Badge>
-                        </div>
+                        </h3>
+                        <Badge variant="outline">{grouped[role].length}</Badge>
+                      </div>
+                      <div className="space-y-1.5">
                         {grouped[role].map((candidate) => {
                           const rank = candidates.findIndex((item) => item.chunkId === candidate.chunkId) + 1;
                           return (
@@ -211,14 +239,14 @@ export function CaseAssistWorkspace({
                             />
                           );
                         })}
-                      </section>
-                    ) : null,
-                  )}
-                </div>
-              )}
-            </ScrollArea>
-          </CardContent>
-        </Card>
+                      </div>
+                    </section>
+                  ) : null,
+                )}
+              </div>
+            )}
+          </ScrollArea>
+        </section>
 
         <section className="min-w-0">
           {selected && actionCard ? (
@@ -236,7 +264,12 @@ export function CaseAssistWorkspace({
               onOpenTool={onOpenTool}
             />
           ) : (
-            <EmptyPanel icon={Checklist} text="Select a match to see the action card." title="No action card selected" />
+            <EmptyPanel
+              compact
+              icon={Checklist}
+              text="Select a match to see the action card."
+              title="No action card selected"
+            />
           )}
         </section>
       </div>
@@ -255,22 +288,26 @@ function CaseAssistResult({
 }) {
   return (
     <button
+      aria-pressed={selected}
       className={cn(
-        "w-full rounded-xl border bg-card p-3 text-left transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
-        selected && "border-primary bg-primary/5",
+        "w-full rounded-lg border bg-card p-3 text-left transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+        selected && "border-foreground/60 bg-muted/40",
       )}
       onClick={onSelect}
       type="button"
     >
       <div className="flex items-start justify-between gap-3">
-        <h3 className="min-w-0 text-sm font-semibold leading-5">{candidate.title}</h3>
-        <Badge variant="outline">{Math.round(candidate.score * 100) || 1}</Badge>
+        <h3 className="min-w-0 text-sm font-semibold leading-snug">{candidate.title}</h3>
+        <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
+          {Math.round(candidate.score * 100) || 1}
+        </span>
       </div>
-      <p className="mt-1 truncate text-xs text-muted-foreground">{candidate.parentTitle || candidate.collection || roleLabel(candidate.sourceRole)}</p>
-      <p className="mt-2 line-clamp-3 text-sm leading-5 text-muted-foreground">{candidate.content}</p>
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        <Badge variant={candidate.sourceRole === "direct_sop" ? "secondary" : "outline"}>{roleLabel(candidate.sourceRole)}</Badge>
-        {candidate.unitType ? <Badge variant="secondary">{candidate.unitType}</Badge> : null}
+      <p className="mt-1 truncate text-xs text-muted-foreground">
+        {candidate.parentTitle || candidate.collection || roleLabel(candidate.sourceRole)}
+      </p>
+      <p className="mt-1.5 line-clamp-2 text-sm leading-snug text-muted-foreground">{candidate.content}</p>
+      <div className="mt-2 flex flex-wrap gap-1">
+        {candidate.unitType ? <Badge variant="outline">{candidate.unitType}</Badge> : null}
         {candidate.riskLevel ? <Badge variant="outline">{candidate.riskLevel} risk</Badge> : null}
       </div>
     </button>
@@ -303,146 +340,180 @@ function CaseAssistDetail({
   searchEventId: string;
 }) {
   return (
-    <Card className="rounded-xl">
-      <CardHeader className="space-y-4 border-b pb-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+    <article className="rounded-xl border bg-card">
+      <header className="space-y-3 border-b p-5">
+        <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="mb-2 flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               <Badge variant="secondary">Quick answer</Badge>
               <Badge variant="outline">{roleLabel(candidate.sourceRole)}</Badge>
               {candidate.relationStatus ? <Badge variant="outline">{candidate.relationStatus}</Badge> : null}
             </div>
-            <CardTitle className="text-xl">{candidate.title}</CardTitle>
-            <CardDescription className="mt-2 max-w-[72ch] leading-6">
+            <h2 className="mt-2 text-lg font-semibold leading-snug">{candidate.title}</h2>
+            <p className="mt-1 max-w-[65ch] text-sm leading-6 text-muted-foreground">
               {candidate.parentTitle ? `From ${candidate.parentTitle}` : "Approved operational unit"}
-            </CardDescription>
+            </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button className="h-8 rounded-full px-3" onClick={onCopyQuickAnswer} size="sm" type="button" variant="outline">
+          <div className="flex shrink-0 flex-wrap gap-1.5">
+            <Button onClick={onCopyQuickAnswer} size="sm" type="button" variant="outline">
               <Copy data-icon="inline-start" className="size-3.5" />
-              Copy quick answer
+              Copy
             </Button>
-            <Button asChild className="h-8 rounded-full px-3" onClick={onOpenFullSop} size="sm" type="button" variant="outline">
+            <Button asChild onClick={onOpenFullSop} size="sm" type="button" variant="outline">
               <a href={`/lookup?q=${encodeURIComponent(candidate.parentTitle || candidate.title)}&chunk=${encodeURIComponent(candidate.chunkId)}`}>
                 <FileText data-icon="inline-start" className="size-3.5" />
-                Open source
+                Source
               </a>
             </Button>
           </div>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-5 pt-4">
-        <section className="rounded-xl border bg-muted/20 p-4">
+      </header>
+
+      <div className="divide-y">
+        <section className="p-5">
           <SectionTitle title="Approved answer" />
-          <p className="mt-3 whitespace-pre-wrap text-sm leading-7">{candidate.content}</p>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-7">{candidate.content}</p>
         </section>
 
-        <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-          <section className="space-y-3 rounded-xl border p-4">
+        <div className="grid gap-0 lg:grid-cols-[1.2fr_0.8fr] lg:divide-x">
+          <section className="space-y-3 p-5">
             <div className="flex items-center justify-between gap-3">
               <SectionTitle title="Checklist" />
-              <Button className="h-8 rounded-full px-3" onClick={onCopyChecklist} size="sm" type="button" variant="outline">
-                <Copy data-icon="inline-start" className="size-3.5" />
-                Copy checklist
+              <Button onClick={onCopyChecklist} size="xs" type="button" variant="ghost">
+                <Copy data-icon="inline-start" className="size-3" />
+                Copy
               </Button>
             </div>
-            <div className="space-y-2">
+            <ul className="space-y-1.5">
               {actionCard.steps.map((step, index) => (
-                <label className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-2 rounded-lg border bg-muted/15 p-3 text-sm leading-6" key={`${step}-${index}`}>
-                  <input className="mt-1 size-4 accent-primary" type="checkbox" />
+                <li
+                  className="grid grid-cols-[1.25rem_minmax(0,1fr)] items-start gap-3 text-sm leading-6"
+                  key={`${step}-${index}`}
+                >
+                  <input className="mt-1 size-4 accent-foreground" type="checkbox" />
                   <span>{step}</span>
-                </label>
+                </li>
               ))}
-            </div>
+              {!actionCard.steps.length ? (
+                <li className="text-sm text-muted-foreground">No checklist steps in metadata.</li>
+              ) : null}
+            </ul>
           </section>
 
-          <section className="space-y-3 rounded-xl border p-4">
+          <section className="space-y-3 p-5">
             <SectionTitle title="Action card" />
-            <ActionFact icon={ShieldCheck} label="When to apply" values={[actionCard.whenToApply]} />
-            <ActionFact icon={ArrowRight} label="Conditions" values={actionCard.conditions} />
-            <ActionFact icon={FileText} label="Required inputs" values={actionCard.requiredInputs} />
-            <ActionFact icon={Warning} label="Warnings" values={actionCard.warnings} />
+            <div className="space-y-3">
+              <ActionFact icon={ShieldCheck} label="When to apply" values={[actionCard.whenToApply]} />
+              <ActionFact icon={ArrowRight} label="Conditions" values={actionCard.conditions} />
+              <ActionFact icon={FileText} label="Required inputs" values={actionCard.requiredInputs} />
+              <ActionFact icon={Warning} label="Warnings" values={actionCard.warnings} />
+            </div>
           </section>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          <section className="space-y-3 rounded-xl border p-4">
-            <div className="flex items-center gap-2 font-medium">
-              <Wrench className="size-4 text-muted-foreground" />
+        <div className="grid gap-0 lg:grid-cols-3 lg:divide-x">
+          <section className="space-y-2 p-5">
+            <div className="flex items-center gap-2 text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <Wrench className="size-3.5" />
               Tool links
             </div>
-            {relatedTools.length ? relatedTools.map((tool) => (
-              <a
-                className="block rounded-lg border bg-muted/15 p-3 text-sm transition-colors hover:bg-muted/40"
-                href={tool.url}
-                key={tool.id}
-                onClick={() => onOpenTool(tool)}
-                rel="noreferrer"
-                target="_blank"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-medium">{tool.name}</span>
-                  <ExternalLink className="size-3.5 text-muted-foreground" />
-                </div>
-                <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{tool.description || tool.tool_type}</p>
-              </a>
-            )) : <p className="text-sm leading-6 text-muted-foreground">No approved tool is linked to this match yet.</p>}
+            {relatedTools.length ? (
+              <ul className="space-y-1.5">
+                {relatedTools.map((tool) => (
+                  <li key={tool.id}>
+                    <a
+                      className="flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2 text-sm transition-colors hover:bg-muted/40"
+                      href={tool.url}
+                      onClick={() => onOpenTool(tool)}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{tool.name}</span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {tool.description || tool.tool_type}
+                        </span>
+                      </span>
+                      <ExternalLink className="size-3.5 shrink-0 text-muted-foreground" />
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted-foreground">No approved tool is linked.</p>
+            )}
           </section>
 
-          <section className="space-y-3 rounded-xl border p-4">
-            <div className="flex items-center gap-2 font-medium">
-              <Template className="size-4 text-muted-foreground" />
-              Macro/action templates
+          <section className="space-y-2 p-5">
+            <div className="flex items-center gap-2 text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <Template className="size-3.5" />
+              Templates
             </div>
-            {relatedTemplates.length ? relatedTemplates.map((template) => (
-              <div className="rounded-lg border bg-muted/15 p-3" key={template.id}>
-                <div className="font-medium">{template.name}</div>
-                <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{template.description || template.action_type}</p>
-                <Button
-                  className="mt-3 h-8 rounded-full px-3"
-                  disabled={!template.copy_template && !template.description && !template.name}
-                  onClick={() => onCopyActionTemplate(template)}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  <Copy data-icon="inline-start" className="size-3.5" />
-                  Copy
-                </Button>
-              </div>
-            )) : <p className="text-sm leading-6 text-muted-foreground">No approved macro or action template is linked yet.</p>}
+            {relatedTemplates.length ? (
+              <ul className="space-y-1.5">
+                {relatedTemplates.map((template) => (
+                  <li className="flex items-start justify-between gap-3 rounded-md border bg-card px-3 py-2" key={template.id}>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{template.name}</div>
+                      <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+                        {template.description || template.action_type}
+                      </p>
+                    </div>
+                    <Button
+                      className="shrink-0"
+                      disabled={!template.copy_template && !template.description && !template.name}
+                      onClick={() => onCopyActionTemplate(template)}
+                      size="xs"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <Copy className="size-3" />
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted-foreground">No template linked.</p>
+            )}
           </section>
 
-          <section className="space-y-3 rounded-xl border p-4">
-            <div className="flex items-center gap-2 font-medium">
-              <FileText className="size-4 text-muted-foreground" />
+          <section className="space-y-2 p-5">
+            <div className="flex items-center gap-2 text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <FileText className="size-3.5" />
               Related SOPs
             </div>
-            {actionCard.relatedSops.length ? actionCard.relatedSops.map((title) => (
-              <div className="rounded-lg border bg-muted/15 p-3 text-sm" key={title}>
-                {title}
-              </div>
-            )) : <p className="text-sm leading-6 text-muted-foreground">No related SOP target is linked yet.</p>}
+            {actionCard.relatedSops.length ? (
+              <ul className="space-y-1 text-sm">
+                {actionCard.relatedSops.map((title) => (
+                  <li className="truncate" key={title}>
+                    {title}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted-foreground">No related SOP target.</p>
+            )}
           </section>
         </div>
 
-        <OperationalFeedbackButtons
-          className="rounded-xl border bg-muted/15 p-3"
-          entityId={candidate.chunkId}
-          entityType="chunk"
-          metadata={{
-            search_event_id: searchEventId,
-            source_role: candidate.sourceRole,
-            unit_type: candidate.unitType,
-            document_id: candidate.documentId,
-            version_id: candidate.versionId,
-          }}
-          sampleQuery={textFrom(query)}
-          sourceTitle={candidate.parentTitle}
-          targetTitle={candidate.title}
-        />
-      </CardContent>
-    </Card>
+        <div className="p-5">
+          <OperationalFeedbackButtons
+            entityId={candidate.chunkId}
+            entityType="chunk"
+            metadata={{
+              search_event_id: searchEventId,
+              source_role: candidate.sourceRole,
+              unit_type: candidate.unitType,
+              document_id: candidate.documentId,
+              version_id: candidate.versionId,
+            }}
+            sampleQuery={textFrom(query)}
+            sourceTitle={candidate.parentTitle}
+            targetTitle={candidate.title}
+          />
+        </div>
+      </div>
+    </article>
   );
 }
 

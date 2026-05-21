@@ -259,25 +259,20 @@ export function ResultButton({
 }) {
   return (
     <button
+      aria-pressed={selected}
       className={cn(
-        "w-full rounded-xl border bg-card p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
-        selected && "border-primary bg-primary/5",
+        "group/result w-full rounded-lg border bg-card p-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+        selected && "border-foreground/60 bg-muted/50",
       )}
       onClick={onClick}
       type="button"
     >
-      <div className="flex items-start justify-between gap-3">
-        <h3 className="min-w-0 text-sm font-semibold leading-5">
-          {item.title}
-        </h3>
-      </div>
-      <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
-        {item.snippet}
-      </p>
-      <MetaLine className="mt-3" items={[`v${item.version}`, item.category, item.vertical, formatDate(item.updated_at)]} />
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
+      <h3 className="min-w-0 text-sm font-semibold leading-5">{item.title}</h3>
+      <p className="mt-1.5 line-clamp-2 text-sm leading-5 text-muted-foreground">{item.snippet}</p>
+      <MetaLine className="mt-2" items={[`v${item.version}`, item.category, item.vertical, formatDate(item.updated_at)]} />
+      <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-muted">
         <div
-          className="h-full rounded-full bg-primary"
+          className="h-full rounded-full bg-foreground/70"
           style={{ width: `${Math.max(item.confidence * 100, 8)}%` }}
         />
       </div>
@@ -287,13 +282,13 @@ export function ResultButton({
 
 export function AISuggestionPanel({ suggestion }: { suggestion: AISuggestion }) {
   return (
-    <section className="rounded-2xl border bg-muted/30 p-4">
-      <div className="flex items-center gap-2">
-        <Bot className="size-4 text-muted-foreground" />
-        <h3 className="text-sm font-semibold">Grounded AI suggestion</h3>
+    <section className="rounded-xl border bg-muted/20 p-4">
+      <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <Bot className="size-3.5" />
+        Grounded AI suggestion
       </div>
       <p className="mt-2 text-sm leading-6">{suggestion.answer}</p>
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="mt-3 flex flex-wrap gap-1.5">
         {(suggestion.citations ?? []).map((citation) => (
           <Badge
             key={`${citation.version_id}-${citation.section}`}
@@ -303,10 +298,7 @@ export function AISuggestionPanel({ suggestion }: { suggestion: AISuggestion }) 
           </Badge>
         ))}
         {(suggestion.warnings ?? []).map((warning) => (
-          <Badge
-            key={warning}
-            variant="outline"
-          >
+          <Badge key={warning} variant="outline">
             {warning}
           </Badge>
         ))}
@@ -315,11 +307,41 @@ export function AISuggestionPanel({ suggestion }: { suggestion: AISuggestion }) 
   );
 }
 
-export function Metric({ label, value }: { label: string; value: number | string }) {
+export function Metric({
+  hint,
+  label,
+  size = "md",
+  tone = "default",
+  value,
+}: {
+  hint?: string;
+  label: string;
+  size?: "sm" | "md" | "lg";
+  tone?: "default" | "warning" | "danger";
+  value: number | string;
+}) {
+  const valueSize = size === "lg" ? "text-2xl" : size === "sm" ? "text-base" : "text-lg";
+  const toneClass = tone === "danger" ? "text-destructive" : "text-foreground";
   return (
-    <div className="rounded-xl border bg-card px-3 py-2 shadow-sm">
-      <div className="text-base font-semibold tabular-nums">{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
+    <div className="min-w-0">
+      <dt className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <span className="truncate">{label}</span>
+        {tone === "warning" || tone === "danger" ? (
+          <span
+            aria-hidden="true"
+            className={cn(
+              "inline-block size-1.5 rounded-full",
+              tone === "danger" ? "bg-destructive" : "bg-amber-500",
+            )}
+          />
+        ) : null}
+      </dt>
+      <dd className={cn("mt-1 font-semibold tabular-nums leading-tight", valueSize, toneClass)}>
+        {value}
+      </dd>
+      {hint ? (
+        <p className="mt-0.5 truncate text-[11px] leading-tight text-muted-foreground">{hint}</p>
+      ) : null}
     </div>
   );
 }
@@ -334,7 +356,7 @@ export function Fact({
   value: string;
 }) {
   return (
-    <div className="rounded-xl border bg-muted/25 p-3">
+    <div className="rounded-lg border bg-muted/20 p-3">
       <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
         <Icon className="size-3.5" />
         {label}
@@ -348,7 +370,7 @@ export function TextBlock({ title, value }: { title: string; value: string }) {
   return (
     <section>
       <SectionTitle title={title} />
-      <p className="mt-2 rounded-xl border bg-muted/25 px-3 py-2 text-sm leading-6 text-muted-foreground">
+      <p className="mt-2 text-sm leading-6 text-muted-foreground">
         {value}
       </p>
     </section>
@@ -356,7 +378,7 @@ export function TextBlock({ title, value }: { title: string; value: string }) {
 }
 
 export function SectionTitle({ title }: { title: string }) {
-  return <h3 className="text-sm font-semibold">{title}</h3>;
+  return <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>;
 }
 
 export function GovernanceItem({
@@ -367,7 +389,7 @@ export function GovernanceItem({
   value: string;
 }) {
   return (
-    <div className="rounded-xl border bg-muted/25 p-3">
+    <div className="min-w-0">
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
       <p className="mt-1 break-words text-sm">{value}</p>
     </div>
@@ -376,10 +398,10 @@ export function GovernanceItem({
 
 export function EmptyResults({ query }: { query: string }) {
   return (
-    <div className="rounded-xl border border-dashed p-6 text-center">
-      <Search className="mx-auto size-8 text-muted-foreground" />
+    <div className="rounded-lg border border-dashed p-6 text-center">
+      <Search className="mx-auto size-7 text-muted-foreground/60" strokeWidth={1.5} />
       <h3 className="mt-3 text-sm font-semibold">No reliable source matched</h3>
-      <p className="mt-1 text-sm text-muted-foreground">
+      <p className="mt-1 text-sm leading-6 text-muted-foreground">
         Try a tag, CRM case reason, or add a governed synonym for{" "}
         <span className="font-medium text-foreground">{query}</span>.
       </p>
@@ -401,14 +423,14 @@ export function EmptyPanel({
   return (
     <div
       className={cn(
-        "grid place-items-center rounded-2xl border border-dashed p-8 text-center",
-        !compact && "min-h-[32rem]",
+        "grid place-items-center rounded-xl border border-dashed p-8 text-center",
+        !compact && "min-h-[20rem]",
       )}
     >
       <div className="max-w-sm">
-        <Icon className="mx-auto size-9 text-muted-foreground" />
-        <h2 className="mt-3 text-base font-semibold">{title}</h2>
-        <p className="mt-1 text-sm text-muted-foreground">{text}</p>
+        <Icon className="mx-auto size-8 text-muted-foreground/60" strokeWidth={1.5} />
+        <h2 className="mt-3 text-sm font-semibold">{title}</h2>
+        <p className="mt-1 text-sm leading-6 text-muted-foreground">{text}</p>
       </div>
     </div>
   );
@@ -470,8 +492,8 @@ export function StatusBadge({ status }: { status: string }) {
 
 export function Rule({ icon: Icon, text }: { icon: ElementType; text: string }) {
   return (
-    <div className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2">
-      <Icon className="size-3.5 text-primary" />
+    <div className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm">
+      <Icon className="size-3.5 text-muted-foreground" />
       <span>{text}</span>
     </div>
   );
@@ -479,19 +501,19 @@ export function Rule({ icon: Icon, text }: { icon: ElementType; text: string }) 
 
 export function ResultSkeleton() {
   return (
-    <>
+    <div className="space-y-2">
       {[0, 1, 2].map((item) => (
-        <div className="rounded-xl border p-3" key={item}>
+        <div className="rounded-lg border p-3" key={item}>
           <Skeleton className="h-4 w-3/4" />
-          <Skeleton className="mt-3 h-3 w-full" />
+          <Skeleton className="mt-2.5 h-3 w-full" />
           <Skeleton className="mt-2 h-3 w-2/3" />
-          <div className="mt-4 flex gap-2">
-            <Skeleton className="h-5 w-16 rounded-full" />
-            <Skeleton className="h-5 w-20 rounded-full" />
+          <div className="mt-3 flex gap-2">
+            <Skeleton className="h-4 w-16 rounded-full" />
+            <Skeleton className="h-4 w-20 rounded-full" />
           </div>
         </div>
       ))}
-    </>
+    </div>
   );
 }
 

@@ -147,15 +147,20 @@ export function SynonymsWorkspace({
           </CardHeader>
           <CardContent className="pt-4">
             <ScrollArea className="h-[42rem] pr-3">
-              <div className="space-y-3">
-                {synonyms.length === 0 ? (
-                  <EmptyPanel icon={WandSparkles} title="No groups" text="Create or generate a synonym group to begin governance." compact />
-                ) : (
-                  synonyms.map((group) => (
+              {synonyms.length === 0 ? (
+                <EmptyPanel
+                  compact
+                  icon={WandSparkles}
+                  text="Create or generate a synonym group to begin governance."
+                  title="No groups"
+                />
+              ) : (
+                <ul className="divide-y">
+                  {synonyms.map((group) => (
                     <SynonymGroupCard busyKey={busyKey} group={group} key={group.id} onTransition={onTransition} />
-                  ))
-                )}
-              </div>
+                  ))}
+                </ul>
+              )}
             </ScrollArea>
           </CardContent>
         </Card>
@@ -167,40 +172,50 @@ export function SynonymsWorkspace({
           </CardHeader>
           <CardContent className="pt-4">
             <ScrollArea className="h-[42rem] pr-3">
-              <div className="space-y-3">
-                {suggestions.length === 0 ? (
-                  <EmptyPanel icon={Sparkles} title="No pending suggestions" text="Run failed searches, then generate candidates from retrieval logs." compact />
-                ) : (
-                  suggestions.map((suggestion) => (
-                    <div className="rounded-xl border bg-muted/20 p-3" key={suggestion.id}>
+              {suggestions.length === 0 ? (
+                <EmptyPanel
+                  compact
+                  icon={Sparkles}
+                  text="Run failed searches, then generate candidates from retrieval logs."
+                  title="No pending suggestions"
+                />
+              ) : (
+                <ul className="divide-y">
+                  {suggestions.map((suggestion) => (
+                    <li className="space-y-2 py-3 first:pt-0" key={suggestion.id}>
                       <div className="flex items-start justify-between gap-3">
-                        <div>
+                        <div className="min-w-0">
                           <Badge variant="outline">{suggestion.source}</Badge>
-                          <h3 className="mt-2 text-sm font-semibold">{suggestion.canonical_key || "Needs canonical key"}</h3>
+                          <h3 className="mt-1.5 text-sm font-semibold leading-snug">
+                            {suggestion.canonical_key || "Needs canonical key"}
+                          </h3>
                         </div>
                         <Badge variant="secondary">{Math.round(suggestion.confidence * 100)}%</Badge>
                       </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
+                      <div className="flex flex-wrap gap-1">
                         {suggestion.suggested_terms.map((term) => (
-                          <Badge key={term} variant="outline">{term}</Badge>
+                          <Badge key={term} variant="outline">
+                            {term}
+                          </Badge>
                         ))}
                       </div>
-                      <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                      <p className="text-xs leading-5 text-muted-foreground">
                         {String(suggestion.evidence.reason ?? "analytics candidate")}
                       </p>
                       <Button
-                        className="mt-3 w-full justify-center"
+                        className="w-full justify-center"
                         disabled={busyKey === `accept-${suggestion.id}`}
                         onClick={() => onAcceptSuggestion(suggestion)}
+                        size="sm"
                         type="button"
                         variant="outline"
                       >
                         Accept into review
                       </Button>
-                    </div>
-                  ))
-                )}
-              </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </ScrollArea>
           </CardContent>
         </Card>
@@ -219,42 +234,61 @@ function SynonymGroupCard({
   onTransition: (group: SynonymGroup, action: "submit-review" | "approve" | "archive") => void;
 }) {
   return (
-    <article className="rounded-xl border bg-card p-4">
+    <li className="space-y-2 py-3 first:pt-0">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
             <StatusBadge status={group.status} />
             <Badge variant="outline">{group.synonym_type}</Badge>
             {group.domain ? <Badge variant="outline">{group.domain}</Badge> : null}
           </div>
-          <h3 className="mt-2 text-sm font-semibold">{group.canonical_key}</h3>
-          <p className="mt-1 text-xs text-muted-foreground">
+          <h3 className="mt-1.5 text-sm font-semibold leading-snug">{group.canonical_key}</h3>
+          <p className="text-xs text-muted-foreground">
             {group.approved_by ? `Approved by ${group.approved_by}` : `Created by ${group.created_by}`}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5">
           {group.status === "draft" ? (
-            <Button disabled={busyKey === `${group.id}-submit-review`} onClick={() => onTransition(group, "submit-review")} size="sm" type="button" variant="outline">
+            <Button
+              disabled={busyKey === `${group.id}-submit-review`}
+              onClick={() => onTransition(group, "submit-review")}
+              size="xs"
+              type="button"
+              variant="outline"
+            >
               Submit
             </Button>
           ) : null}
           {group.status === "in_review" ? (
-            <Button disabled={busyKey === `${group.id}-approve`} onClick={() => onTransition(group, "approve")} size="sm" type="button">
+            <Button
+              disabled={busyKey === `${group.id}-approve`}
+              onClick={() => onTransition(group, "approve")}
+              size="xs"
+              type="button"
+            >
               Approve
             </Button>
           ) : null}
           {group.status !== "archived" ? (
-            <Button disabled={busyKey === `${group.id}-archive`} onClick={() => onTransition(group, "archive")} size="sm" type="button" variant="outline">
+            <Button
+              disabled={busyKey === `${group.id}-archive`}
+              onClick={() => onTransition(group, "archive")}
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
               Archive
             </Button>
           ) : null}
         </div>
       </div>
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-1">
         {group.terms.map((term) => (
-          <Badge key={`${group.id}-${term.normalized_term}`} variant="outline">{term.normalized_term}</Badge>
+          <Badge key={`${group.id}-${term.normalized_term}`} variant="outline">
+            {term.normalized_term}
+          </Badge>
         ))}
       </div>
-    </article>
+    </li>
   );
 }

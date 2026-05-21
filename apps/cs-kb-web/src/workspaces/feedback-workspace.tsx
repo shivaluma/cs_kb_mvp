@@ -100,19 +100,24 @@ export function FeedbackWorkspace({
             <CardTitle>Usage metrics</CardTitle>
             <CardDescription>Operational proxies until real case runtime integration exists.</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3 pt-4">
-            {(analytics?.metrics ?? []).map((metric) => (
-              <div className="rounded-xl border bg-card p-3" key={metric.key}>
-                <div className="flex items-start justify-between gap-3">
+          <CardContent className="pt-4">
+            <ul className="divide-y">
+              {(analytics?.metrics ?? []).map((metric) => (
+                <li className="flex items-start justify-between gap-4 py-3 first:pt-0 last:pb-0" key={metric.key}>
                   <div className="min-w-0">
                     <div className="text-sm font-semibold">{metric.label}</div>
-                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{metric.detail}</p>
+                    <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{metric.detail}</p>
+                    {metric.target ? (
+                      <p className="mt-1 text-[11px] text-muted-foreground">Target: {metric.target}</p>
+                    ) : null}
                   </div>
                   <Badge variant={metric.tone === "warning" ? "outline" : "secondary"}>{metric.value}</Badge>
-                </div>
-                {metric.target ? <div className="mt-2 text-[11px] text-muted-foreground">Target: {metric.target}</div> : null}
-              </div>
-            ))}
+                </li>
+              ))}
+              {!analytics?.metrics?.length ? (
+                <li className="py-6 text-center text-sm text-muted-foreground">No usage metrics yet.</li>
+              ) : null}
+            </ul>
           </CardContent>
         </Card>
       </div>

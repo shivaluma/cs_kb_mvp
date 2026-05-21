@@ -67,10 +67,12 @@ Primary responsibilities:
 - Lookup/search experience for CS users.
 - Document upload/review/publish UI for Ops users.
 - Extraction unit editing.
+- Case Assist and materialized KB index browsing.
 - Retrieval lab.
 - Chat workspace.
 - Synonym governance.
 - Relations/collections/tools/feedback dashboards.
+- Product event capture for lookup, chat, macros, tools, and feedback.
 
 Current routes are declared in `apps/cs-kb-web/src/router.tsx`:
 
@@ -78,6 +80,7 @@ Current routes are declared in `apps/cs-kb-web/src/router.tsx`:
 - lookup
 - chat
 - case assist
+- issue router redirect to case assist
 - tools
 - collections
 - documents
@@ -86,7 +89,7 @@ Current routes are declared in `apps/cs-kb-web/src/router.tsx`:
 - synonyms
 - retrieval lab
 
-The frontend does not own business rules. It builds forms, manages local UI state, calls the Go API, and invalidates React Query caches after mutations.
+The frontend does not own business rules. It builds forms, manages local UI state, calls the Go API, records operational events, and invalidates React Query caches after mutations.
 
 ### Go API
 
@@ -125,8 +128,11 @@ Primary responsibilities:
 - Enforce review and publish readiness gates.
 - Run hybrid retrieval over published knowledge.
 - Expand queries with governed synonyms.
+- Maintain table-driven Vietnamese/domain configuration for extraction, taxonomy, reranking, sheet mapping, relation patterns, and labels.
+- Discover vocabulary candidates from uploads and no-result queries for Ops review.
 - Materialize KB index workbooks into collections, issue routers, tool links, and action templates.
-- Handle grounded chat over published retrieval sources.
+- Handle grounded chat over published retrieval sources, including session storage and model-route selection.
+- Aggregate feedback and operational analytics from audit/retrieval/chat events.
 
 Key files:
 
@@ -134,10 +140,12 @@ Key files:
 - `app/ingestion.py`: upload extraction pipeline and document-type-specific structuring.
 - `app/repository.py`: Postgres schema, persistence, publish gates, retrieval SQL, relations, KB index materialization.
 - `app/retrieval.py`: query expansion, lexical/vector/hybrid retrieval, reranking, relation expansion.
+- `app/chat.py`: multi-stage chat retrieval, source grouping, model routing, evidence confidence.
 - `app/text_processing.py`: file parsing, chunking, normalization, source extraction helpers.
 - `app/openrouter.py`: model calls for extraction/refinement/chat helpers.
 - `app/workflow_v3.py`: workflow graph-primary extraction support and validation helpers.
 - `app/embedding.py`: embedding abstraction with local deterministic fallback.
+- `app/domain_defaults.py` and `app/vietnamese_defaults.py`: seeded CS/Vietnamese domain config defaults.
 - `app/schemas.py`: Pydantic schemas and normalizers.
 
 ## 3. Two Knowledge Domains
@@ -178,12 +186,18 @@ Tables:
 - `extraction_stage_outputs`
 - `ai_document_relations`
 - `ai_retrieval_events`
+- `ai_chat_events`
+- `ai_chat_sessions`
+- `ai_chat_messages`
 - `ai_audit_events`
 - KB index tables such as `kb_collections`, `kb_collection_items`, `tool_links`, `action_templates`
+- domain config tables such as `taxonomy_terms`, `taxonomy_groups`, `extraction_signals`, `rerank_rules`, `sheet_mapping_rules`, `relation_patterns`, `display_labels`, and `taxonomy_term_candidates`
 
 Owned mostly by the Python AI service.
 
 This domain is for messy source files: PDF, DOCX, Excel, text, markdown, and image-like assets. It treats every uploaded file as evidence that must be extracted, reviewed, versioned, and only then made visible to production retrieval.
+
+Python also owns a table-driven domain configuration layer. Defaults are seeded from code for local bootstrapping, but active terms, extraction signals, relation patterns, sheet mapping, rerank weights, and display labels are read from Postgres and cached briefly. This lets relevance and extraction behavior change through governed data instead of prompt/code edits.
 
 Production retrieval only reads chunks that satisfy strict gates:
 
@@ -440,6 +454,7 @@ ai_structure
 plan
 reduce
 refine
+vocabulary_discovery
 verify
 commit
 ```
@@ -462,6 +477,7 @@ Common artifact types:
 - `reconcile_suggestions`
 - `refinement_report`
 - `draft_units`
+- `vocabulary_candidates`
 - `verification_report`
 - `publish_readiness_report`
 
@@ -739,6 +755,52 @@ Only approved relations expand production retrieval. Suggested, unresolved, reje
 
 Relation-expanded rows are clearly marked through `rank_source = approved_relation`.
 
+### 7.10 Grounded Chat Retrieval
+
+SOP Chat does not simply call retrieval and summarize the first results. `app/chat.py` builds a wider evidence bundle:
+
+```txt
+direct SOP/policy units
+  + KB index units such as issue routers, tool links, and action templates
+  + approved relation targets
+  + parent full-SOP context
+  + recent session chunk context
+  -> semantic dedupe
+  -> chat-stage reranking
+  -> grouped sources and evidence confidence
+```
+
+Important decisions:
+
+- Chat always forces published retrieval filters.
+- Issue-router, tool-link, and action-template units are context/navigation signals. They are not enough by themselves to answer policy.
+- A grounded answer requires at least one policy source role: `direct_sop` or `related_sop`.
+- If retrieval finds only index/tool/action context, Python returns a governance warning instead of producing a policy answer.
+- Recent chat history and session summaries can help resolve intent, but they are not policy evidence.
+- Unresolved dependencies on cited chunks add warnings and tell the user not to rely on the missing dependency until a relation is approved.
+
+Model route selection is explicit:
+
+- `simple`
+- `policy`
+- `high_risk`
+- `complex`
+
+`auto` currently falls back to the simple route. Policy, high-risk, and complex routes use stricter grounding instructions. If the primary chat model fails and a fallback model is configured, Python retries with strict grounding and reports the fallback warning.
+
+### 7.11 Domain Configuration And Vocabulary Governance
+
+Python has a governed configuration layer for domain behavior:
+
+- `taxonomy_terms` and `taxonomy_groups` drive chat intent detection, audience/channel terms, follow-up markers, and exclusive-context handling.
+- `extraction_signals` tune deterministic extraction signals for conditions, actions, warnings, and risk.
+- `sheet_mapping_rules` decide how workbook sheets map to collections and index types.
+- `relation_patterns` detect explicit dependencies such as requires, references, uses macro/tool, and action-template relations.
+- `rerank_rules` provide editable weights for retrieval and chat-stage ranking.
+- `display_labels` control source-role labels and ordering.
+
+The service seeds defaults from `domain_defaults.py` / `vietnamese_defaults.py`, then reads active rows from Postgres with a short cache. Uploads and zero-result retrievals can create `taxonomy_term_candidates`. Risky vocabulary candidates can mark chunks `publish_blocked` until reviewed or activated through the config endpoints.
+
 ## 8. Go API Search/Indexing Deep Dive
 
 ### 8.1 Go As Gateway
@@ -760,7 +822,7 @@ Proxied to Python:
 - AI retrieval;
 - chat;
 - synonym governance;
-- collections/tools/action templates;
+- collections/issue router/tools/action templates;
 - relations;
 - feedback/ops analytics.
 
@@ -830,6 +892,10 @@ The web app is organized around pages and workspaces:
 
 Important flows:
 
+### Dashboard Page
+
+`DashboardPage` combines document summaries, feedback queue data, and ops analytics. It is a triage surface, not a rules engine.
+
 ### Lookup Page
 
 `LookupPage`:
@@ -839,6 +905,21 @@ Important flows:
 - displays legacy SOP results and semantic document matches;
 - opens structured SOP detail through Go;
 - can ask AI for a suggestion based on selected SOP.
+
+### Case Assist Page
+
+`CaseAssistPage` is the operational issue-to-action surface.
+
+It:
+
+- debounces a natural-language issue query;
+- records search and issue-router events;
+- calls the dedicated issue-router endpoint for approved router units;
+- also calls Go mixed search with semantic retrieval enabled;
+- merges router units, semantic SOP chunks, tools, and action templates into a Case Assist candidate model;
+- lets users copy quick answers, checklists, and action templates while recording the action.
+
+The `/issue-router` route currently redirects to `/case-assist`, but the issue-router API remains a distinct Python-owned materialized KB surface.
 
 ### Documents Page
 
@@ -856,6 +937,10 @@ Important flows:
 
 The page is UI orchestration only. Publish rules live in Python.
 
+### Collections And Tools Pages
+
+Collections, tools, and action templates are materialized from reviewed KB index units at publish time. The UI browses those approved records and records opens/copies as audit events for analytics.
+
 ### Retrieval Page
 
 `RetrievalPage`:
@@ -868,7 +953,15 @@ This is a debug/evaluation surface for retrieval quality.
 
 ### Chat Page
 
-Chat routes proxy to Python. Python grounds answers in retrieval results and stores chat sessions/messages/events. Model route selection is configured in the AI service.
+Chat routes proxy to Python. Python stores sessions/messages/events, performs multi-stage retrieval, chooses the configured model route, and only answers from cited published policy sources.
+
+### Feedback, Relations, And Synonyms Pages
+
+These are governance surfaces:
+
+- Feedback groups `feedback_submitted` audit events by source, entity, and feedback type. It suggests next actions, but it does not directly edit SOPs.
+- Relations lets Ops assign, reject, or archive dependencies. Only approved relations expand production retrieval.
+- Synonyms governs query expansion and can sync active synonym payloads into Meilisearch.
 
 ## 10. Storage Architecture
 
@@ -896,6 +989,15 @@ The Python service ensures/uses:
 - `ai_chat_messages`
 - `ai_audit_events`
 - `taxonomy_intents`
+- `taxonomy_terms`
+- `taxonomy_groups`
+- `taxonomy_group_terms`
+- `extraction_signals`
+- `taxonomy_term_candidates`
+- `rerank_rules`
+- `sheet_mapping_rules`
+- `relation_patterns`
+- `display_labels`
 - `search_synonym_groups`
 - `search_synonym_terms`
 - `search_synonym_suggestions`
@@ -942,6 +1044,9 @@ These are the most important correctness rules:
 - Page-only PDF source refs need acknowledgement.
 - High-risk policy/workflow docs need governance metadata.
 - AI answers and retrieval results must include citations.
+- Chat may use issue-router/tool/action context for navigation, but policy answers require a direct or approved-related SOP source.
+- Recent chat history can clarify intent, but it is not policy evidence.
+- Risky unknown vocabulary can block publish until reviewed.
 - AI downtime should not break basic keyword SOP lookup.
 
 ## 12. Failure Modes And Expected Behavior
@@ -979,6 +1084,14 @@ When a remote embedding provider is configured, embedding failures are surfaced 
 ### Relation Is Unresolved
 
 Unresolved/suggested relations do not expand production retrieval. For high-risk scopes, unresolved required/blocking relations can prevent publish.
+
+### Chat Finds Only Index Context
+
+Issue-router, tool-link, and action-template units can help users navigate, but they do not establish policy by themselves. If chat retrieval finds only those units, Python returns `index_context_without_policy_source` and asks Ops to link or approve a SOP source before using the context as an answer.
+
+### Vocabulary Discovery Finds Risky Unknown Terms
+
+Uploads and no-result queries can create vocabulary candidates. If a risky candidate is found during extraction, affected chunks can be publish-blocked with `vocabulary_risk_candidate_requires_review` until Ops rejects, activates, or otherwise resolves the candidate.
 
 ## 13. How To Debug Common Problems
 
@@ -1132,7 +1245,8 @@ The current architecture is strong for an MVP, but these gaps remain:
 - Production embeddings require backfilling existing `ai_chunks` when changing dimensions or model.
 - OCR/layout extraction for scanned PDFs/images is still a future improvement.
 - Workflow review UI can be expanded for richer reviewer assignment/comments/history.
-- Search analytics exists, but more product events should be captured: view, click, copy macro, helpful feedback.
+- Analytics are audit-derived MVP metrics; production should formalize event schemas, identity, retention, and reporting.
+- Domain/vocabulary config has service APIs and persistence, but needs a fuller Ops UI for review and activation workflows.
 - A future unified ranker could merge legacy SOP and AI chunk results into one calibrated list.
 
 ## 18. One-Sentence Summary
