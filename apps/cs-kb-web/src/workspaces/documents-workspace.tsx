@@ -413,12 +413,13 @@ export function DocumentsWorkspace({
   const selectedVersionCanBulkReview = Boolean(selectedVersion) && canEditSelectedVersion && pendingReviewCount > 0 && !bulkReviewBlocked;
   const selectedVersionCanBulkReviewAtomic = Boolean(selectedVersion) && canEditSelectedVersion && pendingAtomicReviewCount > 0 && !bulkReviewBlocked;
   const filteredDocumentLayerUnits = documentLayerUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, false));
+  const filteredSourceEvidenceUnits = sourceEvidenceUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, false));
   const filteredWorkflowGraphUnits = workflowGraphUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, false));
   const filteredAtomicUnits = atomicUnits.filter((unit) => unitMatchesReviewFilter(unit, reviewFilter, true));
   const focusedRequiredUnits = requiredUnitFocus
     ? filteredAtomicUnits.filter((unit) => requiredUnitFocus.types.includes(unit.unit_type))
     : [];
-  const filteredUnitsCount = filteredDocumentLayerUnits.length + filteredWorkflowGraphUnits.length + filteredAtomicUnits.length;
+  const filteredUnitsCount = filteredDocumentLayerUnits.length + filteredSourceEvidenceUnits.length + filteredWorkflowGraphUnits.length + filteredAtomicUnits.length;
   const reviewEmptyState = reviewFilterEmptyState(reviewFilter);
   const canBulkApproveVisible = Boolean(selectedVersion) && canEditSelectedVersion && filteredUnitsCount > 0 && !bulkReviewBlocked;
   const bulkApproveScope: "all" | "atomic" = reviewFilter === "atomic" ? "atomic" : "all";
@@ -1247,6 +1248,30 @@ export function DocumentsWorkspace({
                               Document layer
                             </div>
                             {filteredDocumentLayerUnits.map((unit) => (
+                              <ExtractionReviewEditor
+                                defaultEffectiveFrom={defaultEffectiveFrom}
+                                documentGovernance={selectedDocumentGovernance}
+                                disabled={!canEditSelectedVersion}
+                                deleting={deletingUnitId === unit.unit_id}
+                                key={unit.unit_id}
+                                onDelete={onDeleteExtractionUnit}
+                                onSave={onUpdateExtractionUnit}
+                                saving={savingUnitId === unit.unit_id}
+                                unit={unit}
+                              />
+                            ))}
+                          </section>
+                        ) : null}
+                        {filteredSourceEvidenceUnits.length ? (
+                          <section className="space-y-2">
+                            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                              <FileText className="size-4" />
+                              Source evidence units
+                            </div>
+                            <div className="rounded-lg border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
+                              These source-backed units are counted in review filters because they can block publish when degraded or unapproved.
+                            </div>
+                            {filteredSourceEvidenceUnits.map((unit) => (
                               <ExtractionReviewEditor
                                 defaultEffectiveFrom={defaultEffectiveFrom}
                                 documentGovernance={selectedDocumentGovernance}
