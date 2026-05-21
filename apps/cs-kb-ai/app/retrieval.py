@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import re
 import time
+import unicodedata
+import logging
 from typing import Any
 
 from app.embedding import EmbeddingProviderError, embed_text
 from app import repository
 from app.search_labels import is_bad_search_label
-from app.schemas import Citation, RetrievalRequest, RetrievalResponse, RetrievalResult
+from app.schemas import Citation, CollectionRef, DisplayBlock, DisplayContext, DisplayHighlight, RetrievalRequest, RetrievalResponse, RetrievalResult, SourceAnchor
 from app.text_processing import expand_query, normalize_phrase
 
 
 RRF_K = 60
+logger = logging.getLogger("cs_kb_ai.retrieval")
 
 
 def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True) -> RetrievalResponse:
@@ -121,7 +125,19 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         len(fused_rows),
         started_at,
     )
-    results = [to_result(row) for row in fused_rows]
+    try:
+        display_context_rows = repository.display_context_rows_for_results(fused_rows)
+    except Exception as exc:
+        logger.warning("source_parent_missing", extra={"event": "source_parent_missing", "reason": f"display_context_query_failed:{exc.__class__.__name__}"})
+        warnings.append("display_context_unavailable")
+        display_context_rows = {}
+    enriched_rows = []
+    for row in fused_rows:
+        item = dict(row)
+        item["display_context"] = build_display_context(item, display_context_rows.get(row_context_key(item)))
+        enriched_rows.append(item)
+
+    results = [to_result(row) for row in enriched_rows]
     return RetrievalResponse(
         query=request.query,
         normalized_query=normalized_query,
@@ -341,6 +357,11 @@ def to_result(row: dict[str, Any]) -> RetrievalResult:
     metadata = row.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
+    display_context = row.get("display_context")
+    if not isinstance(display_context, DisplayContext):
+        display_context = build_display_context(row, None)
+    primary_highlight = display_context.highlights[0] if display_context.highlights else None
+    source_anchor = display_context.source_anchor or source_anchor_for_row(row, metadata)
 
     citation = Citation(
         document_id=str(row["document_id"]),
@@ -351,6 +372,16 @@ def to_result(row: dict[str, Any]) -> RetrievalResult:
         title=str(row["title"]),
         version_number=int(row["version_number"]),
         source_filename=str(row["source_filename"]),
+        sop_id=str(row["document_id"]),
+        document_title=display_context.document_title or str(row["title"]),
+        section_id=display_context.section_id,
+        section_title=display_context.section_title,
+        category=display_context.category,
+        collections=display_context.collections,
+        highlight_start_offset=primary_highlight.start_offset if primary_highlight else None,
+        highlight_end_offset=primary_highlight.end_offset if primary_highlight else None,
+        chunk_text=str(row["content"]),
+        source_anchor=source_anchor,
     )
 
     return RetrievalResult(
@@ -370,7 +401,488 @@ def to_result(row: dict[str, Any]) -> RetrievalResult:
         rank_source=list(dict.fromkeys(row.get("rank_source") or [])),
         metadata=metadata,
         citation=citation,
+        sop_id=citation.document_id,
+        document_title=citation.document_title,
+        section_id=citation.section_id,
+        section_title=citation.section_title,
+        category=citation.category,
+        collections=citation.collections,
+        chunk_text=str(row["content"]),
+        highlight_start_offset=citation.highlight_start_offset,
+        highlight_end_offset=citation.highlight_end_offset,
+        display_context=display_context,
+        source_anchor=source_anchor,
     )
+
+
+def row_context_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (str(row.get("document_id") or ""), str(row.get("version_id") or ""))
+
+
+def build_display_context(row: dict[str, Any], context: dict[str, Any] | None) -> DisplayContext:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    document_metadata = context.get("document_metadata") if context and isinstance(context.get("document_metadata"), dict) else {}
+    chunks = context.get("chunks") if context and isinstance(context.get("chunks"), list) else []
+    source_chunk_id = str(row.get("chunk_id") or "")
+    source_text = str(row.get("content") or "")
+    source_section = str(row.get("section") or "")
+    source_heading = str(row.get("heading") or "")
+    document_title = str((context or {}).get("document_title") or row.get("title") or "")
+    version_number = int((context or {}).get("version_number") or row.get("version_number") or 0)
+    source_anchor = source_anchor_for_row(row, metadata)
+
+    if not context:
+        log_source_resolution("source_parent_missing", row, source_anchor, "display_context_not_loaded")
+        return missing_source_context(row, metadata, source_anchor, "parent_missing", "display_context_not_loaded")
+
+    context_version_id = str(context.get("version_id") or "")
+    if context_version_id and context_version_id != str(row.get("version_id") or ""):
+        log_source_resolution("source_version_mismatch", row, source_anchor, f"{row.get('version_id')}!={context_version_id}")
+        return missing_source_context(row, metadata, source_anchor, "version_mismatch", "retrieval_version_does_not_match_display_context")
+
+    is_table_row = is_table_row_chunk(row)
+    resolved_table_row = False
+    if is_table_row:
+        table_chunks = matching_table_chunks(chunks, source_anchor)
+        if table_chunks:
+            display_unit_type = "table_section"
+            blocks = [block_from_chunk(chunk) for chunk in table_chunks]
+            display_content = "\n".join(block_text(chunk) for chunk in table_chunks).strip()
+            highlight = DisplayHighlight(
+                chunk_id=source_chunk_id,
+                text=source_text,
+                match_strategy="table_row_anchor",
+                source_anchor=source_anchor,
+            )
+            resolved_table_row = True
+        else:
+            log_source_resolution("source_parent_missing", row, source_anchor, "table_parent_not_found")
+            return missing_source_context(row, metadata, source_anchor, "parent_missing", "table_parent_not_found")
+
+    source_chunks = [chunk for chunk in chunks if is_source_evidence_chunk(chunk)]
+    source_match = None if is_table_row else matching_source_section(source_chunks, source_chunk_id, source_text)
+    if resolved_table_row:
+        pass
+    elif source_match:
+        source_chunk, highlight = source_match
+        display_unit_type = "source_section"
+        display_content = str(source_chunk.get("content") or "")
+        blocks = [block_from_chunk(source_chunk)]
+        source_heading = str(source_chunk.get("heading") or source_heading)
+    else:
+        section_chunks = [
+            chunk for chunk in chunks
+            if section_id_for_chunk(chunk) == source_anchor.section_id
+            and not is_source_evidence_chunk(chunk)
+            and not is_document_layer_chunk(chunk)
+        ]
+        if section_chunks:
+            display_unit_type = "section"
+            display_content = "\n\n".join(block_text(chunk) for chunk in section_chunks).strip()
+            blocks = [block_from_chunk(chunk) for chunk in section_chunks]
+            highlight = display_highlight(source_chunk_id, source_text, display_content, source_anchor)
+        elif source_chunks:
+            display_unit_type = "source_document"
+            display_content = "\n\n".join(block_text(chunk) for chunk in source_chunks).strip()
+            blocks = [block_from_chunk(chunk) for chunk in source_chunks]
+            highlight = display_highlight(source_chunk_id, source_text, display_content, source_anchor)
+        else:
+            log_source_resolution("source_parent_missing", row, source_anchor, "section_parent_not_found")
+            return missing_source_context(row, metadata, source_anchor, "parent_missing", "section_parent_not_found")
+
+    collections = collection_refs(metadata, document_metadata)
+    category = first_text(metadata.get("category"), document_metadata.get("category"))
+    highlight_failed = highlight.start_offset is None and highlight.end_offset is None and highlight.match_strategy != "table_row_anchor"
+    log_source_resolution("source_highlight_failed" if highlight_failed else "source_highlight_success", row, source_anchor, highlight.match_strategy)
+
+    return DisplayContext(
+        display_unit_type=display_unit_type,
+        document_id=str(row.get("document_id") or ""),
+        document_title=document_title,
+        section_id=source_anchor.section_id,
+        section_title=source_heading or source_section,
+        category=category,
+        collections=collections,
+        version_number=version_number or None,
+        last_updated=(context or {}).get("updated_at"),
+        published_at=(context or {}).get("published_at"),
+        effective_date=first_text(metadata.get("effective_from"), metadata.get("effective_date"), document_metadata.get("effective_from")),
+        content=display_content,
+        blocks=blocks,
+        highlights=[highlight],
+        fallback_excerpt=source_text if highlight_failed else "",
+        highlight_failed=highlight_failed,
+        source_anchor=source_anchor,
+        source_resolution_status="resolved",
+    )
+
+
+def matching_source_section(source_chunks: list[dict[str, Any]], chunk_id: str, chunk_text: str) -> tuple[dict[str, Any], DisplayHighlight] | None:
+    for source_chunk in source_chunks:
+        highlight = display_highlight(chunk_id, chunk_text, str(source_chunk.get("content") or ""), source_anchor_for_row(source_chunk))
+        if highlight.start_offset is not None and highlight.end_offset is not None:
+            return source_chunk, highlight
+    return None
+
+
+def missing_source_context(row: dict[str, Any], metadata: dict[str, Any], source_anchor: SourceAnchor, status: str, reason: str) -> DisplayContext:
+    return DisplayContext(
+        display_unit_type="missing_source",
+        document_id=str(row.get("document_id") or ""),
+        document_title=str(row.get("title") or ""),
+        section_id=source_anchor.section_id,
+        section_title=first_text(metadata.get("section_title"), row.get("heading"), row.get("section")),
+        category=first_text(metadata.get("category")),
+        version_number=int(row.get("version_number") or 0) or None,
+        content="Source section could not be loaded for this published result.",
+        blocks=[],
+        highlights=[],
+        fallback_excerpt="",
+        highlight_failed=True,
+        source_anchor=source_anchor,
+        source_resolution_status=status,
+        source_resolution_reason=reason,
+    )
+
+
+def log_source_resolution(event: str, row: dict[str, Any], source_anchor: SourceAnchor, reason: str) -> None:
+    payload = {
+        "event": event,
+        "chunk_id": str(row.get("chunk_id") or ""),
+        "sop_id": source_anchor.sop_id,
+        "sop_version_id": source_anchor.sop_version_id,
+        "section_id": source_anchor.section_id,
+        "table_id": source_anchor.table_id,
+        "row_index": source_anchor.row_index,
+        "reason": reason,
+    }
+    if event in {"source_highlight_failed", "source_parent_missing", "source_version_mismatch", "source_permission_denied"}:
+        logger.warning(event, extra=payload)
+    else:
+        logger.info(event, extra=payload)
+
+
+def is_document_layer_chunk(chunk: dict[str, Any]) -> bool:
+    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    unit_type = str(metadata.get("unit_type") or chunk.get("section") or "")
+    scope = str(metadata.get("retrieval_scope") or "")
+    return scope == "document" or unit_type == "full_sop"
+
+
+def is_source_evidence_chunk(chunk: dict[str, Any]) -> bool:
+    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    unit_type = str(metadata.get("unit_type") or chunk.get("section") or "")
+    scope = str(metadata.get("retrieval_scope") or "")
+    return scope == "source_evidence" or unit_type == "source_evidence_section" or metadata.get("source_evidence_only") is True
+
+
+def block_from_chunk(chunk: dict[str, Any]) -> DisplayBlock:
+    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    return DisplayBlock(
+        id=str(chunk.get("chunk_id") or chunk.get("id") or ""),
+        title=str(chunk.get("heading") or ""),
+        content=str(chunk.get("content") or ""),
+        unit_type=str(metadata.get("unit_type") or chunk.get("section") or ""),
+        chunk_id=str(chunk.get("chunk_id") or chunk.get("id") or ""),
+        block_type=block_type_for_chunk(chunk),
+        source_anchor=source_anchor_for_row(chunk),
+    )
+
+
+def block_text(chunk: dict[str, Any]) -> str:
+    heading = str(chunk.get("heading") or "").strip()
+    content = str(chunk.get("content") or "").strip()
+    return f"{heading}\n{content}".strip() if heading and heading not in content[:160] else content
+
+
+def display_highlight(chunk_id: str, chunk_text: str, display_content: str, source_anchor: SourceAnchor | None = None) -> DisplayHighlight:
+    anchor = source_anchor or SourceAnchor()
+    if not chunk_text or not display_content:
+        return DisplayHighlight(chunk_id=chunk_id, text=chunk_text, match_strategy="unmatched", source_anchor=anchor)
+
+    exact_start = display_content.find(chunk_text)
+    if exact_start >= 0:
+        return DisplayHighlight(
+            chunk_id=chunk_id,
+            text=chunk_text,
+            start_offset=exact_start,
+            end_offset=exact_start + len(chunk_text),
+            match_strategy="exact",
+            source_anchor=anchor,
+        )
+
+    normalized_range = normalized_match_range(display_content, chunk_text)
+    if normalized_range:
+        return DisplayHighlight(
+            chunk_id=chunk_id,
+            text=chunk_text,
+            start_offset=normalized_range[0],
+            end_offset=normalized_range[1],
+            match_strategy="normalized",
+            source_anchor=anchor,
+        )
+
+    paragraph_range = paragraph_match_range(display_content, chunk_text)
+    if paragraph_range:
+        return DisplayHighlight(
+            chunk_id=chunk_id,
+            text=chunk_text,
+            start_offset=paragraph_range[0],
+            end_offset=paragraph_range[1],
+            match_strategy="paragraph",
+            source_anchor=anchor,
+        )
+
+    return DisplayHighlight(chunk_id=chunk_id, text=chunk_text, match_strategy="unmatched", source_anchor=anchor)
+
+
+def normalized_match_range(haystack: str, needle: str) -> tuple[int, int] | None:
+    normalized_haystack, haystack_map = normalized_match_text(haystack)
+    normalized_needle, _needle_map = normalized_match_text(needle)
+    normalized_needle = normalized_needle.strip()
+    if not normalized_haystack or not normalized_needle:
+        return None
+    start = normalized_haystack.find(normalized_needle)
+    if start < 0:
+        return None
+    end = start + len(normalized_needle)
+    mapped_start = haystack_map[start]
+    mapped_end = haystack_map[end - 1] + 1
+    return mapped_start, mapped_end
+
+
+def normalized_match_text(value: str) -> tuple[str, list[int]]:
+    chars: list[str] = []
+    mapping: list[int] = []
+    last_space = False
+    for index, char in enumerate(value):
+        normalized = unicodedata.normalize("NFKD", char)
+        normalized = "".join(item for item in normalized if not unicodedata.combining(item)).replace("đ", "d").replace("Đ", "D").lower()
+        if re.match(r"[a-z0-9]", normalized):
+            chars.append(normalized)
+            mapping.append(index)
+            last_space = False
+        elif char.isspace() or not re.match(r"[a-z0-9]", normalized):
+            if not last_space and chars:
+                chars.append(" ")
+                mapping.append(index)
+                last_space = True
+    if chars and chars[-1] == " ":
+        chars.pop()
+        mapping.pop()
+    return "".join(chars), mapping
+
+
+def paragraph_match_range(haystack: str, needle: str) -> tuple[int, int] | None:
+    target_tokens = {token for token in normalized_match_text(needle)[0].split(" ") if len(token) > 2}
+    if not target_tokens:
+        return None
+    best: tuple[int, int, int] | None = None
+    for start, end in paragraph_ranges(haystack):
+        paragraph_tokens = set(normalized_match_text(haystack[start:end])[0].split(" "))
+        score = len(target_tokens.intersection(paragraph_tokens))
+        if best is None or score > best[2]:
+            best = (start, end, score)
+    threshold = min(5, max(2, (len(target_tokens) + 1) // 2))
+    if best and best[2] >= threshold:
+        return best[0], best[1]
+    return None
+
+
+def paragraph_ranges(value: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for match in re.finditer(r"\n\s*\n", value):
+        end = match.start()
+        if value[start:end].strip():
+            ranges.append(trim_range(value, start, end))
+        start = match.end()
+    if value[start:].strip():
+        ranges.append(trim_range(value, start, len(value)))
+    return ranges or [(0, len(value))]
+
+
+def trim_range(value: str, start: int, end: int) -> tuple[int, int]:
+    while start < end and value[start].isspace():
+        start += 1
+    while end > start and value[end - 1].isspace():
+        end -= 1
+    return start, end
+
+
+def source_anchor_for_row(row: dict[str, Any], metadata: dict[str, Any] | None = None) -> SourceAnchor:
+    item_metadata = metadata if isinstance(metadata, dict) else row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source_refs = item_metadata.get("source_refs") if isinstance(item_metadata.get("source_refs"), list) else []
+    source_ref = next((ref for ref in source_refs if isinstance(ref, dict)), {})
+    table_index = first_text(
+        item_metadata.get("table_id"),
+        item_metadata.get("source_table_id"),
+        item_metadata.get("source_table_index"),
+        item_metadata.get("table_index"),
+        source_ref.get("table_id"),
+        source_ref.get("table_index"),
+        source_ref.get("sheet"),
+    )
+    row_index = first_int(
+        item_metadata.get("row_index"),
+        item_metadata.get("source_row_index"),
+        item_metadata.get("row_number"),
+        source_ref.get("row_index"),
+        source_ref.get("row_start"),
+    )
+    section_title = first_text(
+        item_metadata.get("section_title"),
+        last_text(item_metadata.get("section_path")),
+        last_text(source_ref.get("heading_path")),
+        row.get("heading"),
+        row.get("section"),
+    )
+    section_id = first_text(
+        item_metadata.get("section_id"),
+        item_metadata.get("source_section_id"),
+        source_ref.get("section_id"),
+        stable_section_id(last_text(item_metadata.get("section_path"))),
+        stable_section_id(last_text(source_ref.get("heading_path"))),
+        row.get("section"),
+        stable_section_id(section_title),
+        row.get("chunk_id"),
+    )
+    table_id = ""
+    if table_index:
+        table_id = str(table_index)
+        if table_id.isdigit():
+            table_id = f"table_{table_id}"
+        elif source_ref.get("sheet"):
+            table_id = f"sheet_{stable_section_id(table_id)}"
+    block_id = first_text(
+        item_metadata.get("block_id"),
+        source_ref.get("block_id"),
+        f"{table_id}_row_{row_index}" if table_id and row_index is not None else "",
+        f"{section_id}_block",
+    )
+    column_key = first_text(
+        item_metadata.get("column_key"),
+        item_metadata.get("source_column_key"),
+        first_column(source_ref.get("column_names")),
+    )
+    return SourceAnchor(
+        sop_id=str(row.get("document_id") or item_metadata.get("sop_id") or ""),
+        sop_version_id=str(row.get("version_id") or item_metadata.get("sop_version_id") or ""),
+        section_id=section_id,
+        block_id=block_id,
+        table_id=table_id,
+        row_index=row_index,
+        column_key=column_key,
+    )
+
+
+def is_table_row_chunk(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "")
+    source_ref_quality = str(metadata.get("source_ref_quality") or "")
+    source_refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    has_table_ref = any(
+        isinstance(ref, dict)
+        and (
+            (ref.get("table_index") is not None and ref.get("row_index") is not None)
+            or (ref.get("sheet") and (ref.get("row_start") is not None or ref.get("row_end") is not None))
+        )
+        for ref in source_refs
+    )
+    return (
+        unit_type in {"table_row", "rule_table_row", "candidate_table_row"}
+        or source_ref_quality in {"table_row", "sheet_row"}
+        or metadata.get("source_row_index") is not None
+        or metadata.get("row_number") is not None
+        or has_table_ref
+    )
+
+
+def matching_table_chunks(chunks: list[dict[str, Any]], source_anchor: SourceAnchor) -> list[dict[str, Any]]:
+    if not source_anchor.table_id:
+        return []
+    matching = [
+        chunk for chunk in chunks
+        if not is_document_layer_chunk(chunk)
+        and not is_source_evidence_chunk(chunk)
+        and source_anchor_for_row(chunk).table_id == source_anchor.table_id
+    ]
+    matching.sort(key=lambda chunk: source_anchor_for_row(chunk).row_index or int(chunk.get("chunk_index") or 0))
+    return matching
+
+
+def section_id_for_chunk(chunk: dict[str, Any]) -> str:
+    return source_anchor_for_row(chunk).section_id
+
+
+def block_type_for_chunk(chunk: dict[str, Any]) -> str:
+    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    if is_table_row_chunk(chunk):
+        return "table_row"
+    if metadata.get("block_type"):
+        return str(metadata.get("block_type"))
+    if metadata.get("retrieval_scope") == "source_evidence":
+        return "source_section"
+    return "paragraph"
+
+
+def collection_refs(metadata: dict[str, Any], document_metadata: dict[str, Any]) -> list[CollectionRef]:
+    values: list[CollectionRef] = []
+    for source in (metadata, document_metadata):
+        slug = first_text(source.get("collection_slug"), source.get("collection"))
+        name = first_text(source.get("collection_name"), slug)
+        if slug or name:
+            ref = CollectionRef(id=slug or name, name=name or slug)
+            if ref.id and all(existing.id != ref.id for existing in values):
+                values.append(ref)
+    return values
+
+
+def section_id_for_row(row: dict[str, Any], metadata: dict[str, Any]) -> str:
+    return first_text(metadata.get("section_id"), metadata.get("source_section_id"), row.get("section"), row.get("chunk_id"))
+
+
+def stable_section_id(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = normalized_match_text(text)[0].replace(" ", "_")
+    normalized = re.sub(r"[^a-z0-9_]+", "", normalized).strip("_")
+    return normalized[:80]
+
+
+def first_int(*values: Any) -> int | None:
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def last_text(value: Any) -> str:
+    if isinstance(value, list):
+        for item in reversed(value):
+            text = str(item or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def first_column(value: Any) -> str:
+    if isinstance(value, list):
+        return first_text(*value)
+    return ""
+
+
+def first_text(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, list):
+            value = next((item for item in value if str(item or "").strip()), "")
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def is_reliable(row: dict[str, Any]) -> bool:

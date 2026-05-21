@@ -3,7 +3,6 @@ import {
   IconCheck as Check,
   IconCopy as Copy,
   IconFileTime as FileClock,
-  IconFileText as FileText,
   IconAdjustmentsHorizontal as SlidersHorizontal,
   IconSearch as Search,
   IconShieldCheck as ShieldCheck,
@@ -16,6 +15,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SearchBar } from "@/components/search-bar";
+import { SourceContextCard } from "@/components/source-context-card";
 import {
   AISuggestionPanel,
   EmptyPanel,
@@ -31,22 +31,9 @@ import {
 } from "@/components/common";
 import { OperationalFeedbackButtons } from "@/components/operational-feedback";
 import { formatDate } from "@/lib/format";
+import { groupResultsByDisplaySource, type SourceDisplayGroup } from "@/lib/source-display";
 import { cn } from "@/lib/utils";
 import type { AISuggestion, FilterOption, FilterState, Macro, RetrievalResult, SearchResult, SOP } from "@/types";
-
-const GROUP_ORDER: Array<{
-  key: keyof GroupedResults;
-  label: string;
-  accent?: boolean;
-}> = [
-  { key: "exact", label: "Exact rule match", accent: true },
-  { key: "issueRouter", label: "Issue router" },
-  { key: "tool", label: "Tool link" },
-  { key: "action", label: "Action template" },
-  { key: "parent", label: "Document overview" },
-  { key: "sourceEvidence", label: "Source evidence" },
-  { key: "related", label: "Related SOP" },
-];
 
 export function LookupWorkspace({
   aiSuggestion,
@@ -99,18 +86,23 @@ export function LookupWorkspace({
 }) {
   const canSearch = query.trim().length > 0;
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const groupedResults = groupRetrievalResults(semanticResults);
+  const groupedSourceResults = groupResultsByDisplaySource(semanticResults);
   const aiSuggestedSops = aiSuggestion?.suggested_sops ?? [];
   const selectedCitationMatches =
     selectedDocumentMatch && !semanticResults.some((result) => result.chunk_id === selectedDocumentMatch.chunk_id)
       ? [selectedDocumentMatch]
       : [];
-  const visibleCount = listSource.length + semanticResults.length + selectedCitationMatches.length + aiSuggestedSops.length;
+  const selectedCitationGroups = groupResultsByDisplaySource(selectedCitationMatches);
+  const selectedSourceGroup = selectedDocumentMatch
+    ? groupResultsByDisplaySource([...semanticResults, ...selectedCitationMatches]).find((group) =>
+        group.results.some((result) => result.chunk_id === selectedDocumentMatch.chunk_id),
+      ) ?? groupResultsByDisplaySource([selectedDocumentMatch])[0]
+    : null;
+  const visibleCount = listSource.length + groupedSourceResults.length + selectedCitationGroups.length + aiSuggestedSops.length;
   const activeFilterCount = countActiveFilters(filters);
 
   function openFullSop(match: RetrievalResult) {
-    const parentMatch = semanticResults.find((item) => item.document_id === match.document_id && isDocumentLayer(item));
-    onSelectDocumentMatch(parentMatch ?? match);
+    onSelectDocumentMatch(match);
   }
 
   function copyAnswer(text: string) {
@@ -185,68 +177,53 @@ export function LookupWorkspace({
               ) : (
                 <>
                   {selectedCitationMatches.length > 0 ? (
-                    <ResultGroup count={selectedCitationMatches.length} title="Selected citation">
+                    <ResultGroup count={selectedCitationGroups.length} title="Selected citation">
                       <p className="text-xs leading-5 text-muted-foreground">
                         Opened from Chat or a citation link. Search results may still be loading or may not match this exact title.
                       </p>
-                      {selectedCitationMatches.map((match) => (
-                        <DocumentMatchRow
-                          key={match.chunk_id}
-                          match={match}
-                          onCopyAnswer={() => copyAnswer(match.content)}
-                          onOpenFullSop={() => openFullSop(match)}
-                          onSelect={() => onSelectDocumentMatch(match)}
-                          selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
+                      {selectedCitationGroups.map((group) => (
+                        <SourceContextCard
+                          compact
+                          group={group}
+                          key={group.id}
+                          onCopyExcerpt={copyAnswer}
+                          onOpenSource={() => openFullSop(group.results[0])}
+                          onSelect={() => onSelectDocumentMatch(group.results[0])}
+                          selected={Boolean(selectedDocumentMatch && group.results.some((result) => result.chunk_id === selectedDocumentMatch.chunk_id))}
                         />
                       ))}
                     </ResultGroup>
                   ) : null}
 
-                  {GROUP_ORDER.map((group) => {
-                    const matches = groupedResults[group.key];
-                    if (group.key === "parent") {
-                      const total = matches.length + listSource.length;
-                      if (total === 0) return null;
-                      return (
-                        <ResultGroup accent={group.accent} count={total} key={group.key} title={group.label}>
-                          {matches.map((match) => (
-                            <DocumentMatchRow
-                              key={match.chunk_id}
-                              match={match}
-                              onCopyAnswer={() => copyAnswer(match.content)}
-                              onOpenFullSop={() => onSelectDocumentMatch(match)}
-                              onSelect={() => onSelectDocumentMatch(match)}
-                              selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                            />
-                          ))}
-                          {listSource.map((item) => (
-                            <SopResultRow
-                              item={item}
-                              key={item.sop_id}
-                              onCopyAnswer={() => copyAnswer(item.snippet)}
-                              onOpen={() => onOpenSOP(item.sop_id)}
-                              selected={selected?.id === item.sop_id}
-                            />
-                          ))}
-                        </ResultGroup>
-                      );
-                    }
-                    if (matches.length === 0) return null;
-                    return (
-                      <ResultGroup accent={group.accent} count={matches.length} key={group.key} title={group.label}>
-                        {matches.map((match) => (
-                          <DocumentMatchRow
-                            key={match.chunk_id}
-                            match={match}
-                            onCopyAnswer={() => copyAnswer(match.content)}
-                            onOpenFullSop={() => openFullSop(match)}
-                            onSelect={() => onSelectDocumentMatch(match)}
-                            selected={selectedDocumentMatch?.chunk_id === match.chunk_id}
-                          />
-                        ))}
-                      </ResultGroup>
-                    );
-                  })}
+                  {groupedSourceResults.length ? (
+                    <ResultGroup accent count={groupedSourceResults.length} title="Published source matches">
+                      {groupedSourceResults.map((group) => (
+                        <SourceContextCard
+                          compact
+                          group={group}
+                          key={group.id}
+                          onCopyExcerpt={copyAnswer}
+                          onOpenSource={() => openFullSop(group.results[0])}
+                          onSelect={() => onSelectDocumentMatch(group.results[0])}
+                          selected={Boolean(selectedDocumentMatch && group.results.some((result) => result.chunk_id === selectedDocumentMatch.chunk_id))}
+                        />
+                      ))}
+                    </ResultGroup>
+                  ) : null}
+
+                  {listSource.length ? (
+                    <ResultGroup count={listSource.length} title="SOP catalog matches">
+                      {listSource.map((item) => (
+                        <SopResultRow
+                          item={item}
+                          key={item.sop_id}
+                          onCopyAnswer={() => copyAnswer(item.snippet)}
+                          onOpen={() => onOpenSOP(item.sop_id)}
+                          selected={selected?.id === item.sop_id}
+                        />
+                      ))}
+                    </ResultGroup>
+                  ) : null}
 
                   {aiSuggestedSops.length > 0 ? (
                     <ResultGroup count={aiSuggestedSops.length} title="AI suggestion">
@@ -280,8 +257,8 @@ export function LookupWorkspace({
         </section>
 
         <article className="min-w-0">
-          {selectedDocumentMatch ? (
-            <DocumentMatchDetail match={selectedDocumentMatch} query={query} searchEventId={searchEventId} />
+          {selectedDocumentMatch && selectedSourceGroup ? (
+            <DocumentMatchDetail group={selectedSourceGroup} query={query} searchEventId={searchEventId} />
           ) : selected && selectedVersion ? (
             <SOPDetail
               aiSuggestion={aiSuggestion}
@@ -334,64 +311,6 @@ function ResultGroup({
   );
 }
 
-function DocumentMatchRow({
-  match,
-  onCopyAnswer,
-  onOpenFullSop,
-  onSelect,
-  selected,
-}: {
-  match: RetrievalResult;
-  onCopyAnswer: () => void;
-  onOpenFullSop: () => void;
-  onSelect: () => void;
-  selected: boolean;
-}) {
-  const scope = String(match.metadata.retrieval_scope ?? "unit");
-  const unitType = String(match.metadata.unit_type ?? match.section);
-  const isDocLayer = scope === "document" || unitType === "full_sop";
-  const isSourceEvidence = scope === "source_evidence" || unitType === "source_evidence_section" || match.metadata.source_evidence_only === true;
-  const scopeLabel = isDocLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer";
-
-  return (
-    <div
-      className={cn(
-        "group/row rounded-lg border bg-card text-left transition-colors hover:bg-muted/30 focus-within:ring-3 focus-within:ring-ring/40",
-        selected && "border-foreground/60 bg-muted/40",
-      )}
-    >
-      <button
-        aria-pressed={selected}
-        className="block w-full rounded-lg p-3 text-left outline-none"
-        onClick={onSelect}
-        type="button"
-      >
-        <div className="flex items-start justify-between gap-2">
-          <h4 className="min-w-0 text-sm font-semibold leading-snug">{match.heading || match.title}</h4>
-          <Badge className="shrink-0" variant={isDocLayer ? "secondary" : "outline"}>
-            {scopeLabel}
-          </Badge>
-        </div>
-        <p className="mt-1 truncate text-xs text-muted-foreground">From {match.title}</p>
-        <MetaLine
-          className="mt-1"
-          items={[`v${match.version_number}`, unitType, String(match.metadata.review_status ?? "approved"), match.rank_source.join(" + ")]}
-        />
-        <p className="mt-1.5 line-clamp-2 text-sm leading-snug text-muted-foreground">{match.content}</p>
-      </button>
-      <div className="flex items-center gap-1 border-t bg-muted/10 px-2 py-1.5">
-        <Button onClick={onOpenFullSop} size="xs" type="button" variant="ghost">
-          Open source
-        </Button>
-        <Button onClick={onCopyAnswer} size="xs" type="button" variant="ghost">
-          <Copy data-icon="inline-start" className="size-3" />
-          Copy
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 function SopResultRow({
   item,
   onCopyAnswer,
@@ -433,111 +352,13 @@ function SopResultRow({
   );
 }
 
-function groupRetrievalResults(results: RetrievalResult[]): GroupedResults {
-  return results.reduce<GroupedResults>(
-    (groups, result) => {
-      if (isDocumentLayer(result)) {
-        groups.parent.push(result);
-      } else if (isSourceEvidenceMatch(result)) {
-        groups.sourceEvidence.push(result);
-      } else if (isIssueRouterMatch(result)) {
-        groups.issueRouter.push(result);
-      } else if (isToolMatch(result)) {
-        groups.tool.push(result);
-      } else if (isActionTemplateMatch(result)) {
-        groups.action.push(result);
-      } else if (isExactRuleMatch(result)) {
-        groups.exact.push(result);
-      } else {
-        groups.related.push(result);
-      }
-      return groups;
-    },
-    {
-      exact: [],
-      issueRouter: [],
-      tool: [],
-      action: [],
-      parent: [],
-      sourceEvidence: [],
-      related: [],
-    },
-  );
-}
-
-type GroupedResults = {
-  exact: RetrievalResult[];
-  issueRouter: RetrievalResult[];
-  tool: RetrievalResult[];
-  action: RetrievalResult[];
-  parent: RetrievalResult[];
-  sourceEvidence: RetrievalResult[];
-  related: RetrievalResult[];
-};
-
-function isDocumentLayer(match: RetrievalResult) {
-  const scope = String(match.metadata.retrieval_scope ?? "unit");
-  const unitType = String(match.metadata.unit_type ?? match.section);
-  return scope === "document" || unitType === "full_sop";
-}
-
-function isSourceEvidenceMatch(match: RetrievalResult) {
-  const scope = String(match.metadata.retrieval_scope ?? "unit");
-  const unitType = String(match.metadata.unit_type ?? match.section);
-  return scope === "source_evidence" || unitType === "source_evidence_section" || match.metadata.source_evidence_only === true;
-}
-
-function isIssueRouterMatch(match: RetrievalResult) {
-  const unitType = String(match.metadata.unit_type ?? match.section);
-  return ["issue_router_unit", "sop_reference", "vip_overlay_rule", "product_update_note"].includes(unitType);
-}
-
-function isToolMatch(match: RetrievalResult) {
-  const unitType = String(match.metadata.unit_type ?? match.section);
-  return unitType === "tool_link";
-}
-
-function isActionTemplateMatch(match: RetrievalResult) {
-  const unitType = String(match.metadata.unit_type ?? match.section);
-  return unitType === "quick_action_rule";
-}
-
-function isExactRuleMatch(match: RetrievalResult) {
-  const unitType = String(match.metadata.unit_type ?? match.section);
-  return [
-    "validation_rule",
-    "handling_rule",
-    "routing_rule",
-    "operational_instruction",
-    "policy_rule",
-    "sla_rule",
-    "decision_rule",
-    "escalation_rule",
-    "case_creation_rule",
-    "handoff_rule",
-    "tasklist_creation_rule",
-    "subject_format_rule",
-    "related_process_note",
-    "compliance_note",
-    "security_note",
-    "decision_tree",
-    "decision_point",
-    "workflow_step",
-    "warning",
-  ].includes(unitType) || match.rank_source.includes("lexical");
-}
-
 function countActiveFilters(filters: FilterState) {
   return Object.values(filters).filter((value) => value && value !== "all").length;
 }
 
-function DocumentMatchDetail({ match, query, searchEventId }: { match: RetrievalResult; query: string; searchEventId: string }) {
-  const scope = String(match.metadata.retrieval_scope ?? "unit");
-  const unitType = String(match.metadata.unit_type ?? match.section);
-  const isDocLayer = scope === "document" || unitType === "full_sop";
-  const isSourceEvidence = scope === "source_evidence" || unitType === "source_evidence_section" || match.metadata.source_evidence_only === true;
-  const facts = operationalFacts(match.metadata);
-  const scopeLabel = isDocLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer";
+function DocumentMatchDetail({ group, query, searchEventId }: { group: SourceDisplayGroup; query: string; searchEventId: string }) {
+  const primary = group.matches[0]?.result;
+  const facts = primary ? operationalFacts(primary.metadata) : [];
 
   return (
     <article className="rounded-xl border bg-card">
@@ -545,32 +366,44 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-1.5">
-              <Badge variant={isDocLayer ? "secondary" : "outline"}>{scopeLabel}</Badge>
-              <Badge variant="outline">v{match.version_number}</Badge>
-              <Badge variant="outline">{unitType}</Badge>
+              <Badge variant="secondary">source context</Badge>
+              <Badge variant="outline">v{group.versionNumber}</Badge>
+              {group.matches.length > 1 ? <Badge variant="outline">{group.matches.length} highlighted matches</Badge> : null}
             </div>
-            <h2 className="mt-2 text-lg font-semibold leading-snug">{match.heading || match.title}</h2>
+            <h2 className="mt-2 text-lg font-semibold leading-snug">{group.title}</h2>
             <p className="mt-1 max-w-[65ch] text-sm text-muted-foreground">
-              From {match.title}
-              {match.source_filename ? <span className="text-muted-foreground/70"> · {match.source_filename}</span> : null}
+              {group.category || "Published SOP source"}
+              {group.collections.length ? <span className="text-muted-foreground/70"> · {group.collections.join(", ")}</span> : null}
             </p>
           </div>
           <div className="shrink-0 text-right text-[11px] text-muted-foreground">
             <div>score</div>
-            <div className="font-medium tabular-nums text-foreground">{match.score.toFixed(4)}</div>
+            <div className="font-medium tabular-nums text-foreground">{group.score.toFixed(4)}</div>
           </div>
-        </div>
-        <div className="grid gap-2 sm:grid-cols-3">
-          <Fact icon={FileText} label="Section" value={match.section} />
-          <Fact icon={ShieldCheck} label="Review" value={String(match.metadata.review_status ?? "approved")} />
-          <Fact icon={FileClock} label="Chunk" value={`${match.chunk_index}`} />
         </div>
       </header>
       <div className="space-y-5 p-5">
-        <section>
-          <SectionTitle title={isDocLayer ? "Document overview" : isSourceEvidence ? "Source evidence section" : "Atomic knowledge unit"} />
-          <p className="mt-2 whitespace-pre-wrap text-sm leading-7">{match.content}</p>
-        </section>
+        <SourceContextCard
+          autoScrollToHighlight
+          group={group}
+          onCopyExcerpt={(text) => void navigator.clipboard.writeText(text)}
+        />
+        {group.matches.length > 1 ? (
+          <section>
+            <SectionTitle title="Highlighted matches" />
+            <div className="mt-2 grid gap-2">
+              {group.matches.map((match) => (
+                <div className="rounded-lg border bg-muted/20 px-3 py-2" key={match.chunkId}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="min-w-0 text-sm font-medium">{match.title}</p>
+                    <Badge variant="outline">{Math.round(match.score * 100)}%</Badge>
+                  </div>
+                  <MetaLine className="mt-1" items={[match.sectionTitle, match.unitType]} />
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
         {facts.length > 0 ? (
           <section>
             <SectionTitle title="Operational fields" />
@@ -585,28 +418,29 @@ function DocumentMatchDetail({ match, query, searchEventId }: { match: Retrieval
           </section>
         ) : null}
         <section>
-          <SectionTitle title="Source identifiers" />
+          <SectionTitle title="Source" />
           <dl className="mt-2 grid gap-x-6 gap-y-2 md:grid-cols-2">
-            <GovernanceItem label="Source document" value={match.title} />
-            <GovernanceItem label="Document ID" value={match.document_id} />
-            <GovernanceItem label="Version ID" value={match.version_id} />
-            <GovernanceItem label="Chunk ID" value={match.chunk_id} />
-            <GovernanceItem label="Source file" value={match.source_filename} />
+            <GovernanceItem label="Document" value={group.title} />
+            <GovernanceItem label="Version" value={`v${group.versionNumber}`} />
+            <GovernanceItem label="Category" value={group.category || "n/a"} />
+            <GovernanceItem label="Collection" value={group.collections.join(", ") || "n/a"} />
           </dl>
         </section>
-        <OperationalFeedbackButtons
-          entityId={match.chunk_id}
-          entityType="chunk"
-          metadata={{
-            search_event_id: searchEventId,
-            unit_type: unitType,
-            version_id: match.version_id,
-            document_id: match.document_id,
-          }}
-          sampleQuery={query}
-          sourceTitle={match.title}
-          targetTitle={match.heading || match.title}
-        />
+        {primary ? (
+          <OperationalFeedbackButtons
+            entityId={primary.chunk_id}
+            entityType="chunk"
+            metadata={{
+              search_event_id: searchEventId,
+              unit_type: primary.metadata.unit_type ?? primary.section,
+              version_id: primary.version_id,
+              document_id: primary.document_id,
+            }}
+            sampleQuery={query}
+            sourceTitle={group.title}
+            targetTitle={group.matches[0]?.title || group.title}
+          />
+        ) : null}
       </div>
     </article>
   );

@@ -347,6 +347,7 @@ def prepare_document_version(
         raw_text=raw_text,
         classification=classification,
         source_view_payload=source_view_payload,
+        raw_context=raw_context,
         existing_chunks=source_chunks,
     )
     if source_evidence_chunks:
@@ -710,6 +711,9 @@ def docx_policy_row_chunk(
         notes=raw_notes,
         examples=examples,
     )
+    section_title = str(row.get("section_path", [])[-1] if isinstance(row.get("section_path"), list) and row.get("section_path") else "Bảng quy định").strip()
+    row_sentence = natural_language_table_row_sentence(section_title, values, columns)
+    content = "\n".join(part for part in [row_sentence, content] if part).strip()
     row_text = " ".join([service, case_name, rule_text, note_text])
     metadata = {
         "unit_type": unit_type,
@@ -734,6 +738,11 @@ def docx_policy_row_chunk(
         "aliases": policy_aliases(service, case_name, threshold, no_apply),
         "source_table_index": table_index,
         "source_row_index": row_index,
+        "table_id": f"table_{table_index}",
+        "row_index": row_index,
+        "section_title": section_title,
+        "section_id": normalized_key(section_title) or "policy_table",
+        "block_id": f"table_{table_index}_row_{row_index}",
         "source_columns": columns,
         "source_cell_text": cell_text,
         "source_refs": [source_ref],
@@ -872,6 +881,10 @@ def extract_mixed_docx_policy_chunks(
                     "audience": infer_affected_audience(content) or document_audience,
                     "channel": channels or document_channels,
                     "section_path": section_path,
+                    "section_title": last_nonempty(section_path) or mixed_docx_macro_table_title(section_path, channels, table_index),
+                    "section_id": normalized_key(last_nonempty(section_path) or f"macro_table_{table_index}"),
+                    "table_id": f"table_{table_index}",
+                    "block_id": f"table_{table_index}",
                     "source_table_index": table_index,
                     "headers": [str(column) for column in table.get("columns", [])],
                     "rows": rows,
@@ -920,6 +933,11 @@ def extract_mixed_docx_policy_chunks(
                         "audience": infer_affected_audience(row_content) or document_audience,
                         "channel": channels or document_channels,
                         "section_path": section_path,
+                        "section_title": last_nonempty(section_path) or mixed_docx_macro_table_title(section_path, channels, table_index),
+                        "section_id": normalized_key(last_nonempty(section_path) or f"macro_table_{table_index}"),
+                        "table_id": f"table_{table_index}",
+                        "row_index": row_index,
+                        "block_id": f"table_{table_index}_row_{row_index}",
                         "source_table_index": table_index,
                         "source_row_index": row_index,
                         "cells": row.get("cells", {}),
@@ -1115,12 +1133,11 @@ def mixed_docx_table_row_content(row: dict[str, Any]) -> str:
     cells = row.get("cells") if isinstance(row.get("cells"), dict) else row.get("values") if isinstance(row.get("values"), dict) else {}
     if not cells:
         return str(row.get("text") or "").strip()
-    values = [str(value).strip() for value in cells.values() if str(value).strip()]
-    if not values:
+    pairs = [(str(header).strip(), str(value).strip()) for header, value in cells.items() if str(value).strip()]
+    if not pairs:
         return ""
-    label = values[0]
-    body = " / ".join(values[1:]).strip()
-    return f"{label}: {body}" if body else label
+    section_title = last_nonempty(row.get("section_path")) or "bảng nguồn"
+    return f"Trong phần {section_title}, dòng bảng này ghi " + "; ".join(f"{header}: {value}" for header, value in pairs) + "."
 
 
 def mixed_docx_macro_table_title(section_path: list[str], channels: list[str], table_index: int) -> str:
@@ -2052,6 +2069,18 @@ def policy_row_content(
         for example in examples:
             lines.append(f"- {example['input']} -> {example['output']}")
     return "\n".join(line for line in lines if line.strip()).strip()
+
+
+def natural_language_table_row_sentence(section_title: str, values: dict[str, Any], columns: list[str]) -> str:
+    pairs = []
+    for column in columns:
+        value = str(values.get(column) or "").strip()
+        if value:
+            pairs.append(f"{column}: {value}")
+    if not pairs:
+        return ""
+    section = section_title or "bảng nguồn"
+    return f"Trong phần {section}, dòng bảng này ghi " + "; ".join(pairs) + "."
 
 
 def rounding_sentence(rule_text: str, threshold: int) -> str:
@@ -4205,16 +4234,89 @@ def normalize_units(chunks: list[Any]) -> list[Any]:
     normalized = [
         replace_chunk_metadata(
             chunk,
-            {
+            with_structural_display_metadata(chunk, {
                 **chunk.metadata,
                 "source_refs": chunk.metadata.get("source_refs") or source_refs_from_chunk(chunk),
                 "source_ref_quality": chunk.metadata.get("source_ref_quality") or source_ref_quality_from_refs(chunk.metadata.get("source_refs") or source_refs_from_chunk(chunk)),
-            },
+            }),
         )
         for chunk in chunks
         if str(chunk.content or "").strip()
     ]
     return attach_notes_to_nearest_parent(normalized)
+
+
+def with_structural_display_metadata(chunk: Any, metadata: dict[str, Any]) -> dict[str, Any]:
+    refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    ref = next((item for item in refs if isinstance(item, dict)), {})
+    section_path = metadata.get("section_path") if isinstance(metadata.get("section_path"), list) else ref.get("heading_path") if isinstance(ref.get("heading_path"), list) else []
+    section_title = str(metadata.get("section_title") or last_nonempty(section_path) or chunk.heading or chunk.section or "").strip()
+    section_id = str(metadata.get("section_id") or metadata.get("source_section_id") or normalized_key(section_title or chunk.section) or chunk.section or "").strip()
+    table_index = first_present(metadata.get("table_id"), metadata.get("source_table_id"), metadata.get("source_table_index"), metadata.get("table_index"), ref.get("table_index"), ref.get("sheet"), metadata.get("sheet_name"))
+    row_index = first_int_value(metadata.get("row_index"), metadata.get("source_row_index"), metadata.get("row_number"), ref.get("row_index"), ref.get("row_start"))
+    table_id = str(table_index or "").strip()
+    if table_id:
+        table_id = f"table_{table_id}" if table_id.isdigit() else f"sheet_{normalized_key(table_id)}" if ref.get("sheet") or metadata.get("sheet_name") else table_id
+    block_id = str(metadata.get("block_id") or (f"{table_id}_row_{row_index}" if table_id and row_index is not None else "") or f"{section_id}_block").strip()
+    column_key = str(metadata.get("column_key") or first_nonempty(ref.get("column_names")) or "").strip()
+    source_anchor = {
+        **(metadata.get("source_anchor") if isinstance(metadata.get("source_anchor"), dict) else {}),
+        "section_id": section_id,
+        "block_id": block_id,
+        "table_id": table_id,
+        "row_index": row_index,
+        "column_key": column_key,
+    }
+    is_table = bool(table_id and row_index is not None) or metadata.get("source_ref_quality") in {"table_row", "sheet_row"} or metadata.get("unit_type") == "table_row"
+    return {
+        **metadata,
+        "section_id": section_id,
+        "section_title": section_title,
+        "block_id": block_id,
+        **({"table_id": table_id} if table_id else {}),
+        **({"row_index": row_index} if row_index is not None else {}),
+        **({"column_key": column_key} if column_key else {}),
+        "source_anchor": source_anchor,
+        "display_unit_type": "table_section" if is_table else "section",
+    }
+
+
+def last_nonempty(values: Any) -> str:
+    if not isinstance(values, list):
+        return ""
+    for value in reversed(values):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return ""
+
+
+def first_nonempty(values: Any) -> str:
+    if not isinstance(values, list):
+        return ""
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def first_int_value(*values: Any) -> int | None:
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def refine_units_for_delivery(
@@ -5290,6 +5392,7 @@ def build_source_evidence_section_chunks(
     raw_text: str,
     classification: Any,
     source_view_payload: dict[str, Any] | None,
+    raw_context: dict[str, Any] | None,
     existing_chunks: list[Any],
 ) -> tuple[list[Chunk], dict[str, Any]]:
     payload = source_view_payload if isinstance(source_view_payload, dict) else {}
@@ -5302,6 +5405,25 @@ def build_source_evidence_section_chunks(
             "raw_text_chars": len(raw_text or ""),
             "formatted_chars": 0,
             "section_count": 0,
+        }
+
+    structured_chunks = build_structural_source_evidence_chunks(
+        filename=filename,
+        classification=classification,
+        raw_context=raw_context or {},
+        existing_count=len(existing_chunks),
+    )
+    if structured_chunks:
+        return structured_chunks[:80], {
+            "status": "completed",
+            "reason": "",
+            "raw_text_chars": len(raw_text or ""),
+            "formatted_chars": len(source_text),
+            "source_text_kind": "structured_blocks",
+            "formatter": "local_structure_aware_chunker",
+            "section_count": len(structured_chunks[:80]),
+            "source_sections_truncated": len(structured_chunks) > 80,
+            "coverage_report": payload.get("coverage_report") if isinstance(payload.get("coverage_report"), dict) else {},
         }
 
     base_chunks = chunk_text(source_text, target_tokens=360, overlap_tokens=0)
@@ -5383,6 +5505,159 @@ def build_source_evidence_section_chunks(
         "coverage_report": coverage_report,
     }
     return source_chunks, report
+
+
+def build_structural_source_evidence_chunks(
+    *,
+    filename: str,
+    classification: Any,
+    raw_context: dict[str, Any],
+    existing_count: int,
+) -> list[Chunk]:
+    blocks = raw_context.get("docx_blocks") if isinstance(raw_context.get("docx_blocks"), list) else []
+    tables = raw_context.get("docx_tables") if isinstance(raw_context.get("docx_tables"), list) else []
+    if not blocks and not tables:
+        return []
+
+    chunks: list[Chunk] = []
+    grouped_blocks: dict[str, dict[str, Any]] = {}
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or block.get("block_type") or "")
+        if block_type in {"heading", "docx_table_header", "docx_table_row"}:
+            continue
+        text = str(block.get("text") or "").strip()
+        if not text:
+            continue
+        section_path = [str(item) for item in block.get("section_path", []) if str(item).strip()]
+        section_title = last_nonempty(section_path) or "Source section"
+        section_id = normalized_key(section_title) or f"section_{len(grouped_blocks) + 1}"
+        group = grouped_blocks.setdefault(
+            section_id,
+            {
+                "section_title": section_title,
+                "section_path": section_path,
+                "texts": [],
+                "source_refs": [],
+                "block_ids": [],
+            },
+        )
+        group["texts"].append(text)
+        if isinstance(block.get("source_ref"), dict):
+            group["source_refs"].append(block["source_ref"])
+        group["block_ids"].append(str(block.get("block_id") or ""))
+
+    for section_id, group in grouped_blocks.items():
+        content = "\n".join([str(group["section_title"]), *[str(item) for item in group["texts"]]]).strip()
+        chunks.append(
+            source_evidence_chunk(
+                index=existing_count + len(chunks),
+                filename=filename,
+                classification=classification,
+                heading=str(group["section_title"]),
+                content=content,
+                section_id=section_id,
+                section_title=str(group["section_title"]),
+                block_id=first_nonempty(group.get("block_ids")),
+                source_refs=group.get("source_refs") or [{"source_type": "docx", "source_file": filename, "heading_path": group.get("section_path", [])}],
+                extra_metadata={"section_path": group.get("section_path", [])},
+            )
+        )
+
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        table_index = int(table.get("table_index") or 0)
+        table_id = f"table_{table_index}"
+        columns = [str(column) for column in table.get("columns", []) if str(column).strip()]
+        section_path = [str(item) for item in table.get("section_path", []) if str(item).strip()]
+        section_title = last_nonempty(section_path) or f"Table {table_index + 1}"
+        section_id = normalized_key(section_title) or table_id
+        rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_index = int(row.get("row_index") or 0)
+            values = row.get("values") if isinstance(row.get("values"), dict) else row.get("cells") if isinstance(row.get("cells"), dict) else {}
+            content = natural_language_table_row_sentence(section_title, values, columns) or str(row.get("text") or row.get("cell_text") or "").strip()
+            if not content:
+                continue
+            chunks.append(
+                source_evidence_chunk(
+                    index=existing_count + len(chunks),
+                    filename=filename,
+                    classification=classification,
+                    heading=f"{section_title} row {row_index}".strip(),
+                    content=content,
+                    section_id=section_id,
+                    section_title=section_title,
+                    block_id=f"{table_id}_row_{row_index}",
+                    source_refs=row.get("source_refs") if isinstance(row.get("source_refs"), list) else [docx_table_source_ref(filename, table_index, row_index, columns, str(row.get("cell_text") or row.get("text") or ""))],
+                    extra_metadata={
+                        "section_path": section_path,
+                        "table_id": table_id,
+                        "row_index": row_index,
+                        "source_table_index": table_index,
+                        "source_row_index": row_index,
+                        "source_columns": columns,
+                        "source_ref_quality": "table_row",
+                    },
+                )
+            )
+
+    return chunks
+
+
+def source_evidence_chunk(
+    *,
+    index: int,
+    filename: str,
+    classification: Any,
+    heading: str,
+    content: str,
+    section_id: str,
+    section_title: str,
+    block_id: str,
+    source_refs: list[dict[str, Any]],
+    extra_metadata: dict[str, Any] | None = None,
+) -> Chunk:
+    display_content = f"Nguồn SOP:\n{content}".strip()
+    return Chunk(
+        chunk_index=index,
+        section="source_evidence",
+        heading=heading[:240],
+        content=display_content,
+        token_count=len(tokenize(display_content)),
+        metadata={
+            "unit_type": "source_evidence_section",
+            "retrieval_scope": "source_evidence",
+            "answer_role": "evidence_context",
+            "source_evidence_only": True,
+            "document_layer_role": "source_evidence",
+            "document_type": classification.document_type,
+            "source_type": classification.source_type,
+            "structure_type": "source_evidence",
+            "source_filename": filename,
+            "source_text_kind": "structured_blocks",
+            "source_view_formatter": "local_structure_aware_chunker",
+            "section_id": section_id,
+            "section_title": section_title,
+            "block_id": block_id,
+            "review_status": "approved",
+            "confidence": 1.0,
+            "requires_human_review": False,
+            "extraction_status": "structured",
+            "extraction_lifecycle_status": "source_evidence_indexed",
+            "publish_blocked": False,
+            "publish_blocked_reason": "",
+            "source_refs": source_refs,
+            "source_ref_quality": source_ref_quality_from_refs(source_refs),
+            "source_ref_acknowledged": True,
+            "production_ready_source_refs": True,
+            **(extra_metadata or {}),
+        },
+    )
 
 
 def annotate_document_overview_coverage(

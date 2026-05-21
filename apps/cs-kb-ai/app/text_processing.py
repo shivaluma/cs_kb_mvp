@@ -870,7 +870,8 @@ def spreadsheet_chunk(
     extra_metadata: dict[str, Any] | None = None,
 ) -> Chunk:
     context_lines = [f"Ngữ cảnh: {item}" for item in context[-3:]]
-    body = "\n".join([*context_lines, content]).strip()
+    row_sentence = spreadsheet_row_sentence(sheet_name, row_number, values or [], headers or [])
+    body = "\n".join([*context_lines, row_sentence, content]).strip()
     resolved_heading = heading or (context[-1] if context else f"{sheet_name} dòng {row_number}")
     rule_id = f"{slugify(sheet_name) or 'sheet'}_row_{row_number}"
     related_documents = spreadsheet_related_documents_from_row(values or [], headers or [], resolved_heading)
@@ -885,6 +886,7 @@ def spreadsheet_chunk(
         metadata={
             "sheet_name": sheet_name,
             "row_number": row_number,
+            "row_index": row_number,
             "headers": headers or [],
             "row_values": values or [],
             "hyperlinks": hyperlinks,
@@ -893,11 +895,27 @@ def spreadsheet_chunk(
             "rule_id": rule_id,
             "parent_unit_id": rule_id,
             "section_path": [sheet_name],
+            "section_id": slugify(sheet_name) or "sheet",
+            "section_title": sheet_name,
+            "table_id": f"sheet_{slugify(sheet_name) or 'sheet'}",
+            "block_id": f"sheet_{slugify(sheet_name) or 'sheet'}_row_{row_number}",
             "source_refs": [{"source_type": "excel", "source_file": "", "sheet": sheet_name, "row_start": row_number, "row_end": row_number, "column_names": headers or []}],
             **related_metadata,
             **(extra_metadata or {}),
         },
     )
+
+
+def spreadsheet_row_sentence(sheet_name: str, row_number: int, values: list[str], headers: list[str]) -> str:
+    pairs = []
+    for index, value in enumerate(values):
+        if not value:
+            continue
+        header = headers[index] if index < len(headers) and headers[index] else f"Column {index + 1}"
+        pairs.append(f"{header}: {value}")
+    if not pairs:
+        return ""
+    return f"Trong phần {sheet_name}, dòng {row_number} ghi " + "; ".join(pairs) + "."
 
 
 def row_to_text(values: list[str], headers: list[str]) -> str:

@@ -281,42 +281,23 @@ export function ChatPage() {
     }
   }
 
-  function openQuickSource(source: RetrievalResult) {
-    eventMutation.mutate({
-      action: "quick_answer_open",
-      entity_type: "chunk",
-      entity_id: source.chunk_id,
-      metadata: {
-        target_title: source.heading || source.title,
-        document_title: source.title,
-        unit_type: source.metadata.unit_type ?? source.section,
-        source: "chat_source",
-      },
-    });
-    sessionStorage.setItem("kb:selected-quick-source", JSON.stringify(source));
-    void navigate({
-      to: workspacePaths.lookup,
-      search: { q: source.heading || source.title, chunk: source.chunk_id } as never,
-    });
-  }
-
   function openDocumentSource(source: RetrievalResult) {
     eventMutation.mutate({
       action: "full_sop_open",
-      entity_type: "document_version",
-      entity_id: source.version_id,
+      entity_type: "chunk",
+      entity_id: source.chunk_id,
       metadata: {
         target_title: source.title,
         chunk_id: source.chunk_id,
         source: "chat_source",
       },
     });
+    sessionStorage.setItem("kb:selected-quick-source", JSON.stringify(source));
     void navigate({
-      to: workspacePaths.documents,
+      to: "/search",
       search: {
-        document: source.document_id,
-        version: source.version_id,
-        unit: source.chunk_id,
+        q: source.title,
+        chunk: source.chunk_id,
       } as never,
     });
   }
@@ -339,7 +320,6 @@ export function ChatPage() {
         onModelRouteChange={setModelRoute}
         onNewSession={startNewSession}
         onOpenDocument={openDocumentSource}
-        onOpenQuickSource={openQuickSource}
         onSelectSession={selectSession}
         onUpdateFilter={updateScopeFilter}
         sessions={chatSessionsQuery.data ?? []}

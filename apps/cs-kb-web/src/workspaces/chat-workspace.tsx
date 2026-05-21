@@ -1,7 +1,6 @@
 import {
   IconArchive as Archive,
   IconArrowUp as ArrowUp,
-  IconBook as BookOpen,
   IconChevronDown as ChevronDown,
   IconClipboard as Clipboard,
   IconClock as Clock3,
@@ -25,7 +24,7 @@ import {
 } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { OperationalFeedbackButtons } from "@/components/operational-feedback";
+import { SourceContextCard } from "@/components/source-context-card";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -35,6 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { groupResultsByDisplaySource } from "@/lib/source-display";
 import type {
   ChatModelRoute,
   ChatModelRouteConfig,
@@ -107,7 +107,6 @@ export function ChatWorkspace({
   onModelRouteChange,
   onNewSession,
   onOpenDocument,
-  onOpenQuickSource,
   onSelectSession,
   onUpdateFilter,
   sessions,
@@ -132,7 +131,6 @@ export function ChatWorkspace({
   onModelRouteChange: (route: ChatModelRoute) => void;
   onNewSession: () => void;
   onOpenDocument: (source: RetrievalResult) => void;
-  onOpenQuickSource: (source: RetrievalResult) => void;
   onSelectSession: (sessionId: string) => void;
   onUpdateFilter: (key: keyof FilterState, value: string) => void;
   sessions: ChatSessionSummary[];
@@ -224,7 +222,6 @@ export function ChatWorkspace({
                   message={message}
                   onCopy={onCopy}
                   onOpenDocument={onOpenDocument}
-                  onOpenQuickSource={onOpenQuickSource}
                 />
               ))}
             </div>
@@ -607,12 +604,10 @@ function ChatBubble({
   message,
   onCopy,
   onOpenDocument,
-  onOpenQuickSource,
 }: {
   message: ChatThreadMessage;
   onCopy: (text: string) => void;
   onOpenDocument: (source: RetrievalResult) => void;
-  onOpenQuickSource: (source: RetrievalResult) => void;
 }) {
   const isUser = message.role === "user";
   const response = message.response;
@@ -678,13 +673,13 @@ function ChatBubble({
                           <span className="text-[11px] text-muted-foreground">{group.sources.length}</span>
                         </div>
                         <div className="grid min-w-0 gap-2">
-                          {group.sources.map((source) => (
-                            <SourceCard
-                              key={`${group.role}-${source.chunk_id}`}
-                              onOpenDocument={onOpenDocument}
-                              onOpenQuickSource={onOpenQuickSource}
-                              sampleQuery={response.question}
-                              source={source}
+                          {groupResultsByDisplaySource(group.sources).map((sourceGroup) => (
+                            <SourceContextCard
+                              compact
+                              group={sourceGroup}
+                              key={`${group.role}-${sourceGroup.id}`}
+                              onCopyExcerpt={(text) => onCopy(text)}
+                              onOpenSource={() => onOpenDocument(sourceGroup.results[0])}
                             />
                           ))}
                         </div>
@@ -786,68 +781,6 @@ function Warnings({ warnings }: { warnings: string[] }) {
   );
 }
 
-function SourceCard({
-  onOpenDocument,
-  onOpenQuickSource,
-  sampleQuery,
-  source,
-}: {
-  onOpenDocument: (source: RetrievalResult) => void;
-  onOpenQuickSource: (source: RetrievalResult) => void;
-  sampleQuery: string;
-  source: RetrievalResult;
-}) {
-  const unitType = String(source.metadata.unit_type ?? source.section);
-  const role = metadataText(source.metadata.chat_source_role);
-  const reason = metadataText(source.metadata.chat_retrieval_reason);
-  const relationType = metadataText(source.metadata.relation_type);
-  const collectionSlug = metadataText(source.metadata.collection_slug ?? source.metadata.collection);
-  const taskTypes = metadataValues(source.metadata.task_type ?? source.metadata.task_types);
-  return (
-    <div className="min-w-0 rounded-xl border bg-card px-3 py-2.5">
-      <div className="flex max-w-full flex-wrap gap-1.5">
-        {role ? <CompactBadge variant="secondary">{sourceRoleLabel(role)}</CompactBadge> : null}
-        <CompactBadge>{unitType}</CompactBadge>
-        <CompactBadge>v{source.version_number}</CompactBadge>
-        {relationType ? <CompactBadge>{relationType}</CompactBadge> : null}
-        {collectionSlug ? <CompactBadge className="max-w-[12rem]">{collectionSlug}</CompactBadge> : null}
-        {taskTypes.slice(0, 2).map((taskType) => (
-          <CompactBadge className="max-w-[10rem]" key={taskType}>{taskType}</CompactBadge>
-        ))}
-      </div>
-      <p className="mt-2 line-clamp-2 break-words text-sm font-semibold leading-5">{source.heading || source.title}</p>
-      <p className="mt-1 line-clamp-2 break-words text-xs leading-5 text-muted-foreground">{source.content}</p>
-      {reason ? <p className="mt-1 truncate text-[11px] text-muted-foreground">{reason}</p> : null}
-      <p className="mt-2 truncate text-[11px] text-muted-foreground">{source.source_filename}</p>
-      <div className="mt-2 flex flex-wrap gap-2">
-        <Button className="h-7 rounded-full px-2" onClick={() => onOpenQuickSource(source)} size="sm" type="button" variant="outline">
-          <Search data-icon="inline-start" className="size-3.5" />
-          Quick rule
-        </Button>
-        <Button className="h-7 rounded-full px-2" onClick={() => onOpenDocument(source)} size="sm" type="button" variant="ghost">
-          <BookOpen data-icon="inline-start" className="size-3.5" />
-          Source
-        </Button>
-      </div>
-      <OperationalFeedbackButtons
-        className="mt-3 border-t pt-2"
-        entityId={source.chunk_id}
-        entityType="chunk"
-        metadata={{
-          source: "chat_source",
-          unit_type: unitType,
-          version_id: source.version_id,
-          document_id: source.document_id,
-          chat_source_role: role,
-        }}
-        sampleQuery={sampleQuery}
-        sourceTitle={source.title}
-        targetTitle={source.heading || source.title}
-      />
-    </div>
-  );
-}
-
 function sourceGroupsForResponse(response: NonNullable<ChatThreadMessage["response"]>): SourceGroup[] {
   const groups = (response.source_groups ?? []).filter((group) => group.sources.length);
   if (groups.length) {
@@ -867,24 +800,6 @@ function numericTraceValue(trace: Record<string, unknown> | undefined, key: stri
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function metadataText(value: unknown) {
-  if (typeof value === "string") {
-    return value.trim();
-  }
-  if (typeof value === "number") {
-    return String(value);
-  }
-  return "";
-}
-
-function metadataValues(value: unknown) {
-  if (Array.isArray(value)) {
-    return value.map(metadataText).filter(Boolean);
-  }
-  const text = metadataText(value);
-  return text ? [text] : [];
-}
-
 function groupRouteOptions(routes: ChatModelRouteConfig[]) {
   const presets = routes.filter((route) => ["simple", "policy", "high_risk", "complex"].includes(route.route));
   const manuals = routes.filter((route) => !["simple", "policy", "high_risk", "complex"].includes(route.route));
@@ -896,19 +811,6 @@ function groupRouteOptions(routes: ChatModelRouteConfig[]) {
     groups.push({ label: "Manual override", routes: manuals });
   }
   return groups;
-}
-
-function sourceRoleLabel(role: string) {
-  const labels: Record<string, string> = {
-    direct_sop: "Direct SOP",
-    issue_router: "Issue router",
-    related_sop: "Related SOP",
-    action_template: "Action template",
-    tool_link: "Tool",
-    parent_sop: "Document overview",
-    source_evidence: "Source evidence",
-  };
-  return labels[role] ?? role;
 }
 
 function formatSessionTime(value: string) {

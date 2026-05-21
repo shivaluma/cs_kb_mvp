@@ -5650,6 +5650,68 @@ def parent_sop_context_rows(chunk_ids: list[str], exclude_chunk_ids: list[str], 
         return [dict(row) for row in rows]
 
 
+def display_context_rows_for_results(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    document_ids = list(dict.fromkeys(str(row.get("document_id") or "") for row in rows if row.get("document_id")))
+    version_ids = list(dict.fromkeys(str(row.get("version_id") or "") for row in rows if row.get("version_id")))
+    if not document_ids or not version_ids:
+        return {}
+
+    with connection() as conn:
+        conn.row_factory = dict_row
+        context_rows = conn.execute(
+            """
+            SELECT d.id::text AS document_id,
+                   d.title AS document_title,
+                   d.source_filename,
+                   d.metadata AS document_metadata,
+                   d.updated_at,
+                   v.id::text AS version_id,
+                   v.version_number,
+                   v.published_at,
+                   c.id::text AS chunk_id,
+                   c.chunk_index,
+                   c.section,
+                   c.heading,
+                   c.content,
+                   c.metadata
+            FROM ai_documents d
+            JOIN ai_document_versions v ON v.document_id = d.id
+            JOIN ai_chunks c ON c.document_id = d.id AND c.version_id = v.id
+            WHERE d.id::text = ANY(%s)
+              AND v.id::text = ANY(%s)
+              AND d.status = 'active'
+              AND d.current_version_id = v.id
+              AND v.status = 'published'
+              AND v.publish_state = 'published_ready'
+              AND COALESCE(c.metadata->>'review_status', '') = 'approved'
+              AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
+              AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+            ORDER BY d.id, v.id, c.chunk_index
+            """,
+            (document_ids, version_ids, ["structured", "manually_curated"]),
+        ).fetchall()
+
+    contexts: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in context_rows:
+        key = (str(row["document_id"]), str(row["version_id"]))
+        context = contexts.setdefault(
+            key,
+            {
+                "document_id": str(row["document_id"]),
+                "document_title": str(row["document_title"] or ""),
+                "source_filename": str(row["source_filename"] or ""),
+                "document_metadata": row.get("document_metadata") or {},
+                "updated_at": row.get("updated_at"),
+                "version_id": str(row["version_id"]),
+                "version_number": int(row["version_number"] or 0),
+                "published_at": row.get("published_at"),
+                "chunks": [],
+            },
+        )
+        context["chunks"].append(dict(row))
+    return contexts
+
+
 def filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
     clauses = ["d.status = 'active'"]
     params: list[Any] = []

@@ -10,8 +10,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SearchBar } from "@/components/search-bar";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { EmptyPanel, EmptyResults, FilterGrid, MetaLine } from "@/components/common";
-import type { FilterOption, FilterState, RetrievalResponse, RetrievalResult } from "@/types";
+import { EmptyPanel, EmptyResults, FilterGrid } from "@/components/common";
+import { SourceContextCard } from "@/components/source-context-card";
+import { groupResultsByDisplaySource } from "@/lib/source-display";
+import type { FilterOption, FilterState, RetrievalResponse } from "@/types";
 
 export function RetrievalWorkspace({
   busy,
@@ -39,6 +41,7 @@ export function RetrievalWorkspace({
   setQuery: (query: string) => void;
 }) {
   const canRetrieve = query.trim().length > 0;
+  const sourceGroups = groupResultsByDisplaySource(retrieval?.results ?? []);
 
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(23rem,0.72fr)_minmax(34rem,1.28fr)]">
@@ -103,7 +106,7 @@ export function RetrievalWorkspace({
               <div>
                 <CardTitle>Evidence</CardTitle>
                 <CardDescription>
-                  {retrieval ? `${retrieval.results.length} chunks, ${retrieval.latency_ms}ms` : "No retrieval run yet"}
+                  {retrieval ? `${sourceGroups.length} source contexts, ${retrieval.latency_ms}ms` : "No retrieval run yet"}
                 </CardDescription>
               </div>
               <Badge variant={retrieval?.warnings.length ? "destructive" : "outline"}>
@@ -113,13 +116,18 @@ export function RetrievalWorkspace({
           </CardHeader>
           <CardContent className="pt-4">
             {!retrieval ? (
-              <EmptyPanel icon={Bot} title="Run a query" text="Results show source chunks, section names, rank source, and version citations." compact />
+              <EmptyPanel icon={Bot} title="Run a query" text="Results show grouped published source contexts with highlighted matches." compact />
             ) : retrieval.results.length === 0 ? (
               <EmptyResults query={retrieval.query} />
             ) : (
               <div className="space-y-3">
-                {retrieval.results.map((result) => (
-                  <RetrievalResultCard key={result.chunk_id} result={result} />
+                {sourceGroups.map((group) => (
+                  <SourceContextCard
+                    compact
+                    group={group}
+                    key={group.id}
+                    onCopyExcerpt={(text) => void navigator.clipboard.writeText(text)}
+                  />
                 ))}
               </div>
             )}
@@ -194,45 +202,5 @@ function QueryExpansionPanel({ retrieval }: { retrieval: RetrievalResponse | nul
         )}
       </CardContent>
     </Card>
-  );
-}
-
-function RetrievalResultCard({ result }: { result: RetrievalResult }) {
-  const scope = String(result.metadata.retrieval_scope ?? "unit");
-  const unitType = String(result.metadata.unit_type ?? result.section);
-  const isDocumentLayer = scope === "document" || unitType === "full_sop";
-  const isSourceEvidence =
-    scope === "source_evidence" || unitType === "source_evidence_section" || result.metadata.source_evidence_only === true;
-  const scopeLabel = isDocumentLayer ? "Overview" : isSourceEvidence ? "Source evidence" : "Quick answer";
-  return (
-    <article className="rounded-lg border bg-card p-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant={isDocumentLayer ? "secondary" : "outline"}>{scopeLabel}</Badge>
-            <Badge variant="outline">v{result.version_number}</Badge>
-            <Badge variant="outline">{unitType}</Badge>
-          </div>
-          <h3 className="mt-1.5 text-sm font-semibold leading-snug">{result.heading || result.title}</h3>
-          <p className="mt-0.5 truncate text-xs text-muted-foreground">
-            From {result.title}
-            {result.source_filename ? ` · ${result.source_filename}` : ""}
-          </p>
-          <MetaLine className="mt-1" items={[result.rank_source.join(" + ")]} />
-        </div>
-        <dl className="shrink-0 grid grid-cols-[auto_auto] gap-x-2 text-[11px] tabular-nums text-muted-foreground">
-          <dt>score</dt>
-          <dd className="text-right font-medium text-foreground">{result.score.toFixed(4)}</dd>
-          <dt>lex</dt>
-          <dd className="text-right">{result.lexical_score.toFixed(3)}</dd>
-          <dt>vec</dt>
-          <dd className="text-right">{result.vector_score.toFixed(3)}</dd>
-        </dl>
-      </div>
-      <p className="mt-2.5 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{result.content}</p>
-      <p className="mt-2 truncate text-[11px] text-muted-foreground">
-        Citation: chunk {result.chunk_index} · {result.version_id}
-      </p>
-    </article>
   );
 }

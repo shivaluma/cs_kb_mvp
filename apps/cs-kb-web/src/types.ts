@@ -291,6 +291,17 @@ export type RetrievalResult = {
   rank_source: string[];
   metadata: Record<string, unknown>;
   citation: Citation;
+  sop_id?: string;
+  document_title?: string;
+  section_id?: string;
+  section_title?: string;
+  category?: string;
+  collections?: CollectionRef[];
+  chunk_text?: string;
+  highlight_start_offset?: number | null;
+  highlight_end_offset?: number | null;
+  display_context?: DisplayContext | null;
+  source_anchor?: SourceAnchor;
 };
 
 export type Citation = {
@@ -302,6 +313,72 @@ export type Citation = {
   title: string;
   version_number: number;
   source_filename: string;
+  sop_id?: string;
+  document_title?: string;
+  section_id?: string;
+  section_title?: string;
+  category?: string;
+  collections?: CollectionRef[];
+  highlight_start_offset?: number | null;
+  highlight_end_offset?: number | null;
+  chunk_text?: string;
+  source_anchor?: SourceAnchor;
+};
+
+export type CollectionRef = {
+  id: string;
+  name: string;
+};
+
+export type SourceAnchor = {
+  sop_id?: string;
+  sop_version_id?: string;
+  section_id?: string;
+  block_id?: string;
+  table_id?: string;
+  row_index?: number | null;
+  column_key?: string;
+};
+
+export type DisplayHighlight = {
+  chunk_id: string;
+  text: string;
+  start_offset?: number | null;
+  end_offset?: number | null;
+  match_strategy: string;
+  source_anchor?: SourceAnchor;
+};
+
+export type DisplayBlock = {
+  id: string;
+  title: string;
+  content: string;
+  unit_type: string;
+  chunk_id: string;
+  block_type?: string;
+  source_anchor?: SourceAnchor;
+};
+
+export type DisplayContext = {
+  display_unit_type: "source_section" | "source_document" | "section" | "table_section" | "missing_source" | "chunk" | string;
+  document_id: string;
+  document_title: string;
+  section_id: string;
+  section_title: string;
+  category: string;
+  collections: CollectionRef[];
+  version_number?: number | null;
+  last_updated?: string | null;
+  published_at?: string | null;
+  effective_date?: string;
+  content: string;
+  blocks: DisplayBlock[];
+  highlights: DisplayHighlight[];
+  fallback_excerpt: string;
+  highlight_failed: boolean;
+  source_anchor?: SourceAnchor;
+  source_resolution_status?: string;
+  source_resolution_reason?: string;
 };
 
 export type DocumentSummary = {

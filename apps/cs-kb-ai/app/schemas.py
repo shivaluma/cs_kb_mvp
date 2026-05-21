@@ -1322,6 +1322,62 @@ class RetrievalRequest(BaseModel):
     mode: RetrievalMode = "hybrid"
 
 
+class CollectionRef(BaseModel):
+    id: str = ""
+    name: str = ""
+
+
+class SourceAnchor(BaseModel):
+    sop_id: str = ""
+    sop_version_id: str = ""
+    section_id: str = ""
+    block_id: str = ""
+    table_id: str = ""
+    row_index: int | None = None
+    column_key: str = ""
+
+
+class DisplayHighlight(BaseModel):
+    chunk_id: str
+    text: str = ""
+    start_offset: int | None = None
+    end_offset: int | None = None
+    match_strategy: str = "unmatched"
+    source_anchor: SourceAnchor = Field(default_factory=SourceAnchor)
+
+
+class DisplayBlock(BaseModel):
+    id: str
+    title: str = ""
+    content: str
+    unit_type: str = ""
+    chunk_id: str = ""
+    block_type: str = "paragraph"
+    source_anchor: SourceAnchor = Field(default_factory=SourceAnchor)
+
+
+class DisplayContext(BaseModel):
+    display_unit_type: str = "chunk"
+    document_id: str = ""
+    document_title: str = ""
+    section_id: str = ""
+    section_title: str = ""
+    category: str = ""
+    collections: list[CollectionRef] = Field(default_factory=list)
+    version_number: int | None = None
+    last_updated: datetime | None = None
+    published_at: datetime | None = None
+    effective_date: str = ""
+    content: str = ""
+    blocks: list[DisplayBlock] = Field(default_factory=list)
+    highlights: list[DisplayHighlight] = Field(default_factory=list)
+    fallback_excerpt: str = ""
+    highlight_failed: bool = False
+    source_anchor: SourceAnchor = Field(default_factory=SourceAnchor)
+    source_resolution_status: str = "resolved"
+    source_resolution_reason: str = ""
+
+
 class Citation(BaseModel):
     document_id: str
     version_id: str
@@ -1331,6 +1387,16 @@ class Citation(BaseModel):
     title: str
     version_number: int
     source_filename: str
+    sop_id: str = ""
+    document_title: str = ""
+    section_id: str = ""
+    section_title: str = ""
+    category: str = ""
+    collections: list[CollectionRef] = Field(default_factory=list)
+    highlight_start_offset: int | None = None
+    highlight_end_offset: int | None = None
+    chunk_text: str = ""
+    source_anchor: SourceAnchor = Field(default_factory=SourceAnchor)
 
 
 class RetrievalResult(BaseModel):
@@ -1350,6 +1416,17 @@ class RetrievalResult(BaseModel):
     rank_source: list[str]
     metadata: dict[str, Any] = Field(default_factory=dict)
     citation: Citation
+    sop_id: str = ""
+    document_title: str = ""
+    section_id: str = ""
+    section_title: str = ""
+    category: str = ""
+    collections: list[CollectionRef] = Field(default_factory=list)
+    chunk_text: str = ""
+    highlight_start_offset: int | None = None
+    highlight_end_offset: int | None = None
+    display_context: DisplayContext | None = None
+    source_anchor: SourceAnchor = Field(default_factory=SourceAnchor)
 
 
 class RetrievalResponse(BaseModel):
