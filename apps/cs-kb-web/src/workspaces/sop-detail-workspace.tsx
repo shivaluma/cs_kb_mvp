@@ -195,14 +195,17 @@ export function SOPDetailWorkspace({
             </div>
           </PolicySection>
 
-          <PolicySection icon={Folder} title="Library">
+          <PolicySection icon={Folder} title="Category and related policies">
             <div className="space-y-2">
+              <p className="text-xs leading-5 text-muted-foreground">
+                Category is this SOP&apos;s topic facet for browse and search. Collections handle operational packages, ownership, tools, and governance.
+              </p>
               <button
                 className="flex w-full items-center justify-between gap-3 rounded-xl border bg-muted/25 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
                 onClick={() => onOpenCategory(sop)}
                 type="button"
               >
-                <span className="min-w-0 truncate">{sop.category || "Uncategorized"}</span>
+                <span className="min-w-0 truncate">Category: {sop.category || "Uncategorized"}</span>
                 <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
               </button>
               {sections.related_policies?.map((policy) => (

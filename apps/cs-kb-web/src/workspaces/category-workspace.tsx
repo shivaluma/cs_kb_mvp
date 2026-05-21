@@ -32,7 +32,7 @@ export function CategoryWorkspace({
   totalSops: number;
 }) {
   const sorted = [...sops].sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime());
-  const owners = new Set(sorted.map((sop) => sop.owner_team).filter(Boolean));
+  const recentlyUpdatedCount = sorted.filter((sop) => daysSince(sop.updated_at) <= 7).length;
 
   return (
     <div className="space-y-5">
@@ -57,14 +57,14 @@ export function CategoryWorkspace({
             <Badge variant="secondary">category</Badge>
             <h2 className="mt-3 text-2xl font-semibold tracking-tight md:text-3xl">{categoryLabel}</h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-              Approved SOPs grouped by the published category metadata. Use this page when agents need browsing before they know the exact query.
+              Category is a topic facet for browsing, search, and retrieval ranking. Ownership, routing, tools, templates, risk, and governance live in Collections.
             </p>
             <MetaLine className="mt-3" items={[categoryKey, `${sorted.length} matching SOPs`, `${totalSops} total published SOPs`]} />
           </div>
           <div className="grid content-start gap-2 sm:grid-cols-3 xl:grid-cols-1">
             <Metric label="SOPs" value={sorted.length} />
-            <Metric label="Owners" value={owners.size} />
-            <Metric label="Updated in 7d" value={sorted.filter((sop) => daysSince(sop.updated_at) <= 7).length} />
+            <Metric label="Updated in 7d" value={recentlyUpdatedCount} />
+            <Metric label="Total published" value={totalSops} />
           </div>
         </div>
       </section>
@@ -103,7 +103,7 @@ export function CategoryWorkspace({
             <div className="mt-4 grid gap-2 border-t pt-3 sm:grid-cols-3">
               <SmallFact icon={Clock} label="Updated" value={formatDate(sop.updated_at)} />
               <SmallFact icon={Search} label="Views" value={String(sop.analytics.views)} />
-              <SmallFact icon={Folder} label="Category" value={sop.category || "Uncategorized"} />
+              <SmallFact icon={Folder} label="Facet" value="Category" />
             </div>
           </article>
         ))}

@@ -137,7 +137,7 @@ export const navItems = [
     path: workspacePaths.collections,
     label: "Collections",
     icon: Boxes,
-    description: "Browse SOP libraries grouped by process, ownership, and operational coverage.",
+    description: "Manage curated operational packages with ownership, routing, tools, templates, risk, and relation gaps.",
     section: "library",
   },
   {
@@ -251,7 +251,7 @@ export function workspaceFromPath(pathname: string): Workspace {
     return "lookup";
   }
   if (pathname.startsWith("/category/")) {
-    return "collections";
+    return "dashboard";
   }
   const current = navItems.find((item) => item.path === pathname);
   return current?.id ?? "dashboard";

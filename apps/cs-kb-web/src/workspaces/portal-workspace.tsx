@@ -129,6 +129,9 @@ export function PortalWorkspace({
 
         <aside className="space-y-3">
           <SectionHeader icon={Folder} title="Browse category" />
+          <p className="text-xs leading-5 text-muted-foreground">
+            Categories are topic facets for quick browsing and search. Collections live in Library for workflow packages, ownership, tools, and governance.
+          </p>
           <div className="overflow-hidden rounded-lg border bg-card">
             {categoryGroups.map((group, index) => (
               <button

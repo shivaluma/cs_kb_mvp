@@ -78,9 +78,14 @@ export function CollectionsWorkspace({
 
   return (
     <div className="space-y-4">
-      <p className="text-sm text-muted-foreground">
-        {collections.length} collection{collections.length === 1 ? "" : "s"} organize approved routing, tools, and action templates. Select a row to inspect operational pressure.
-      </p>
+      <div className="rounded-lg border bg-muted/20 px-4 py-3">
+        <p className="text-sm text-muted-foreground">
+          {collections.length} collection{collections.length === 1 ? "" : "s"} act as operational packages: ownership, routing, tools, action templates, risk, and relation gaps.
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          Use Category for topic browsing and search facets. Use Collection when a process needs governance, scope, and execution assets.
+        </p>
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(20rem,0.75fr)]">
         <DataTable
@@ -102,7 +107,7 @@ export function CollectionsWorkspace({
           <div className="space-y-4 p-4 text-sm">
             {!detail ? (
               <p className="text-muted-foreground">
-                Select a collection to inspect approved issue router units, tools, actions, and unresolved relation pressure.
+                Select a collection to inspect the operational package: approved issue router units, tools, actions, ownership, and unresolved relation pressure.
               </p>
             ) : (
               <>
