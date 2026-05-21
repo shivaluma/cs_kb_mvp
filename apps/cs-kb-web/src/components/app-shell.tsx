@@ -35,6 +35,24 @@ import { documentWorkflowItems, navGroups, navItems, type Workspace } from "@/co
 import { cn } from "@/lib/utils";
 
 const themeStorageKey = "cs-kb-theme";
+const commandPaletteShortcut = "⌘K";
+const commandPaletteAriaShortcut = "Meta+K Control+K";
+const sidebarShortcut = "⌘B";
+const sidebarAriaShortcut = "Meta+B Control+B";
+
+function ShortcutKey({ children, className, title }: { children: ReactNode; className?: string; title?: string }) {
+	return (
+		<kbd
+			className={cn(
+				"inline-flex h-5 min-w-5 items-center justify-center rounded-md border bg-muted px-1.5 text-[10px] font-medium leading-none text-muted-foreground",
+				className,
+			)}
+			title={title}
+		>
+			{children}
+		</kbd>
+	);
+}
 
 function getInitialDarkMode() {
 	if (typeof window === "undefined") {
@@ -317,7 +335,12 @@ export function AppShell({
 				>
 					<header className="shrink-0 border-b bg-background">
 						<div className="flex items-center gap-3 px-4 py-3 md:px-6">
-							<SidebarTrigger className="shrink-0" />
+							<SidebarTrigger
+								aria-keyshortcuts={sidebarAriaShortcut}
+								aria-label="Toggle sidebar"
+								className="shrink-0"
+								title={`Toggle sidebar (${sidebarShortcut})`}
+							/>
 							<div className="min-w-0 flex-1">
 								<div className="flex items-baseline gap-3">
 									<h1 className="truncate text-base font-semibold leading-tight tracking-tight">
@@ -349,17 +372,19 @@ export function AppShell({
 											placeholder="Search SOPs, rules, macros…"
 											value={headerQuery}
 										/>
-										<kbd className="hidden rounded border bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground lg:inline-block">
-											⌘K
-										</kbd>
+										<ShortcutKey className="hidden lg:inline-flex">
+											{commandPaletteShortcut}
+										</ShortcutKey>
 									</label>
 								</div>
 
 								<Button
 									aria-label="Open command palette"
+									aria-keyshortcuts={commandPaletteAriaShortcut}
 									className="md:hidden"
 									onClick={() => setCommandOpen(true)}
 									size="icon-sm"
+									title={`Open command palette (${commandPaletteShortcut})`}
 									type="button"
 									variant="outline"
 								>
@@ -377,14 +402,19 @@ export function AppShell({
 								</Button>
 
 								<Button
+									aria-keyshortcuts={commandPaletteAriaShortcut}
 									className="hidden md:inline-flex"
 									onClick={() => setCommandOpen(true)}
 									size="sm"
+									title={`Open command palette (${commandPaletteShortcut})`}
 									type="button"
 									variant="outline"
 								>
 									<Command data-icon="inline-start" className="size-4" />
 									Command
+									<ShortcutKey className="ml-1">
+										{commandPaletteShortcut}
+									</ShortcutKey>
 								</Button>
 							</div>
 						</div>
@@ -420,6 +450,7 @@ export function AppShell({
 			</SidebarProvider>
 			{commandOpen ? (
 				<div
+					aria-label="Command palette"
 					aria-modal="true"
 					className="fixed inset-0 z-50 bg-background/70 p-4 backdrop-blur-sm"
 					role="dialog"
@@ -440,10 +471,19 @@ export function AppShell({
 								placeholder="Search SOP, rule, macro, case reason…"
 								value={query}
 							/>
+							<div className="hidden items-center gap-1 sm:flex">
+								<ShortcutKey title="Run search">
+									Enter
+								</ShortcutKey>
+								<ShortcutKey title="Close command palette">
+									Esc
+								</ShortcutKey>
+							</div>
 							<Button
 								aria-label="Close command palette"
 								onClick={() => setCommandOpen(false)}
 								size="icon"
+								title="Close command palette (Esc)"
 								type="button"
 								variant="ghost"
 							>
