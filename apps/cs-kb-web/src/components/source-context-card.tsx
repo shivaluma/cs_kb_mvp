@@ -36,6 +36,7 @@ export function SourceContextCard({
   const debugScoreVisible = showDebugScore ?? isDebugUiEnabled();
   let highlightRefAssigned = false;
   const renderBlocks = group.blocks.length > 0 && (group.displayUnitType === "table_section" || segments.every((segment) => !segment.highlighted));
+  const openSourceLabel = group.displayUnitType === "workflow_diagram" || group.displayUnitType === "workflow_path" ? "Open in workflow" : "Open in SOP";
   const assignFirstHighlightRef = (node: HTMLElement | null) => {
     firstHighlightRef.current = node;
   };
@@ -177,7 +178,7 @@ export function SourceContextCard({
             {onOpenSource ? (
               <Button className="h-8 rounded-full px-3" onClick={(event) => { event.stopPropagation(); onOpenSource(); }} size="sm" type="button" variant="outline">
                 <ExternalLink data-icon="inline-start" className="size-3.5" />
-                Open in SOP
+                {openSourceLabel}
               </Button>
             ) : null}
             {onCopyExcerpt ? (

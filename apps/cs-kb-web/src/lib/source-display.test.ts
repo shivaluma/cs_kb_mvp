@@ -137,6 +137,16 @@ test("same SOP results in different sections are not collapsed", () => {
   assert.equal(groups.length, 2);
 });
 
+test("workflow diagram chunks keep workflow display mode when grouped", () => {
+  const first = workflowResult("workflow-branch-8-no", "Decision 8: No -> 8.2");
+  const second = workflowResult("workflow-step-8-2", "8.2 Thông báo KH không cung cấp email");
+
+  const group = groupResultsByDisplaySource([first, second])[0];
+
+  assert.equal(group.displayUnitType, "workflow_diagram");
+  assert.equal(group.matches.length, 2);
+});
+
 test("missing display context uses safe parent-missing fallback", () => {
   const item = result("chunk-unsafe", "Refund SOP", "Raw chunk text", null, null);
   item.display_context = null;
@@ -198,6 +208,37 @@ function result(
       highlight_failed: start === null,
     },
   };
+}
+
+function workflowResult(chunkId: string, chunkText: string): RetrievalResult {
+  const item = result(chunkId, "Inbound call workflow", chunkText, null, null);
+  item.section = "decision_branch";
+  item.metadata = {
+    unit_type: "decision_branch",
+    open_mode: "workflow_diagram",
+    display_unit_type: "workflow_diagram",
+    source_refs: [{ source_type: "pdf_diagram", page: 1, bbox: [100, 100, 200, 160], block_id: chunkId }],
+  };
+  item.display_context = {
+    ...item.display_context!,
+    display_unit_type: "workflow_diagram",
+    section_id: "workflow_phase_open",
+    section_title: "Open / Agent / Step 8",
+    content: chunkText,
+    blocks: [],
+    highlights: [
+      {
+        chunk_id: chunkId,
+        text: chunkText,
+        start_offset: null,
+        end_offset: null,
+        match_strategy: "visual_bbox",
+        source_anchor: { sop_id: "sop-1", sop_version_id: "version-1", section_id: "workflow_phase_open", block_id: chunkId },
+      },
+    ],
+    highlight_failed: false,
+  };
+  return item;
 }
 
 function tableBlock(id: string, rowIndex: number, content: string) {

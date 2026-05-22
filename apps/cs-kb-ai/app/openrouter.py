@@ -2414,6 +2414,10 @@ def workflow_payload_to_units(payload: WorkflowExtractionPayload, filename: str)
     units.append(normalize_unit(graph_unit))
 
     inherited_refs = [ref.model_dump() for ref in graph_refs]
+    if is_graph_first_workflow_payload(payload, graph):
+        units.extend(graph_first_workflow_units(payload, graph, filename, inherited_refs))
+        return dedupe_workflow_units(units)
+
     for annotation in payload.annotations:
         annotation_data = annotation.model_dump()
         annotation_refs = annotation_data.get("source_refs") or inherited_refs
@@ -2438,7 +2442,773 @@ def workflow_payload_to_units(payload: WorkflowExtractionPayload, filename: str)
 
     for unit in payload.atomic_units:
         units.append(normalize_unit(unit.model_dump()))
+    return dedupe_workflow_units(units)
+
+
+def is_graph_first_workflow_payload(payload: WorkflowExtractionPayload, graph: dict[str, Any]) -> bool:
+    metadata = payload.document_metadata if isinstance(payload.document_metadata, dict) else {}
+    return (
+        metadata.get("document_type") == "workflow_diagram"
+        or payload.search_enrichment.get("workflow_v3") is True
+        or (isinstance(graph.get("nodes"), list) and any(isinstance(node, dict) for node in graph.get("nodes", [])))
+    )
+
+
+def graph_first_workflow_units(
+    payload: WorkflowExtractionPayload,
+    graph: dict[str, Any],
+    filename: str,
+    inherited_refs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    nodes = workflow_graph_nodes(graph)
+    edges = workflow_graph_edges(graph)
+    node_lookup = {str(node.get("id") or ""): node for node in nodes if node.get("id")}
+    outgoing = workflow_edges_by_key(edges, "from_node")
+    incoming = workflow_edges_by_key(edges, "to_node")
+    document_metadata = payload.document_metadata if isinstance(payload.document_metadata, dict) else {}
+    base_metadata = {
+        "workflow_v3": True,
+        "document_type": "workflow_diagram",
+        "source_type": "diagram_pdf",
+        "source_filename": filename,
+        "open_mode": "workflow_diagram",
+        "display_unit_type": "workflow_diagram",
+        "document_metadata": document_metadata,
+        "graph_confidence": graph.get("graph_confidence"),
+        "requires_human_review": graph.get("requires_human_review", True),
+        "review_reason": graph.get("review_reason", ""),
+    }
+    units: list[dict[str, Any]] = []
+    units.append(
+        normalize_unit(
+            {
+                "unit_type": "full_workflow_diagram",
+                "title": graph.get("title") or payload.full_sop.title,
+                "content": workflow_full_diagram_text(graph, nodes, edges),
+                "confidence": graph.get("graph_confidence") or payload.full_sop.confidence,
+                "source_refs": refs_with_block_ids(inherited_refs, "workflow_diagram"),
+                "metadata": {
+                    **base_metadata,
+                    "retrieval_scope": "document",
+                    "chunk_type": "full_workflow_diagram",
+                    "section_id": "workflow_diagram",
+                    "section_title": graph.get("title") or payload.full_sop.title,
+                    "block_id": "workflow_diagram",
+                    "source_text": workflow_full_diagram_text(graph, nodes, edges),
+                    "display_text": workflow_full_diagram_text(graph, nodes, edges)[:4000],
+                    "retrieval_text": workflow_full_diagram_retrieval_text(graph, nodes, edges),
+                },
+            }
+        )
+    )
+    units.extend(workflow_phase_units(graph, nodes, base_metadata))
+    units.extend(workflow_node_units(nodes, outgoing, incoming, base_metadata))
+    units.extend(workflow_decision_branch_units(nodes, edges, node_lookup, base_metadata))
+    units.extend(workflow_path_units(graph, nodes, edges, node_lookup, base_metadata))
+    units.extend(workflow_annotation_units(payload, graph, node_lookup, base_metadata, inherited_refs))
+    units.extend(workflow_relation_units(payload, base_metadata, inherited_refs))
     return units
+
+
+def workflow_graph_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    return [node for node in nodes if isinstance(node, dict)]
+
+
+def workflow_graph_edges(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    return [edge for edge in edges if isinstance(edge, dict)]
+
+
+def workflow_edges_by_key(edges: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+    output: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        edge_key = str(edge.get(key) or "")
+        if edge_key:
+            output.setdefault(edge_key, []).append(edge)
+    return output
+
+
+def workflow_phase_units(
+    graph: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    base_metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    phases: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        if str(node.get("type") or "") in {"start", "end"}:
+            continue
+        phase = normalize_display_text(node.get("phase") or "Workflow")
+        phases.setdefault(phase, []).append(node)
+    output: list[dict[str, Any]] = []
+    for phase, phase_nodes in sorted(phases.items(), key=lambda item: workflow_phase_sort_key(item[0])):
+        ordered_nodes = sorted(phase_nodes, key=workflow_node_sort_key)
+        source_text = "\n".join(workflow_node_line(node) for node in ordered_nodes if workflow_node_source_text(node))
+        if not source_text:
+            continue
+        refs = refs_with_block_ids(merge_workflow_refs([workflow_node_refs(node) for node in ordered_nodes]), f"workflow_phase_{slug_key(phase)}")
+        output.append(
+            normalize_unit(
+                {
+                    "unit_type": "workflow_phase",
+                    "title": f"Phase {phase}",
+                    "content": source_text,
+                    "confidence": phase_confidence(ordered_nodes),
+                    "source_refs": refs,
+                    "metadata": {
+                        **base_metadata,
+                        "retrieval_scope": "section",
+                        "chunk_type": "workflow_phase",
+                        "phase": phase,
+                        "section_id": f"workflow_phase_{slug_key(phase)}",
+                        "section_title": f"Phase {phase}",
+                        "block_id": f"workflow_phase_{slug_key(phase)}",
+                        "step_codes": [str(node.get("step_code") or "") for node in ordered_nodes if node.get("step_code")],
+                        "source_text": source_text,
+                        "display_text": source_text,
+                        "retrieval_text": f"Workflow phase {phase}. {source_text}",
+                    },
+                }
+            )
+        )
+    return output
+
+
+def workflow_node_units(
+    nodes: list[dict[str, Any]],
+    outgoing: dict[str, list[dict[str, Any]]],
+    incoming: dict[str, list[dict[str, Any]]],
+    base_metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for node in sorted(nodes, key=workflow_node_sort_key):
+        node_type = str(node.get("type") or "")
+        if node_type not in {"action", "decision"}:
+            continue
+        unit_type = "decision_node" if node_type == "decision" else "workflow_step"
+        source_text = workflow_node_source_text(node)
+        if not source_text:
+            continue
+        step_code = str(node.get("step_code") or "")
+        section_id = workflow_node_section_id(node)
+        refs = refs_with_block_ids(workflow_node_refs(node), workflow_node_block_id(node))
+        edge_summary = workflow_edge_summary_for_node(node, outgoing.get(str(node.get("id") or ""), []), incoming.get(str(node.get("id") or ""), []))
+        retrieval_text = normalize_display_text(
+            " ".join(
+                part
+                for part in [
+                    f"Workflow {unit_type.replace('_', ' ')}",
+                    f"phase {node.get('phase')}" if node.get("phase") else "",
+                    f"lane {workflow_node_lane(node)}" if workflow_node_lane(node) else "",
+                    f"step {step_code}" if step_code else "",
+                    source_text,
+                    edge_summary,
+                ]
+                if part
+            )
+        )
+        output.append(
+            normalize_unit(
+                {
+                    "unit_type": unit_type,
+                    "title": workflow_node_title(node),
+                    "content": source_text,
+                    "confidence": node_confidence(node),
+                    "source_refs": refs,
+                    "metadata": {
+                        **base_metadata,
+                        "retrieval_scope": "unit",
+                        "chunk_type": unit_type,
+                        "workflow_node_id": node.get("id"),
+                        "step_code": step_code,
+                        "phase": node.get("phase") or "",
+                        "lane": workflow_node_lane(node),
+                        "actor": workflow_node_lane(node),
+                        "shape_kind": node.get("shape_kind") or "",
+                        "node_type": node_type,
+                        "section_id": section_id,
+                        "section_title": node.get("phase") or "",
+                        "parent_section_id": section_id,
+                        "block_id": workflow_node_block_id(node),
+                        "incoming_edges": summarize_edges(incoming.get(str(node.get("id") or ""), []), direction="incoming"),
+                        "outgoing_edges": summarize_edges(outgoing.get(str(node.get("id") or ""), []), direction="outgoing"),
+                        "source_text": source_text,
+                        "display_text": source_text,
+                        "retrieval_text": retrieval_text,
+                    },
+                }
+            )
+        )
+    return output
+
+
+def workflow_decision_branch_units(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_lookup: dict[str, dict[str, Any]],
+    base_metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    decision_ids = {str(node.get("id") or "") for node in nodes if str(node.get("type") or "") == "decision"}
+    output: list[dict[str, Any]] = []
+    for edge in edges:
+        from_node_id = str(edge.get("from_node") or "")
+        condition = normalize_workflow_condition(edge.get("condition"))
+        if from_node_id not in decision_ids or condition not in {"yes", "no"}:
+            continue
+        from_node = node_lookup.get(from_node_id) or {}
+        to_node = node_lookup.get(str(edge.get("to_node") or "")) or {}
+        if not from_node or not to_node:
+            continue
+        source_text = workflow_branch_source_text(from_node, edge, to_node)
+        refs = refs_with_block_ids(
+            merge_workflow_refs([workflow_node_refs(from_node), workflow_edge_refs(edge), workflow_node_refs(to_node)]),
+            workflow_branch_block_id(from_node, edge, to_node),
+        )
+        from_step = str(from_node.get("step_code") or from_node_id)
+        to_step = str(to_node.get("step_code") or edge.get("to_node") or "")
+        phase = from_node.get("phase") or to_node.get("phase") or ""
+        lane = workflow_node_lane(from_node) or workflow_node_lane(to_node)
+        output.append(
+            normalize_unit(
+                {
+                    "unit_type": "decision_branch",
+                    "title": f"Decision {from_step} {condition.upper()} -> {to_step}",
+                    "content": source_text,
+                    "confidence": edge_confidence(edge, from_node, to_node),
+                    "source_refs": refs,
+                    "metadata": {
+                        **base_metadata,
+                        "retrieval_scope": "unit",
+                        "chunk_type": "decision_branch",
+                        "workflow_node_id": from_node_id,
+                        "from_node_id": from_node_id,
+                        "to_node_id": to_node.get("id") or "",
+                        "from_step_code": from_step,
+                        "to_step_code": to_step,
+                        "condition": condition,
+                        "phase": phase,
+                        "lane": lane,
+                        "section_id": workflow_node_section_id(from_node),
+                        "section_title": phase,
+                        "parent_section_id": workflow_node_section_id(from_node),
+                        "block_id": workflow_branch_block_id(from_node, edge, to_node),
+                        "source_text": source_text,
+                        "display_text": source_text,
+                        "retrieval_text": workflow_branch_retrieval_text(from_node, edge, to_node),
+                    },
+                }
+            )
+        )
+    return output
+
+
+def workflow_path_units(
+    graph: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_lookup: dict[str, dict[str, Any]],
+    base_metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    paths = derive_workflow_paths(graph, edges, node_lookup)
+    output: list[dict[str, Any]] = []
+    for index, path in enumerate(paths[:18], start=1):
+        path_nodes = [node_lookup[node_id] for node_id in path if node_id in node_lookup]
+        path_nodes = [node for node in path_nodes if workflow_node_source_text(node) and str(node.get("type") or "") not in {"start", "end"}]
+        if len(path_nodes) < 2:
+            continue
+        title = workflow_path_title(path_nodes, index)
+        source_text = "\n".join(workflow_node_line(node) for node in path_nodes)
+        step_codes = [str(node.get("step_code") or "") for node in path_nodes if node.get("step_code")]
+        refs = refs_with_block_ids(merge_workflow_refs([workflow_node_refs(node) for node in path_nodes]), f"workflow_path_{index}")
+        output.append(
+            normalize_unit(
+                {
+                    "unit_type": "workflow_path",
+                    "title": title,
+                    "content": f"{title}\n{source_text}".strip(),
+                    "confidence": phase_confidence(path_nodes),
+                    "source_refs": refs,
+                    "metadata": {
+                        **base_metadata,
+                        "retrieval_scope": "unit",
+                        "chunk_type": "workflow_path",
+                        "workflow_path_id": f"path_{index}",
+                        "step_codes": step_codes,
+                        "phase": workflow_path_phase(path_nodes),
+                        "lane": workflow_path_lane(path_nodes),
+                        "section_id": f"workflow_path_{index}",
+                        "section_title": title,
+                        "parent_section_id": f"workflow_path_{index}",
+                        "block_id": f"workflow_path_{index}",
+                        "source_text": source_text,
+                        "display_text": source_text,
+                        "retrieval_text": f"{title}. {source_text}",
+                    },
+                }
+            )
+        )
+    return output
+
+
+def workflow_annotation_units(
+    payload: WorkflowExtractionPayload,
+    graph: dict[str, Any],
+    node_lookup: dict[str, dict[str, Any]],
+    base_metadata: dict[str, Any],
+    inherited_refs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    annotations = [annotation.model_dump() for annotation in payload.annotations]
+    if not annotations and isinstance(graph.get("annotations"), list):
+        annotations = [annotation for annotation in graph.get("annotations", []) if isinstance(annotation, dict)]
+    for annotation in annotations:
+        source_text = normalize_display_text(annotation.get("content") or annotation.get("text") or "")
+        if not source_text:
+            continue
+        attached_node_ids = [str(item) for item in annotation.get("attached_to_node_ids", []) if item]
+        if annotation.get("attached_to"):
+            attached_node_ids.append(str(annotation.get("attached_to")))
+        attached_step_codes = [
+            str((node_lookup.get(node_id) or {}).get("step_code") or "")
+            for node_id in attached_node_ids
+            if (node_lookup.get(node_id) or {}).get("step_code")
+        ]
+        annotation_type = str(annotation.get("type") or "annotation")
+        unit_type = "script_block" if annotation_type in {"macro_script", "script", "call_script"} else "annotation"
+        refs = annotation.get("source_refs") if isinstance(annotation.get("source_refs"), list) else inherited_refs
+        block_id = f"{unit_type}_{slug_key(annotation.get('id') or source_text[:40])}"
+        output.append(
+            normalize_unit(
+                {
+                    "unit_type": unit_type,
+                    "title": annotation.get("title") or ("Script block" if unit_type == "script_block" else "Workflow annotation"),
+                    "content": source_text,
+                    "confidence": annotation.get("confidence") or 0.78,
+                    "source_refs": refs_with_block_ids(refs, block_id),
+                    "metadata": {
+                        **base_metadata,
+                        "retrieval_scope": "unit",
+                        "chunk_type": unit_type,
+                        "annotation_id": annotation.get("id") or "",
+                        "annotation_type": annotation_type,
+                        "attached_to_node_ids": list(dict.fromkeys(attached_node_ids)),
+                        "attached_to_step_codes": list(dict.fromkeys(attached_step_codes)),
+                        "section_id": f"workflow_annotation_{slug_key(annotation.get('id') or source_text[:40])}",
+                        "section_title": "Workflow annotation",
+                        "block_id": block_id,
+                        "source_text": source_text,
+                        "display_text": source_text,
+                        "retrieval_text": workflow_annotation_retrieval_text(source_text, attached_step_codes, annotation_type),
+                    },
+                }
+            )
+        )
+    return output
+
+
+def workflow_relation_units(
+    payload: WorkflowExtractionPayload,
+    base_metadata: dict[str, Any],
+    inherited_refs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    relations = payload.search_enrichment.get("relations") if isinstance(payload.search_enrichment.get("relations"), list) else []
+    output: list[dict[str, Any]] = []
+    for index, relation in enumerate(relations, start=1):
+        if not isinstance(relation, dict):
+            continue
+        target_title = normalize_display_text(relation.get("target_title") or "")
+        evidence_text = normalize_display_text(relation.get("evidence_text") or target_title)
+        if not target_title:
+            continue
+        refs = relation.get("source_refs") if isinstance(relation.get("source_refs"), list) else inherited_refs
+        block_id = f"relation_to_sop_{index}_{slug_key(target_title)}"
+        output.append(
+            normalize_unit(
+                {
+                    "unit_type": "relation_to_sop",
+                    "title": f"Related SOP: {target_title}",
+                    "content": evidence_text or target_title,
+                    "confidence": relation.get("confidence") or 0.82,
+                    "source_refs": refs_with_block_ids(refs, block_id),
+                    "metadata": {
+                        **base_metadata,
+                        "retrieval_scope": "relation",
+                        "chunk_type": "relation_to_sop",
+                        "target_title": target_title,
+                        "target_url": relation.get("target_url") or "",
+                        "relation_type": relation.get("relation_type") or "references",
+                        "relation_source": relation.get("relation_source") or "explicit_text_reference",
+                        "attached_to_step_codes": relation.get("attached_to_step_codes") if isinstance(relation.get("attached_to_step_codes"), list) else [],
+                        "section_id": f"workflow_relation_{index}",
+                        "section_title": "Related SOP",
+                        "block_id": block_id,
+                        "source_text": evidence_text or target_title,
+                        "display_text": evidence_text or target_title,
+                        "retrieval_text": f"Workflow references related SOP {target_title}. {evidence_text}",
+                    },
+                }
+            )
+        )
+    return output
+
+
+def workflow_full_diagram_text(graph: dict[str, Any], nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str:
+    node_lines = [workflow_node_line(node) for node in sorted(nodes, key=workflow_node_sort_key) if workflow_node_source_text(node)]
+    edge_lines = [
+        f"{edge.get('from_node')} --{edge.get('condition') or 'next'}--> {edge.get('to_node')}"
+        for edge in edges
+        if edge.get("from_node") and edge.get("to_node")
+    ]
+    return "\n".join(
+        [
+            str(graph.get("title") or "Workflow diagram"),
+            "",
+            "Nodes:",
+            *node_lines,
+            "",
+            "Edges:",
+            *edge_lines,
+        ]
+    ).strip()
+
+
+def workflow_full_diagram_retrieval_text(graph: dict[str, Any], nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str:
+    lanes = sorted({workflow_node_lane(node) for node in nodes if workflow_node_lane(node)})
+    phases = sorted({str(node.get("phase") or "") for node in nodes if node.get("phase")}, key=workflow_phase_sort_key)
+    return normalize_display_text(
+        f"Workflow diagram {graph.get('title') or ''}. Phases: {', '.join(phases)}. Lanes: {', '.join(lanes)}. "
+        f"{workflow_full_diagram_text(graph, nodes, edges)}"
+    )
+
+
+def workflow_node_source_text(node: dict[str, Any]) -> str:
+    if str(node.get("type") or "") == "decision":
+        return normalize_display_text(node.get("question") or node.get("content") or node.get("title") or "")
+    return normalize_display_text(node.get("content") or node.get("title") or node.get("question") or "")
+
+
+def workflow_node_title(node: dict[str, Any]) -> str:
+    step_code = str(node.get("step_code") or "")
+    source_text = workflow_node_source_text(node)
+    if step_code:
+        return f"Step {step_code}: {trim_title_words(source_text, 12)}"
+    return trim_title_words(source_text, 12) or str(node.get("title") or "Workflow node")
+
+
+def workflow_node_line(node: dict[str, Any]) -> str:
+    source_text = workflow_node_source_text(node)
+    prefix = str(node.get("step_code") or "").strip()
+    if prefix and not source_text.startswith(prefix):
+        return f"{prefix}. {source_text}"
+    return source_text
+
+
+def workflow_node_lane(node: dict[str, Any]) -> str:
+    return normalize_display_text(node.get("lane") or node.get("actor") or node.get("lane_id") or "")
+
+
+def workflow_node_refs(node: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = node.get("source_refs") if isinstance(node.get("source_refs"), list) else []
+    output = []
+    for ref in refs:
+        if isinstance(ref, dict):
+            merged = {
+                **ref,
+                "page": ref.get("page") or ref.get("page_number") or node.get("page") or 1,
+                "page_number": ref.get("page_number") or ref.get("page") or node.get("page") or 1,
+                "bbox": ref.get("bbox") or node.get("bbox") or [],
+                "block_id": ref.get("block_id") or workflow_node_block_id(node),
+            }
+            output.append(merged)
+    if output:
+        return output
+    if node.get("bbox"):
+        return [
+            {
+                "source_type": "pdf_diagram",
+                "page": node.get("page") or 1,
+                "page_number": node.get("page") or 1,
+                "bbox": node.get("bbox") or [],
+                "block_id": workflow_node_block_id(node),
+            }
+        ]
+    return []
+
+
+def workflow_edge_refs(edge: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = edge.get("source_refs") if isinstance(edge.get("source_refs"), list) else []
+    return [ref for ref in refs if isinstance(ref, dict)]
+
+
+def refs_with_block_ids(refs: list[dict[str, Any]], block_id: str) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        output.append(
+            {
+                **ref,
+                "page": ref.get("page") or ref.get("page_number") or 1,
+                "page_number": ref.get("page_number") or ref.get("page") or 1,
+                "block_id": ref.get("block_id") or block_id,
+            }
+        )
+    return output
+
+
+def merge_workflow_refs(ref_groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for refs in ref_groups:
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            key = json.dumps(
+                {
+                    "page": ref.get("page") or ref.get("page_number"),
+                    "bbox": ref.get("bbox") or [],
+                    "block_id": ref.get("block_id") or "",
+                },
+                sort_keys=True,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(ref)
+    return output
+
+
+def workflow_node_block_id(node: dict[str, Any]) -> str:
+    node_id = str(node.get("id") or node.get("step_code") or workflow_node_source_text(node)[:40] or "node")
+    return f"workflow_node_{slug_key(node_id)}"
+
+
+def workflow_branch_block_id(from_node: dict[str, Any], edge: dict[str, Any], to_node: dict[str, Any]) -> str:
+    from_step = str(from_node.get("step_code") or from_node.get("id") or "")
+    to_step = str(to_node.get("step_code") or edge.get("to_node") or "")
+    return f"workflow_branch_{slug_key(from_step)}_{normalize_workflow_condition(edge.get('condition'))}_{slug_key(to_step)}"
+
+
+def workflow_node_section_id(node: dict[str, Any]) -> str:
+    phase = slug_key(node.get("phase") or "workflow")
+    return f"workflow_phase_{phase}"
+
+
+def workflow_branch_source_text(from_node: dict[str, Any], edge: dict[str, Any], to_node: dict[str, Any]) -> str:
+    from_step = str(from_node.get("step_code") or from_node.get("id") or "")
+    to_step = str(to_node.get("step_code") or to_node.get("id") or "")
+    condition = normalize_workflow_condition(edge.get("condition"))
+    question = strip_step_prefix(workflow_node_source_text(from_node))
+    target_text = workflow_node_source_text(to_node)
+    condition_label = "Yes" if condition == "yes" else "No" if condition == "no" else condition
+    return normalize_display_text(f"Decision {from_step}: Nếu {condition_label} - {question}, chuyển đến {to_step}: {target_text}")
+
+
+def workflow_branch_retrieval_text(from_node: dict[str, Any], edge: dict[str, Any], to_node: dict[str, Any]) -> str:
+    return normalize_display_text(
+        " ".join(
+            part
+            for part in [
+                workflow_branch_source_text(from_node, edge, to_node),
+                f"phase {from_node.get('phase') or to_node.get('phase')}",
+                f"lane {workflow_node_lane(from_node) or workflow_node_lane(to_node)}",
+                "yes no branch decision workflow",
+            ]
+            if part
+        )
+    )
+
+
+def workflow_annotation_retrieval_text(source_text: str, attached_step_codes: list[str], annotation_type: str) -> str:
+    steps = ", ".join(attached_step_codes)
+    return normalize_display_text(
+        f"Workflow {annotation_type} annotation"
+        + (f" attached to steps {steps}." if steps else ".")
+        + f" {source_text}"
+    )
+
+
+def workflow_edge_summary_for_node(node: dict[str, Any], outgoing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> str:
+    parts = []
+    if incoming:
+        parts.append("incoming " + ", ".join(f"{edge.get('from_node')}:{edge.get('condition')}" for edge in incoming[:6]))
+    if outgoing:
+        parts.append("outgoing " + ", ".join(f"{edge.get('condition')}->{edge.get('to_node')}" for edge in outgoing[:6]))
+    return "; ".join(parts)
+
+
+def summarize_edges(edges: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
+    output = []
+    for edge in edges:
+        output.append(
+            {
+                "from_node": edge.get("from_node") or "",
+                "to_node": edge.get("to_node") or "",
+                "condition": normalize_workflow_condition(edge.get("condition")),
+                "confidence": edge.get("confidence"),
+                "direction": direction,
+            }
+        )
+    return output
+
+
+def derive_workflow_paths(graph: dict[str, Any], edges: list[dict[str, Any]], node_lookup: dict[str, dict[str, Any]]) -> list[list[str]]:
+    outgoing = workflow_edges_by_key(edges, "from_node")
+    start_node = str(graph.get("start_node_id") or "")
+    if not start_node or start_node not in node_lookup:
+        start_node = next((str(node.get("id") or "") for node in node_lookup.values() if str(node.get("type") or "") == "start"), "")
+    roots = [start_node] if start_node else []
+    decision_branch_roots = [
+        str(edge.get("to_node") or "")
+        for edge in edges
+        if normalize_workflow_condition(edge.get("condition")) in {"yes", "no"} and str(edge.get("to_node") or "") in node_lookup
+    ]
+    paths: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def add_path(path: list[str]) -> None:
+        key = tuple(path)
+        if len(path) < 2 or key in seen:
+            return
+        seen.add(key)
+        paths.append(path)
+
+    def walk(node_id: str, path: list[str], depth: int) -> None:
+        if depth > 18 or node_id in path:
+            add_path(path + [node_id] if node_id not in path else path)
+            return
+        next_path = [*path, node_id]
+        node = node_lookup.get(node_id) or {}
+        next_edges = outgoing.get(node_id, [])
+        if str(node.get("type") or "") == "end" or not next_edges:
+            add_path(next_path)
+            return
+        for edge in sorted(next_edges, key=lambda item: workflow_condition_sort_key(item.get("condition"))):
+            target = str(edge.get("to_node") or "")
+            if not target:
+                continue
+            walk(target, next_path, depth + 1)
+
+    for root in roots:
+        walk(root, [], 0)
+    for root in decision_branch_roots:
+        walk(root, [], 0)
+    paths.sort(key=workflow_path_sort_key)
+    return paths
+
+
+def workflow_path_title(path_nodes: list[dict[str, Any]], index: int) -> str:
+    decisions = [node for node in path_nodes if str(node.get("type") or "") == "decision"]
+    terminal = path_nodes[-1] if path_nodes else {}
+    if decisions:
+        first_decision = decisions[0]
+        return f"Path {index}: {strip_step_prefix(workflow_node_source_text(first_decision))}"
+    terminal_text = trim_title_words(workflow_node_source_text(terminal), 10)
+    return f"Path {index}: {terminal_text or 'workflow scenario'}"
+
+
+def workflow_path_phase(path_nodes: list[dict[str, Any]]) -> str:
+    phases = [str(node.get("phase") or "") for node in path_nodes if node.get("phase")]
+    return phases[0] if phases else ""
+
+
+def workflow_path_lane(path_nodes: list[dict[str, Any]]) -> str:
+    lanes = [workflow_node_lane(node) for node in path_nodes if workflow_node_lane(node)]
+    return lanes[0] if lanes else ""
+
+
+def workflow_path_sort_key(path: list[str]) -> tuple[int, int, str]:
+    joined = " ".join(path)
+    has_support_path = 0 if all(term in joined for term in ["node_15_2", "node_16", "node_17", "node_18"]) else 1
+    return (has_support_path, len(path), joined)
+
+
+def workflow_phase_sort_key(value: str) -> tuple[int, str]:
+    order = {"open": 0, "body": 1, "close": 2}
+    key = strip_accents(str(value or "").lower())
+    return (order.get(key, 50), key)
+
+
+def workflow_node_sort_key(node: dict[str, Any]) -> tuple[int, float, str]:
+    return (int(node.get("page") or 1), step_sort_value(str(node.get("step_code") or "")), str(node.get("id") or ""))
+
+
+def step_sort_value(step_code: str) -> float:
+    if not step_code:
+        return 10_000.0
+    try:
+        if "." in step_code:
+            major, minor = step_code.split(".", 1)
+            return float(major) + (float(minor) / 100.0)
+        return float(step_code)
+    except ValueError:
+        return 10_000.0
+
+
+def workflow_condition_sort_key(condition: Any) -> tuple[int, str]:
+    normalized = normalize_workflow_condition(condition)
+    order = {"yes": 0, "no": 1, "next": 2, "handoff": 3, "fallback": 4, "return": 5, "retry": 6}
+    return (order.get(normalized, 50), normalized)
+
+
+def normalize_workflow_condition(value: Any) -> str:
+    normalized = strip_accents(str(value or "next").lower()).strip()
+    mapping = {"co": "yes", "yes": "yes", "y": "yes", "khong": "no", "no": "no", "n": "no"}
+    return mapping.get(normalized, normalized or "next")
+
+
+def node_confidence(node: dict[str, Any]) -> float:
+    try:
+        return max(0.0, min(float(node.get("confidence") or 0.82), 1.0))
+    except (TypeError, ValueError):
+        return 0.82
+
+
+def edge_confidence(edge: dict[str, Any], from_node: dict[str, Any], to_node: dict[str, Any]) -> float:
+    try:
+        edge_value = float(edge.get("confidence") or 0.78)
+    except (TypeError, ValueError):
+        edge_value = 0.78
+    return max(0.0, min(edge_value, node_confidence(from_node), node_confidence(to_node), 1.0))
+
+
+def phase_confidence(nodes: list[dict[str, Any]]) -> float:
+    if not nodes:
+        return 0.72
+    return max(0.0, min(sum(node_confidence(node) for node in nodes) / len(nodes), 1.0))
+
+
+def strip_step_prefix(value: str) -> str:
+    return normalize_display_text(re.sub(r"^\s*\d{1,2}(?:\.\d{1,2})?\s*[.)]?\s*", "", value or ""))
+
+
+def slug_key(value: Any) -> str:
+    key = strip_accents(str(value or "").lower())
+    return re.sub(r"[^a-z0-9]+", "_", key).strip("_") or "item"
+
+
+def dedupe_workflow_units(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for unit in units:
+        metadata = unit.get("metadata") if isinstance(unit.get("metadata"), dict) else {}
+        key_parts = [
+            str(unit.get("unit_type") or ""),
+            str(metadata.get("workflow_node_id") or ""),
+            str(metadata.get("from_step_code") or ""),
+            str(metadata.get("to_step_code") or ""),
+            str(metadata.get("condition") or ""),
+            str(metadata.get("phase") or ""),
+            str(metadata.get("annotation_id") or ""),
+            str(metadata.get("target_title") or ""),
+            str(unit.get("content") or "")[:200],
+        ]
+        key = "|".join(key_parts)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(unit)
+    return output
 
 
 def workflow_graph_summary(graph: dict[str, Any]) -> str:

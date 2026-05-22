@@ -214,7 +214,7 @@ def default_ranking_config() -> dict[str, Any]:
                 "content": 12,
                 "max_total": 36,
             },
-            "source_ref_quality": {"table_row": 8, "block_id": 6, "paragraph_only": 3, "none": -20},
+            "source_ref_quality": {"table_row": 8, "bbox": 8, "block_id": 6, "paragraph_only": 3, "none": -20},
             "status": {"published": 15, "approved": 5, "needs_review": -20, "draft": -40},
             "current_version": {"true": 8, "false": -25},
             "authority_level": {"source_of_truth": 14, "policy": 10, "procedure": 6, "reference": 2, "example": -8, "deprecated": -30},
@@ -226,8 +226,40 @@ def default_ranking_config() -> dict[str, Any]:
             "example_penalty_when_policy_exists": -8,
             "full_sop_penalty_for_specific_query": -10,
         },
-        "chunk_type_priorities": {"generic": {"source_evidence_section": 4}},
-        "intent_rules": {},
+        "chunk_type_priorities": {
+            "handling": {
+                "decision_branch": 22,
+                "workflow_path": 20,
+                "decision_node": 12,
+                "workflow_step": 10,
+                "workflow_phase": 4,
+                "full_workflow_diagram": -10,
+            },
+            "generic": {
+                "decision_branch": 10,
+                "workflow_path": 8,
+                "workflow_step": 5,
+                "source_evidence_section": 4,
+                "full_workflow_diagram": -10,
+            },
+        },
+        "intent_rules": {
+            "handling": {
+                "seed_terms": [
+                    "khi nào",
+                    "trường hợp",
+                    "nếu",
+                    "có được",
+                    "xử lý sao",
+                    "không cung cấp email",
+                    "teamlead",
+                    "layer 2",
+                    "mời đánh giá",
+                    "đúng kênh",
+                    "cuộc gọi",
+                ]
+            }
+        },
         "model_query_understanding": {
             "enabled_for_ai_chat": True,
             "enabled_for_portal": False,
@@ -1119,6 +1151,8 @@ def derive_source_ref_quality(source_refs: tuple[dict[str, Any], ...], metadata:
     for ref in source_refs:
         if ref.get("row_index") is not None and ref.get("table_index") is not None:
             return "table_row"
+    if any(isinstance(ref.get("bbox"), list) and len(ref.get("bbox") or []) >= 4 for ref in source_refs):
+        return "bbox"
     if metadata.get("block_id") or any(ref.get("block_id") for ref in source_refs):
         return "block_id"
     if any(ref.get("paragraph_index") is not None for ref in source_refs):
@@ -1186,7 +1220,7 @@ def preferred_chunk_types_for_intent(intent: str) -> tuple[str, ...]:
     if intent == "wording":
         return ("wording_rule_group", "wording_rule", "macro_script")
     if intent == "handling":
-        return ("handling_rule_group", "handling_rule", "operational_instruction")
+        return ("decision_branch", "workflow_path", "handling_rule_group", "handling_rule", "workflow_step", "operational_instruction")
     if intent == "document_title":
         return ("full_sop", "source_evidence_section")
     return ()

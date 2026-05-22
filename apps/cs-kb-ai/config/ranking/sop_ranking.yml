@@ -40,6 +40,7 @@
     },
     "source_ref_quality": {
       "table_row": 8,
+      "bbox": 8,
       "block_id": 6,
       "paragraph_only": 3,
       "none": -20
@@ -117,9 +118,14 @@
       "full_sop": -8
     },
     "handling": {
+      "decision_branch": 22,
+      "workflow_path": 20,
       "handling_rule_group": 18,
       "handling_rule": 14,
+      "decision_node": 12,
+      "workflow_step": 10,
       "macro_script": 5,
+      "workflow_phase": 4,
       "full_sop": -8
     },
     "document_title": {
@@ -128,6 +134,9 @@
       "macro_script": -8
     },
     "generic": {
+      "decision_branch": 10,
+      "workflow_path": 8,
+      "workflow_step": 5,
       "source_evidence_section": 4
     }
   },
@@ -145,7 +154,7 @@
       "seed_terms": ["chế tài", "khóa tài khoản", "khóa", "vi phạm", "quy trình nội bộ", "tiết lộ", "SI", "bộ phận chuyên môn"]
     },
     "handling": {
-      "seed_terms": ["khi nào", "trường hợp", "nếu", "có được", "xử lý sao"]
+      "seed_terms": ["khi nào", "trường hợp", "nếu", "có được", "xử lý sao", "không cung cấp email", "teamlead", "layer 2", "mời đánh giá", "đúng kênh", "cuộc gọi"]
     },
     "document_title": {
       "seed_terms": ["sop", "quy định", "tài liệu"]

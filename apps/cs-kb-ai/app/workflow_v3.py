@@ -376,6 +376,11 @@ def compile_canvas_relations(filename: str, canvas: dict[str, Any]) -> list[dict
                     "relation_type": normalize_relation_type(item.get("relation_type") or "requires", text),
                     "relation_source": str(item.get("relation_source") or "explicit_text_reference"),
                     "evidence_text": text[:500],
+                    "attached_to_step_codes": [
+                        normalize_step_code(code)
+                        for code in list_payload(item.get("attached_to_step_codes") or item.get("attached_steps") or item.get("steps"))
+                        if normalize_step_code(code)
+                    ],
                     "confidence": clamp_float(item.get("confidence"), 0.4, 0.95, 0.82),
                     "source_refs": [source_ref(filename, page_number, item.get("bbox"))],
                 }

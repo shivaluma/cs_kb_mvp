@@ -802,8 +802,9 @@ def retrieval_display_contract(
 ) -> RetrievalDisplayContract:
     refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
     first_ref = next((ref for ref in refs if isinstance(ref, dict)), {})
+    open_mode = "workflow_diagram" if is_workflow_diagram_result(row, metadata) else "full_document"
     return RetrievalDisplayContract(
-        open_mode="full_document",
+        open_mode=open_mode,
         highlight_source_refs=[ref for ref in refs if isinstance(ref, dict)],
         scroll_target=ScrollTarget(
             block_id=source_anchor.block_id,
@@ -825,6 +826,9 @@ def build_display_context(row: dict[str, Any], context: dict[str, Any] | None) -
     document_title = str((context or {}).get("document_title") or row.get("title") or "")
     version_number = int((context or {}).get("version_number") or row.get("version_number") or 0)
     source_anchor = source_anchor_for_row(row, metadata)
+
+    if is_workflow_diagram_result(row, metadata, document_metadata):
+        return workflow_diagram_display_context(row, metadata, context, document_metadata, source_anchor)
 
     if not context:
         log_source_resolution("source_parent_missing", row, source_anchor, "display_context_not_loaded")
@@ -907,6 +911,98 @@ def build_display_context(row: dict[str, Any], context: dict[str, Any] | None) -
         highlights=[highlight],
         fallback_excerpt=source_text if highlight_failed else "",
         highlight_failed=highlight_failed,
+        source_anchor=source_anchor,
+        source_resolution_status="resolved",
+    )
+
+
+def is_workflow_diagram_result(
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    document_metadata: dict[str, Any] | None = None,
+) -> bool:
+    document_metadata = document_metadata if isinstance(document_metadata, dict) else {}
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "")
+    workflow_types = {
+        "full_workflow_diagram",
+        "workflow_phase",
+        "workflow_step",
+        "decision_node",
+        "decision_branch",
+        "workflow_path",
+        "script_block",
+        "annotation",
+        "relation_to_sop",
+        "visual_source_block",
+    }
+    return (
+        metadata.get("open_mode") == "workflow_diagram"
+        or metadata.get("display_unit_type") == "workflow_diagram"
+        or metadata.get("document_type") == "workflow_diagram"
+        or document_metadata.get("document_type") == "workflow_diagram"
+        or unit_type in workflow_types
+    )
+
+
+def workflow_diagram_display_context(
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    context: dict[str, Any] | None,
+    document_metadata: dict[str, Any],
+    source_anchor: SourceAnchor,
+) -> DisplayContext:
+    source_text = str(metadata.get("display_text") or metadata.get("source_text") or row.get("content") or "")
+    source_chunk_id = str(row.get("chunk_id") or "")
+    refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    has_bbox = any(isinstance(ref, dict) and isinstance(ref.get("bbox"), list) and len(ref.get("bbox") or []) >= 4 for ref in refs)
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "")
+    phase = first_text(metadata.get("phase"))
+    lane = first_text(metadata.get("lane"), metadata.get("actor"))
+    step_code = first_text(metadata.get("step_code"), metadata.get("from_step_code"))
+    section_title = first_text(
+        metadata.get("section_title"),
+        " / ".join(part for part in [phase, lane, f"Step {step_code}" if step_code else ""] if part),
+        row.get("heading"),
+        row.get("section"),
+    )
+    document_title = str((context or {}).get("document_title") or metadata.get("document_title") or row.get("title") or "")
+    document_id = str(row.get("document_id") or "")
+    version_number = int((context or {}).get("version_number") or row.get("version_number") or 0) or None
+    collections = collection_refs(metadata, document_metadata)
+    category = first_text(metadata.get("category"), document_metadata.get("category"))
+    highlight = DisplayHighlight(
+        chunk_id=source_chunk_id,
+        text=source_text,
+        match_strategy="visual_bbox" if has_bbox else "workflow_source_ref",
+        source_anchor=source_anchor,
+    )
+    block = DisplayBlock(
+        id=source_anchor.block_id or source_chunk_id,
+        title=str(row.get("heading") or section_title or unit_type),
+        content=source_text,
+        unit_type=unit_type,
+        chunk_id=source_chunk_id,
+        block_type="workflow_diagram",
+        source_anchor=source_anchor,
+    )
+    log_source_resolution("source_highlight_success", row, source_anchor, highlight.match_strategy)
+    return DisplayContext(
+        display_unit_type="workflow_diagram",
+        document_id=document_id,
+        document_title=document_title,
+        section_id=source_anchor.section_id,
+        section_title=section_title,
+        category=category,
+        collections=collections,
+        version_number=version_number,
+        last_updated=(context or {}).get("updated_at"),
+        published_at=(context or {}).get("published_at"),
+        effective_date=first_text(metadata.get("effective_from"), metadata.get("effective_date"), document_metadata.get("effective_from")),
+        content=source_text,
+        blocks=[block],
+        highlights=[highlight],
+        fallback_excerpt="",
+        highlight_failed=False,
         source_anchor=source_anchor,
         source_resolution_status="resolved",
     )
