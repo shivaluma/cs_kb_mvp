@@ -156,7 +156,39 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         repository.log_chat(response)
         return response
 
-    unsupported = unsupported_scenario_assessment(request.question, retrieval.results)
+    authority_analysis = analyze_context_authority(request.question, retrieval.results)
+    warnings.extend(authority_analysis["warnings"])
+    retrieval_for_answer = retrieval
+    primary_context = authority_analysis["primary_context"]
+    if primary_context:
+        retrieval_for_answer = retrieval.model_copy(
+            update={
+                "results": primary_context,
+                "citations": [result.citation for result in primary_context],
+            }
+        )
+    if not authority_analysis["answer_allowed"]:
+        response = GroundedChatResponse(
+            question=request.question,
+            answer=authority_analysis["safe_response"],
+            steps=[],
+            warnings=[*warnings, "authority_conflict_requires_review" if authority_analysis["requires_review"] else "insufficient_primary_context"],
+            citations=[result.citation for result in primary_context],
+            sources=primary_context or retrieval.results,
+            confidence=0.0,
+            retrieval=retrieval_for_answer,
+            source_groups=bundle.source_groups,
+            retrieval_trace={**bundle.trace, "authority_analysis": authority_analysis["debug"]},
+            answer_scope=answer_scope.model_dump(),
+            latency_ms=elapsed_ms(started_at),
+            model_route=selection.route,
+            model_used=selection.model,
+            model_reason=selection.reason,
+        )
+        repository.log_chat(response)
+        return response
+
+    unsupported = unsupported_scenario_assessment(request.question, retrieval_for_answer.results)
     if unsupported.get("status") == "unsupported_or_ambiguous":
         response = GroundedChatResponse(
             question=request.question,
@@ -164,11 +196,11 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             steps=[],
             warnings=[*warnings, "unsupported_scenario_detected", *[f"unsupported_reason:{reason}" for reason in unsupported.get("reason_codes", [])]],
             citations=[],
-            sources=retrieval.results,
+            sources=retrieval_for_answer.results,
             confidence=0.12,
-            retrieval=retrieval,
+            retrieval=retrieval_for_answer,
             source_groups=bundle.source_groups,
-            retrieval_trace={**bundle.trace, "unsupported_scenario": unsupported},
+            retrieval_trace={**bundle.trace, "unsupported_scenario": unsupported, "authority_analysis": authority_analysis["debug"]},
             answer_scope=answer_scope.model_dump(),
             latency_ms=elapsed_ms(started_at),
             model_route=selection.route,
@@ -180,7 +212,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
 
     answer, answer_warnings = generate_grounded_answer(
         request.question,
-        retrieval,
+        retrieval_for_answer,
         [message.model_dump() for message in request.conversation],
         session_summary=request.session_summary,
         recent_user_context=request.recent_user_context,
@@ -192,7 +224,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
     if answer is None and selection.fallback_model and selection.fallback_model != selection.model:
         fallback_answer, fallback_warnings = generate_grounded_answer(
             request.question,
-            retrieval,
+            retrieval_for_answer,
             [message.model_dump() for message in request.conversation],
             session_summary=request.session_summary,
             recent_user_context=request.recent_user_context,
@@ -211,12 +243,12 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             answer="Không thể tạo câu trả lời grounded từ model lúc này. Các SOP sources bên dưới vẫn là published curated units, hãy mở source để xử lý hoặc thử lại.",
             steps=[],
             warnings=warnings,
-            citations=retrieval.citations[: request.limit],
-            sources=retrieval.results,
+            citations=retrieval_for_answer.citations[: request.limit],
+            sources=retrieval_for_answer.results,
             confidence=0,
-            retrieval=retrieval,
+            retrieval=retrieval_for_answer,
             source_groups=bundle.source_groups,
-            retrieval_trace=bundle.trace,
+            retrieval_trace={**bundle.trace, "authority_analysis": authority_analysis["debug"]},
             answer_scope=answer_scope.model_dump(),
             latency_ms=elapsed_ms(started_at),
             model_route=selection.route,
@@ -226,8 +258,8 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         repository.log_chat(response)
         return response
 
-    source_indices = [index for index in answer.source_indices if 1 <= index <= len(retrieval.results)]
-    cited_results = [retrieval.results[index - 1] for index in source_indices]
+    source_indices = [index for index in answer.source_indices if 1 <= index <= len(retrieval_for_answer.results)]
+    cited_results = [retrieval_for_answer.results[index - 1] for index in source_indices]
     citations = [result.citation for result in cited_results]
     if not citations:
         warnings.append("no_valid_citation_after_filter")
@@ -239,7 +271,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         steps = answer.steps
         answer_text, steps, scope_warnings = prune_answer_to_scope(answer_text, steps, request.question)
         warnings.extend(scope_warnings)
-    unresolved_dependencies = repository.unresolved_relations_for_chunks([result.chunk_id for result in cited_results or retrieval.results])
+    unresolved_dependencies = repository.unresolved_relations_for_chunks([result.chunk_id for result in cited_results or retrieval_for_answer.results])
     if unresolved_dependencies:
         warnings.append("matched_source_has_unresolved_dependency")
         dependency_titles = list(dict.fromkeys([str(item.get("target_title") or "") for item in unresolved_dependencies if item.get("target_title")]))[:3]
@@ -251,7 +283,7 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
             )
     confidence = evidence_confidence(
         request.question,
-        retrieval.results,
+        retrieval_for_answer.results,
         cited_results,
         float(answer.confidence or 0),
         bool(unresolved_dependencies),
@@ -265,11 +297,11 @@ def grounded_chat(request: GroundedChatRequest) -> GroundedChatResponse:
         steps=steps,
         warnings=[*warnings, *answer.warnings],
         citations=citations,
-        sources=cited_results or retrieval.results,
+            sources=cited_results or retrieval_for_answer.results,
         confidence=confidence,
-        retrieval=retrieval,
+        retrieval=retrieval_for_answer,
         source_groups=bundle.source_groups,
-        retrieval_trace=bundle.trace,
+        retrieval_trace={**bundle.trace, "authority_analysis": authority_analysis["debug"]},
         answer_scope=answer_scope.model_dump(),
         latency_ms=elapsed_ms(started_at),
         model_route=selection.route,
@@ -1105,6 +1137,217 @@ def source_groups(results: list[RetrievalResult]) -> list[dict[str, Any]]:
 
 def has_policy_source(results: list[RetrievalResult]) -> bool:
     return any(source_role(result) in POLICY_SOURCE_ROLES for result in results)
+
+
+def analyze_context_authority(question: str, results: list[RetrievalResult]) -> dict[str, Any]:
+    customer_response_query = is_customer_response_query(question)
+    primary: list[RetrievalResult] = []
+    secondary: list[RetrievalResult] = []
+    excluded: list[RetrievalResult] = []
+    conflicts: list[dict[str, str]] = []
+
+    for result in results:
+        metadata = result.metadata or {}
+        role = source_role(result)
+        unit_type = str(metadata.get("unit_type") or result.section or "")
+        authority = normalize_for_match(str(metadata.get("authority_level") or "policy"))
+        visibility = normalize_for_match(str(metadata.get("visibility") or "internal_only"))
+        if role not in POLICY_SOURCE_ROLES:
+            secondary.append(mark_authority_role(result, "secondary_context", "non_primary_source_role"))
+            continue
+        if authority in {"deprecated", "example"} or unit_type == "example":
+            secondary.append(mark_authority_role(result, "secondary_context", "example_or_deprecated"))
+            continue
+        if customer_response_query and visibility == "internal only" and has_customer_facing_peer(results):
+            secondary.append(mark_authority_role(result, "secondary_context", "internal_only_background"))
+            conflicts.append(
+                {
+                    "type": "audience_scope_conflict",
+                    "description": "Internal-only SOP context appeared with customer-facing response context.",
+                    "resolution": "Customer-facing/CS-response context controls customer wording; internal-only context is background only.",
+                }
+            )
+            continue
+        primary.append(mark_authority_role(result, "primary_context", "authority_selected"))
+
+    conflicts.extend(primary_policy_conflicts(primary))
+    conflicts.extend(scope_mix_conflicts(primary))
+    requires_review = any(conflict["type"] == "primary_policy_conflict" for conflict in conflicts)
+    answer_allowed = bool(primary) and not requires_review
+    if not primary and secondary:
+        answer_allowed = False
+    return {
+        "primary_context": primary,
+        "secondary_context": secondary,
+        "excluded_context": excluded,
+        "conflicts": conflicts,
+        "answer_allowed": answer_allowed,
+        "requires_review": requires_review,
+        "safe_response": safe_authority_response(bool(primary), requires_review),
+        "warnings": authority_warnings(primary, secondary, conflicts),
+        "debug": {
+            "primary_context_ids": [result.chunk_id for result in primary],
+            "secondary_context_ids": [result.chunk_id for result in secondary],
+            "excluded_context_ids": [result.chunk_id for result in excluded],
+            "conflicts": conflicts,
+            "answer_allowed": answer_allowed,
+            "requires_review": requires_review,
+        },
+    }
+
+
+def mark_authority_role(result: RetrievalResult, context_role: str, reason: str) -> RetrievalResult:
+    metadata = dict(result.metadata or {})
+    metadata["authority_context_role"] = context_role
+    metadata["authority_selection_reason"] = reason
+    return result.model_copy(update={"metadata": metadata})
+
+
+def is_customer_response_query(question: str) -> bool:
+    normalized = normalize_for_match(question)
+    return any(
+        term in normalized
+        for term in {
+            "khach",
+            "customer",
+            "noi cho khach",
+            "phan hoi",
+            "email",
+            "call",
+            "chat",
+            "mau cau",
+            "wording",
+        }
+    )
+
+
+def has_customer_facing_peer(results: list[RetrievalResult]) -> bool:
+    for result in results:
+        visibility = normalize_for_match(str((result.metadata or {}).get("visibility") or ""))
+        scope = normalize_for_match(str((result.metadata or {}).get("scope") or (result.metadata or {}).get("retrieval_scope") or ""))
+        if visibility == "customer facing" or scope == "cs response":
+            return True
+    return False
+
+
+def primary_policy_conflicts(results: list[RetrievalResult]) -> list[dict[str, str]]:
+    groups: dict[str, set[str]] = {}
+    conflicts: list[dict[str, str]] = []
+    for result in results:
+        metadata = result.metadata or {}
+        conflict_group = str(metadata.get("conflict_group") or "").strip()
+        authority = normalize_for_match(str(metadata.get("authority_level") or "policy"))
+        if not conflict_group or authority not in {"source of truth", "source_of_truth", "policy"}:
+            continue
+        groups.setdefault(conflict_group, set()).add(result.document_id)
+    conflicts.extend(
+        {
+            "type": "primary_policy_conflict",
+            "description": f"Multiple current primary SOPs share conflict_group={group}.",
+            "resolution": "Do not resolve silently. Owner/QA review is required before answer generation.",
+        }
+        for group, document_ids in groups.items()
+        if len(document_ids) > 1
+    )
+    conflicts.extend(direct_text_policy_conflicts(results))
+    return conflicts
+
+
+def direct_text_policy_conflicts(results: list[RetrievalResult]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    for left_index, left in enumerate(results):
+        for right in results[left_index + 1 :]:
+            if left.document_id == right.document_id:
+                continue
+            if not comparable_primary_policy(left, right):
+                continue
+            left_text = normalize_for_match(f"{left.heading} {left.content}")
+            right_text = normalize_for_match(f"{right.heading} {right.content}")
+            if not has_direct_allow_deny_conflict(left_text, right_text):
+                continue
+            output.append(
+                {
+                    "type": "primary_policy_conflict",
+                    "description": "Two current primary SOP chunks in the same scope appear to allow vs forbid the same action.",
+                    "resolution": "Do not resolve silently. Owner/QA review is required before answer generation.",
+                }
+            )
+    return output[:3]
+
+
+def comparable_primary_policy(left: RetrievalResult, right: RetrievalResult) -> bool:
+    left_meta = left.metadata or {}
+    right_meta = right.metadata or {}
+    if left_meta.get("is_current_version") is False or right_meta.get("is_current_version") is False:
+        return False
+    left_scope = normalize_for_match(str(left_meta.get("scope") or left_meta.get("retrieval_scope") or "generic"))
+    right_scope = normalize_for_match(str(right_meta.get("scope") or right_meta.get("retrieval_scope") or "generic"))
+    left_visibility = normalize_for_match(str(left_meta.get("visibility") or ""))
+    right_visibility = normalize_for_match(str(right_meta.get("visibility") or ""))
+    if left_scope != right_scope or left_visibility != right_visibility:
+        return False
+    left_authority = normalize_for_match(str(left_meta.get("authority_level") or "policy"))
+    right_authority = normalize_for_match(str(right_meta.get("authority_level") or "policy"))
+    return left_authority in {"source of truth", "source_of_truth", "policy"} and right_authority in {"source of truth", "source_of_truth", "policy"}
+
+
+def has_direct_allow_deny_conflict(left_text: str, right_text: str) -> bool:
+    polarities = {text_policy_polarity(left_text), text_policy_polarity(right_text)}
+    if polarities != {"allow", "deny"}:
+        return False
+    left_terms = meaningful_policy_terms(left_text)
+    right_terms = meaningful_policy_terms(right_text)
+    return len(left_terms & right_terms) >= 4
+
+
+def text_policy_polarity(text: str) -> str:
+    deny_terms = ("khong duoc", "khong noi", "khong cung cap", "tuyet doi khong", "cam ")
+    allow_terms = ("duoc noi", "co the noi", "duoc cung cap", "cho phep", "duoc phep")
+    if any(term in text for term in deny_terms):
+        return "deny"
+    if any(term in text for term in allow_terms):
+        return "allow"
+    return "neutral"
+
+
+def meaningful_policy_terms(text: str) -> set[str]:
+    stopwords = {"cho", "khach", "rang", "duoc", "khong", "noi", "cung", "cap", "the", "cs", "vi", "do"}
+    return {token for token in text.split() if len(token) >= 3 and token not in stopwords}
+
+
+def scope_mix_conflicts(results: list[RetrievalResult]) -> list[dict[str, str]]:
+    scopes = {
+        normalize_for_match(str((result.metadata or {}).get("scope") or (result.metadata or {}).get("retrieval_scope") or "generic"))
+        for result in results
+    }
+    meaningful = {scope for scope in scopes if scope and scope not in {"generic", "unit", "document"}}
+    if len(meaningful) <= 1:
+        return []
+    return [
+        {
+            "type": "audience_scope_conflict",
+            "description": "Selected context mixes different SOP scopes.",
+            "resolution": "Treat scopes as complementary only when the source role or relation explicitly supports it.",
+        }
+    ]
+
+
+def authority_warnings(primary: list[RetrievalResult], secondary: list[RetrievalResult], conflicts: list[dict[str, str]]) -> list[str]:
+    warnings: list[str] = []
+    if secondary:
+        warnings.append("secondary_context_available_not_primary")
+    warnings.extend(f"conflict_detected:{conflict['type']}" for conflict in conflicts)
+    if not primary:
+        warnings.append("no_primary_authoritative_context")
+    return list(dict.fromkeys(warnings))
+
+
+def safe_authority_response(has_primary: bool, requires_review: bool) -> str:
+    if requires_review:
+        return "Các SOP published/current chính đang mâu thuẫn hoặc cùng conflict group. Không nên tự kết luận; cần owner/QA review trước khi trả lời CS."
+    if not has_primary:
+        return "Không có SOP published/current đủ quyền làm primary context cho câu hỏi này. Hãy mở source hoặc escalate Lead để xác nhận."
+    return ""
 
 
 def select_chat_model(request: GroundedChatRequest, retrieval: object) -> ChatModelSelection:

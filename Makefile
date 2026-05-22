@@ -11,7 +11,7 @@ include .env.local
 export
 endif
 
-.PHONY: dev up down api web ai setup-ai test-api test-ai build-web
+.PHONY: dev up down api web ai setup-ai test-api test-ai retrieval-eval build-web
 
 dev: up
 
@@ -40,6 +40,10 @@ test-api:
 
 test-ai:
 	cd apps/cs-kb-ai && .venv/bin/python -m compileall app
+
+retrieval-eval:
+	cd apps/cs-kb-ai && .venv/bin/python scripts/evaluate_sop_ranking.py --mode portal_search
+	cd apps/cs-kb-ai && .venv/bin/python scripts/evaluate_sop_ranking.py --mode ai_chat
 
 build-web:
 	cd apps/cs-kb-web && pnpm run build

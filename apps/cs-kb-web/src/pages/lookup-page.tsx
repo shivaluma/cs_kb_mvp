@@ -135,6 +135,10 @@ export function LookupPage() {
       setParams({ chunk: "" });
       return;
     }
+    if ([...trimmedQuery].length === 1) {
+      reportNotice("Enter at least 2 characters for title or macro lookup.");
+      return;
+    }
     const nextSearchEventId = crypto.randomUUID();
     setSearchEventId(nextSearchEventId);
     eventMutation.mutate({

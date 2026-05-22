@@ -1076,7 +1076,9 @@ def extract_mixed_docx_policy_chunks(
             )
         )
 
-    chunks = mixed_docx_add_group_parent_chunks(chunks, classification, document_audience, document_channels)
+    chunks = mixed_docx_order_parent_sections_after_searchable_units(
+        mixed_docx_add_group_parent_chunks(chunks, classification, document_audience, document_channels)
+    )
     return chunks if len(chunks) > 1 else []
 
 
@@ -1358,6 +1360,18 @@ def mixed_docx_add_group_parent_chunks(
             }
             output[index] = replace_chunk_metadata(child, metadata)
     return output
+
+
+def mixed_docx_order_parent_sections_after_searchable_units(chunks: list[Chunk]) -> list[Chunk]:
+    full_sop = [chunk for chunk in chunks if (chunk.metadata or {}).get("unit_type") == "full_sop"]
+    parent_sections = [chunk for chunk in chunks if (chunk.metadata or {}).get("chunk_type") == "parent_section"]
+    searchable = [
+        chunk
+        for chunk in chunks
+        if (chunk.metadata or {}).get("unit_type") != "full_sop"
+        and (chunk.metadata or {}).get("chunk_type") != "parent_section"
+    ]
+    return reindex_local_chunks([*full_sop, *searchable, *parent_sections])
 
 
 def mixed_docx_wording_group_specs(chunks: list[Chunk]) -> list[tuple[str, str, str, list[int]]]:

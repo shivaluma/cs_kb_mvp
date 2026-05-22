@@ -430,11 +430,13 @@ def ensure_schema() -> None:
               filters jsonb NOT NULL DEFAULT '{}'::jsonb,
               mode text NOT NULL,
               result_count integer NOT NULL,
+              trace jsonb NOT NULL DEFAULT '{}'::jsonb,
               latency_ms integer NOT NULL,
               created_at timestamptz NOT NULL DEFAULT now()
             )
             """
         )
+        conn.execute("ALTER TABLE ai_retrieval_events ADD COLUMN IF NOT EXISTS trace jsonb NOT NULL DEFAULT '{}'::jsonb")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_chat_events (
@@ -445,11 +447,19 @@ def ensure_schema() -> None:
               confidence numeric NOT NULL DEFAULT 0,
               warnings jsonb NOT NULL DEFAULT '[]'::jsonb,
               source_chunk_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+              retrieval_trace jsonb NOT NULL DEFAULT '{}'::jsonb,
+              model_route text NOT NULL DEFAULT '',
+              model_used text NOT NULL DEFAULT '',
+              model_reason text NOT NULL DEFAULT '',
               latency_ms integer NOT NULL DEFAULT 0,
               created_at timestamptz NOT NULL DEFAULT now()
             )
             """
         )
+        conn.execute("ALTER TABLE ai_chat_events ADD COLUMN IF NOT EXISTS retrieval_trace jsonb NOT NULL DEFAULT '{}'::jsonb")
+        conn.execute("ALTER TABLE ai_chat_events ADD COLUMN IF NOT EXISTS model_route text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE ai_chat_events ADD COLUMN IF NOT EXISTS model_used text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE ai_chat_events ADD COLUMN IF NOT EXISTS model_reason text NOT NULL DEFAULT ''")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_chat_sessions (
@@ -5746,6 +5756,18 @@ def filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
         clauses.append("((d.metadata->'audience') ?| %s OR (c.metadata->'audience') ?| %s)")
         params.append(filters.audience)
         params.append(filters.audience)
+    if filters.visibility:
+        clauses.append("COALESCE(c.metadata->>'visibility', d.metadata->>'visibility', 'internal_only') = ANY(%s)")
+        params.append(filters.visibility)
+    if filters.scope:
+        clauses.append("COALESCE(c.metadata->>'scope', c.metadata->>'retrieval_scope', d.metadata->>'scope', 'generic') = ANY(%s)")
+        params.append(filters.scope)
+    if filters.policy_type:
+        clauses.append("COALESCE(c.metadata->>'policy_type', d.metadata->>'policy_type', c.metadata->>'unit_type', c.section) = ANY(%s)")
+        params.append(filters.policy_type)
+    if filters.authority_level:
+        clauses.append("COALESCE(c.metadata->>'authority_level', d.metadata->>'authority_level', 'policy') = ANY(%s)")
+        params.append(filters.authority_level)
     if filters.tags:
         clauses.append("((d.metadata->'tags') ?| %s OR (c.metadata->'tags') ?| %s)")
         params.append(filters.tags)
@@ -5786,15 +5808,22 @@ def lexical_tsquery(query: str) -> str:
     return " | ".join(terms)
 
 
-def log_retrieval(query: str, filters: dict[str, Any], mode: str, result_count: int, started_at: float) -> int:
+def log_retrieval(
+    query: str,
+    filters: dict[str, Any],
+    mode: str,
+    result_count: int,
+    started_at: float,
+    trace: dict[str, Any] | None = None,
+) -> int:
     latency_ms = int((time.perf_counter() - started_at) * 1000)
     with connection() as conn:
         conn.execute(
             """
-            INSERT INTO ai_retrieval_events (id, query, filters, mode, result_count, latency_ms)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+            INSERT INTO ai_retrieval_events (id, query, filters, mode, result_count, trace, latency_ms)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s)
             """,
-            (str(uuid.uuid4()), query, json.dumps(filters), mode, result_count, latency_ms),
+            (str(uuid.uuid4()), query, json.dumps(filters), mode, result_count, jsonb_text(trace or {}), latency_ms),
         )
     return latency_ms
 
@@ -6044,9 +6073,10 @@ def log_chat(response: Any) -> None:
         conn.execute(
             """
             INSERT INTO ai_chat_events (
-              id, question, answer, citation_count, confidence, warnings, source_chunk_ids, latency_ms
+              id, question, answer, citation_count, confidence, warnings, source_chunk_ids,
+              retrieval_trace, model_route, model_used, model_reason, latency_ms
             )
-            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s)
             """,
             (
                 str(uuid.uuid4()),
@@ -6056,6 +6086,10 @@ def log_chat(response: Any) -> None:
                 response.confidence,
                 pg_text(json.dumps(response.warnings, ensure_ascii=False)),
                 pg_text(json.dumps(source_chunk_ids, ensure_ascii=False)),
+                jsonb_text(getattr(response, "retrieval_trace", {}) or {}),
+                pg_text(getattr(response, "model_route", "") or ""),
+                pg_text(getattr(response, "model_used", "") or ""),
+                pg_text(getattr(response, "model_reason", "") or ""),
                 response.latency_ms,
             ),
         )

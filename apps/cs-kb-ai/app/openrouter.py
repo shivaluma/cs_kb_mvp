@@ -1875,6 +1875,13 @@ def generate_grounded_answer(
             "task_type": result.metadata.get("task_type"),
             "relation_type": result.metadata.get("relation_type"),
             "risk_level": result.metadata.get("risk_level"),
+            "visibility": result.metadata.get("visibility"),
+            "scope": result.metadata.get("scope") or result.metadata.get("retrieval_scope"),
+            "policy_type": result.metadata.get("policy_type"),
+            "authority_level": result.metadata.get("authority_level"),
+            "authority_context_role": result.metadata.get("authority_context_role"),
+            "authority_selection_reason": result.metadata.get("authority_selection_reason"),
+            "source_refs": result.metadata.get("source_refs"),
             "tags": result.metadata.get("tags"),
             "aliases": result.metadata.get("aliases"),
             "condition": result.metadata.get("condition"),
@@ -1930,6 +1937,9 @@ def generate_grounded_answer(
                     "Giữ nguyên wording vận hành nhạy cảm từ source khi có thể, nhất là các cụm như 'chưa thể hỗ trợ', 'từ chối hỗ trợ', 'KHÔNG cần chuyển case', thời hạn, điều kiện Yes/No, tên queue/tool/email. "
                     "Không đổi nhẹ wording làm thay đổi mức độ policy, ví dụ không tự đổi 'chưa thể hỗ trợ' thành 'từ chối hỗ trợ' nếu source không dùng cụm đó. "
                     "Nguồn có metadata chat_source_role=issue_router/tool_link/action_template chỉ là context điều hướng/tool/action, không đủ để kết luận policy nếu không có direct_sop hoặc related_sop. "
+                    "Chỉ dùng nguồn authority_context_role=primary_context để tạo answer. Không để internal_only/reference/example override customer_facing/source_of_truth/policy context. "
+                    "Nếu hai nguồn primary current published mâu thuẫn, không tự resolve; nói cần owner/QA review. "
+                    "Mọi claim trong answer phải trace được về source_refs/citation của source_indices. "
                     "Nguồn có source_evidence_only=true là source text/audit evidence, không phải atomic policy unit; chỉ dùng để kiểm tra wording hoặc bối cảnh, không dùng một mình để tạo procedural claim. "
                     "Nếu chỉ có context index/tool/action mà không có source role direct_sop hoặc related_sop, phải nói chưa đủ SOP được link để trả lời chắc chắn. "
                     "Kỷ luật scope cho SOP vận hành: xác định đúng field user hỏi (ví dụ kênh liên hệ, số lần retry, SLA, escalation), trả lời field đó trước và không kéo thêm nhánh fallback/exception/retry/email/SLA/case/escalation nếu user không hỏi. "

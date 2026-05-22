@@ -167,6 +167,10 @@ class AdminResetResponse(BaseModel):
 
 class DocumentMetadata(BaseModel):
     audience: list[str] = Field(default_factory=list)
+    visibility: str = "internal_only"
+    scope: str = "generic"
+    policy_type: str = "procedure"
+    authority_level: str = "policy"
     vertical: str = ""
     category: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -192,6 +196,9 @@ class DocumentMetadata(BaseModel):
     review_frequency: str = ""
     last_reviewed_at: str = ""
     next_review_due: str = ""
+    effective_to: str = ""
+    related_sop_ids: list[str] = Field(default_factory=list)
+    conflict_group: str = ""
     collection_slug: str = ""
     collection_name: str = ""
     collection_type: str = ""
@@ -210,11 +217,16 @@ class DocumentMetadata(BaseModel):
 class SourceRef(BaseModel):
     source_type: str = Field(min_length=1)
     source_file: str = Field(default="", max_length=300)
+    block_id: str = ""
     sheet: str = ""
+    sheet_name: str = ""
     row_start: int | None = Field(default=None, ge=1)
     row_end: int | None = Field(default=None, ge=1)
+    row: int | None = Field(default=None, ge=1)
+    column: str = ""
     column_names: list[str] = Field(default_factory=list)
     page: int | None = Field(default=None, ge=1)
+    page_number: int | None = Field(default=None, ge=1)
     paragraph_index: int | None = Field(default=None, ge=0)
     table_index: int | None = Field(default=None, ge=0)
     row_index: int | None = Field(default=None, ge=0)
@@ -223,6 +235,32 @@ class SourceRef(BaseModel):
     line_start: int | None = Field(default=None, ge=1)
     line_end: int | None = Field(default=None, ge=1)
     bbox: list[float] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_source_ref_aliases(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        output = dict(value)
+        if output.get("page_number") is None and output.get("page") is not None:
+            output["page_number"] = output.get("page")
+        if output.get("page") is None and output.get("page_number") is not None:
+            output["page"] = output.get("page_number")
+        if not output.get("sheet_name") and output.get("sheet"):
+            output["sheet_name"] = output.get("sheet")
+        if not output.get("sheet") and output.get("sheet_name"):
+            output["sheet"] = output.get("sheet_name")
+        if output.get("row") is None and output.get("row_start") == output.get("row_end"):
+            output["row"] = output.get("row_start")
+        if output.get("row_start") is None and output.get("row") is not None:
+            output["row_start"] = output.get("row")
+        if output.get("row_end") is None and output.get("row") is not None:
+            output["row_end"] = output.get("row")
+        if not output.get("column") and isinstance(output.get("column_names"), list) and len(output["column_names"]) == 1:
+            output["column"] = output["column_names"][0]
+        if output.get("column") and not output.get("column_names"):
+            output["column_names"] = [output["column"]]
+        return output
 
     @field_validator("bbox", mode="before")
     @classmethod
@@ -1165,6 +1203,10 @@ class ArchiveRelationRequest(BaseModel):
 
 class RetrievalFilters(BaseModel):
     audience: list[str] = Field(default_factory=list)
+    visibility: list[str] = Field(default_factory=list)
+    scope: list[str] = Field(default_factory=list)
+    policy_type: list[str] = Field(default_factory=list)
+    authority_level: list[str] = Field(default_factory=list)
     vertical: list[str] = Field(default_factory=list)
     category: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)

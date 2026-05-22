@@ -40,6 +40,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/sop-versions/{id}/publish", h.publishSOPVersion)
 	mux.HandleFunc("GET /api/v1/homepage", h.homepage)
 	mux.HandleFunc("POST /api/v1/search", h.search)
+	mux.HandleFunc("GET /api/v1/search/autocomplete", h.searchAutocomplete)
 	mux.HandleFunc("GET /api/v1/search/taxonomy/intents", h.proxyAI("/ai/v1/search/taxonomy/intents"))
 	mux.HandleFunc("GET /api/v1/search/filter-options", h.proxyAI("/ai/v1/search/filter-options"))
 	mux.HandleFunc("GET /api/v1/search/synonyms", h.proxyAI("/ai/v1/search/synonyms"))
@@ -310,6 +311,30 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
 		return
 	}
+	trimmedQuery := strings.TrimSpace(req.Query)
+	queryLength := len([]rune(trimmedQuery))
+	if queryLength == 0 {
+		writeJSON(w, http.StatusOK, model.SearchResponse{
+			Query:       req.Query,
+			Results:     []model.SearchResult{},
+			Total:       0,
+			LatencyMS:   time.Since(start).Milliseconds(),
+			UsedModes:   []string{"input_guard_empty_query"},
+			Suggestions: h.autocompleteSuggestions(r.Context(), "", 8),
+		})
+		return
+	}
+	if queryLength == 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":       "query_too_short",
+			"message":     "Enter at least 2 characters for title/macro lookup, or 3+ characters for full content search.",
+			"suggestions": h.autocompleteSuggestions(r.Context(), trimmedQuery, 8),
+		})
+		return
+	}
+	if queryLength == 2 {
+		req.IncludeSemantic = false
+	}
 
 	results, modes, err := h.store.Search(r.Context(), req)
 	if err != nil {
@@ -334,6 +359,16 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		LatencyMS:       time.Since(start).Milliseconds(),
 		UsedModes:       modes,
 		Suggestions:     suggestions(req.Query, len(results)+len(semanticResults)),
+	})
+}
+
+func (h *Handler) searchAutocomplete(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := 8
+	writeJSON(w, http.StatusOK, map[string]any{
+		"query":       query,
+		"suggestions": h.autocompleteSuggestions(r.Context(), query, limit),
+		"sources":     []string{"sop_titles", "curated_shortcuts"},
 	})
 }
 
@@ -676,7 +711,7 @@ func (h *Handler) syncMeilisearchSynonyms(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	indexes := []string{"sops", "ai_documents", "ai_chunks"}
+	indexes := []string{"sops", "ai_documents", "ai_chunks", "sop_documents", "sop_chunks"}
 	results := make([]map[string]any, 0, len(indexes))
 	for _, index := range indexes {
 		target := strings.TrimRight(h.cfg.MeiliHost, "/") + "/indexes/" + index + "/settings/synonyms"
@@ -727,15 +762,19 @@ func (h *Handler) retrieveAI(ctx context.Context, req model.SearchRequest) ([]mo
 		"debug":        req.Debug,
 		"limit":        6,
 		"filters": map[string]any{
-			"audience":     emptySlice(req.Filters.Audience),
-			"vertical":     emptySlice(req.Filters.Vertical),
-			"category":     emptySlice(req.Filters.Category),
-			"tags":         emptySlice(req.Filters.Tags),
-			"case_reasons": emptySlice(req.Filters.CaseReasons),
-			"collections":  emptySlice(req.Filters.Collections),
-			"task_types":   emptySlice(req.Filters.TaskTypes),
-			"unit_types":   emptySlice(req.Filters.UnitTypes),
-			"status":       []string{"published"},
+			"audience":        emptySlice(req.Filters.Audience),
+			"vertical":        emptySlice(req.Filters.Vertical),
+			"category":        emptySlice(req.Filters.Category),
+			"tags":            emptySlice(req.Filters.Tags),
+			"case_reasons":    emptySlice(req.Filters.CaseReasons),
+			"collections":     emptySlice(req.Filters.Collections),
+			"task_types":      emptySlice(req.Filters.TaskTypes),
+			"unit_types":      emptySlice(req.Filters.UnitTypes),
+			"visibility":      emptySlice(req.Filters.Visibility),
+			"scope":           emptySlice(req.Filters.Scope),
+			"policy_type":     emptySlice(req.Filters.PolicyType),
+			"authority_level": emptySlice(req.Filters.AuthorityLevel),
+			"status":          []string{"published"},
 		},
 	}
 	var decoded struct {
@@ -956,6 +995,17 @@ func suggestions(query string, resultCount int) []string {
 		return []string{"thu tu khoa cu the hon", "kiem tra tag/category", "hoi Lead neu chua co SOP published"}
 	}
 	return []string{"thu tag khac", "kiem tra case reason", "escalate CS Lead neu khong co SOP"}
+}
+
+func (h *Handler) autocompleteSuggestions(ctx context.Context, query string, limit int) []string {
+	items, err := h.store.AutocompleteSuggestions(ctx, query, limit)
+	if err != nil {
+		h.logger.WarnContext(ctx, "autocomplete suggestions unavailable", "error", err)
+	}
+	if len(items) > 0 {
+		return items
+	}
+	return suggestions(query, 0)
 }
 
 func emptySlice(values []string) []string {

@@ -36,7 +36,7 @@
       "macro_text": 16,
       "forbidden_phrases": 20,
       "content": 12,
-      "max_total": 30
+      "max_total": 36
     },
     "source_ref_quality": {
       "table_row": 8,
@@ -53,6 +53,27 @@
     "current_version": {
       "true": 8,
       "false": -25
+    },
+    "authority_level": {
+      "source_of_truth": 14,
+      "policy": 10,
+      "procedure": 6,
+      "reference": 2,
+      "example": -8,
+      "deprecated": -30
+    },
+    "policy_type": {
+      "compliance_rule": 7,
+      "communication_rule": 6,
+      "handling_process": 4,
+      "macro": 3,
+      "reference": 0,
+      "example": -6
+    },
+    "visibility_alignment": {
+      "customer_facing": 6,
+      "internal_only": -6,
+      "any": 0
     },
     "risk_for_compliance": {
       "critical": 10,
@@ -135,7 +156,11 @@
     "enabled_for_portal": false,
     "cache_ttl_seconds": 86400,
     "output_schema": {
+      "actor": "string",
+      "recipient": "string",
       "intent": "string",
+      "required_scope": "string",
+      "required_visibility": "string",
       "confidence": "number",
       "rewritten_query": "string",
       "key_concepts": ["string"],

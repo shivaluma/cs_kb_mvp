@@ -78,6 +78,43 @@ class RetrievalEmbeddingFallbackTest(unittest.TestCase):
         self.assertIn("vector_search_failed:TypeError", response.warnings)
         self.assertIn("no_reliable_source", response.warnings)
 
+    def test_debug_retrieval_persists_candidate_trace(self) -> None:
+        with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \
+            patch("app.retrieval.repository.lexical_search", return_value=[retrieval_row()]), \
+            patch("app.retrieval.repository.vector_search", return_value=[]), \
+            patch("app.retrieval.repository.approved_relation_target_rows", return_value=[]), \
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}), \
+            patch("app.retrieval.repository.log_retrieval", return_value=12) as log_retrieval:
+            response = retrieve(RetrievalRequest(query="refund pending", mode="lexical", ranking_mode="ai_chat", limit=3, debug=True))
+
+        trace = log_retrieval.call_args.kwargs.get("trace")
+        self.assertIsInstance(trace, dict)
+        self.assertEqual(trace["ranking_debug"]["keyword_candidate_count"], 1)
+        self.assertEqual(trace["ranking_debug"]["final_selected_context_ids"], ["chunk-1"])
+        self.assertEqual(trace["selected_context"][0]["chunk_id"], "chunk-1")
+        self.assertEqual(response.ranking_debug["final_selected_context_ids"], ["chunk-1"])
+
+    def test_ai_chat_applies_confident_query_understanding_filters_to_candidate_generation(self) -> None:
+        with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \
+            patch("app.retrieval.repository.lexical_search", return_value=[retrieval_row()]) as lexical_search, \
+            patch("app.retrieval.repository.approved_relation_target_rows", return_value=[]), \
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}), \
+            patch("app.retrieval.repository.log_retrieval", return_value=12), \
+            patch("app.ranking.settings.openrouter_api_key", ""):
+            retrieve(
+                RetrievalRequest(
+                    query="CS có được nói cho khách tài xế bị khóa vì vi phạm 3 lần không",
+                    mode="lexical",
+                    ranking_mode="ai_chat",
+                    limit=3,
+                    debug=True,
+                )
+            )
+
+        applied_filters = lexical_search.call_args.args[1]
+        self.assertEqual(applied_filters.scope, ["sanction_policy"])
+        self.assertEqual(applied_filters.visibility, ["customer_facing"])
+
 
 if __name__ == "__main__":
     unittest.main()

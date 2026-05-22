@@ -71,14 +71,18 @@ type SearchRequest struct {
 }
 
 type SearchFilters struct {
-	Audience    []string `json:"audience"`
-	Vertical    []string `json:"vertical"`
-	Category    []string `json:"category"`
-	Tags        []string `json:"tags"`
-	CaseReasons []string `json:"case_reasons"`
-	Collections []string `json:"collections"`
-	TaskTypes   []string `json:"task_types"`
-	UnitTypes   []string `json:"unit_types"`
+	Audience       []string `json:"audience"`
+	Vertical       []string `json:"vertical"`
+	Category       []string `json:"category"`
+	Tags           []string `json:"tags"`
+	CaseReasons    []string `json:"case_reasons"`
+	Collections    []string `json:"collections"`
+	TaskTypes      []string `json:"task_types"`
+	UnitTypes      []string `json:"unit_types"`
+	Visibility     []string `json:"visibility"`
+	Scope          []string `json:"scope"`
+	PolicyType     []string `json:"policy_type"`
+	AuthorityLevel []string `json:"authority_level"`
 }
 
 type SearchResponse struct {

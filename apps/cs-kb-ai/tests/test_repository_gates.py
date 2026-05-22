@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from app import repository
-from app.schemas import ExtractionUnitUpdateRequest, RetrievalFilters
+from app.schemas import DocumentMetadata, ExtractionUnitUpdateRequest, RetrievalFilters, SourceRef
 
 
 class RepositoryGateTest(unittest.TestCase):
@@ -71,6 +73,40 @@ class RepositoryGateTest(unittest.TestCase):
             )
         )
 
+    def test_enterprise_metadata_and_source_ref_anchor_fields_are_first_class(self) -> None:
+        metadata = DocumentMetadata(
+            owner_team="CS Ops",
+            visibility="customer_facing",
+            scope="cs_response",
+            policy_type="communication_rule",
+            authority_level="source_of_truth",
+            related_sop_ids=["sop-refund"],
+            conflict_group="refund-customer-wording",
+            effective_to="2026-12-31",
+        )
+        source_ref = SourceRef(
+            source_type="pdf",
+            source_file="policy.pdf",
+            block_id="block-7",
+            page_number=3,
+            sheet_name="Rules",
+            row=12,
+            column="Action",
+        )
+
+        self.assertEqual(metadata.visibility, "customer_facing")
+        self.assertEqual(metadata.scope, "cs_response")
+        self.assertEqual(metadata.policy_type, "communication_rule")
+        self.assertEqual(metadata.authority_level, "source_of_truth")
+        self.assertEqual(metadata.related_sop_ids, ["sop-refund"])
+        self.assertEqual(metadata.conflict_group, "refund-customer-wording")
+        self.assertEqual(metadata.effective_to, "2026-12-31")
+        self.assertEqual(source_ref.block_id, "block-7")
+        self.assertEqual(source_ref.page_number, 3)
+        self.assertEqual(source_ref.sheet_name, "Rules")
+        self.assertEqual(source_ref.row, 12)
+        self.assertEqual(source_ref.column, "Action")
+
     def test_effective_heading_sql_escapes_literal_percent_for_psycopg3(self) -> None:
         self.assertIn("|| '%%'", repository.EFFECTIVE_HEADING_SQL)
         self.assertNotIn("|| '%'", repository.EFFECTIVE_HEADING_SQL)
@@ -86,6 +122,44 @@ class RepositoryGateTest(unittest.TestCase):
         self.assertIn("retrieval", repository.suggested_feedback_action("search_result_wrong"))
         self.assertEqual(repository.median_from_sorted([1000, 3000, 9000]), 3000)
         self.assertEqual(repository.median_from_sorted([1000, 5000]), 3000)
+
+    def test_chat_logging_persists_retrieval_trace_for_debugging(self) -> None:
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.sql = ""
+                self.params: tuple[object, ...] = ()
+
+            def __enter__(self) -> "FakeConnection":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def execute(self, sql: str, params: tuple[object, ...]) -> None:
+                self.sql = sql
+                self.params = params
+
+        fake_connection = FakeConnection()
+        response = SimpleNamespace(
+            question="Can CS say this?",
+            answer="Use source only.",
+            citations=[SimpleNamespace(chunk_id="chunk-1")],
+            confidence=0.7,
+            warnings=["grounded"],
+            retrieval_trace={"authority_analysis": {"answer_allowed": True}},
+            model_route="policy",
+            model_used="moonshotai/kimi-k2.5",
+            model_reason="manual_route",
+            latency_ms=25,
+        )
+
+        with patch("app.repository.connection", return_value=fake_connection):
+            repository.log_chat(response)
+
+        self.assertIn("retrieval_trace", fake_connection.sql)
+        self.assertIn("model_route", fake_connection.sql)
+        self.assertIn('"answer_allowed": true', str(fake_connection.params))
+        self.assertIn("policy", fake_connection.params)
 
     def test_admin_reset_preserves_curated_search_taxonomy(self) -> None:
         self.assertIn("ai_chunks", repository.ADMIN_RESET_TABLES)

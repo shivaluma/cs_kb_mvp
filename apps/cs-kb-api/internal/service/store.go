@@ -49,32 +49,52 @@ type meiliSOPDocument struct {
 }
 
 type aiChunkDocument struct {
-	ChunkID          string         `json:"chunk_id"`
-	DocumentID       string         `json:"document_id"`
-	VersionID        string         `json:"version_id"`
-	Title            string         `json:"title"`
-	VersionNumber    int            `json:"version_number"`
-	Status           string         `json:"status"`
-	PublishState     string         `json:"publish_state"`
-	DocumentType     string         `json:"document_type"`
-	ReviewStatus     string         `json:"review_status"`
-	ChunkIndex       int            `json:"chunk_index"`
-	Section          string         `json:"section"`
-	Heading          string         `json:"heading"`
-	Content          string         `json:"content"`
-	TokenCount       int            `json:"token_count"`
-	Metadata         map[string]any `json:"metadata"`
-	UnitType         string         `json:"unit_type"`
-	ChunkType        string         `json:"chunk_type"`
-	RiskLevel        string         `json:"risk_level"`
-	SourceRefQuality string         `json:"source_ref_quality"`
-	ParentSectionID  string         `json:"parent_section_id"`
-	ParentChunkID    string         `json:"parent_chunk_id"`
-	Audience         any            `json:"audience"`
-	Vertical         any            `json:"vertical"`
-	Category         any            `json:"category"`
-	Tags             any            `json:"tags"`
-	CaseReasons      any            `json:"case_reasons"`
+	ChunkID           string         `json:"chunk_id"`
+	ID                string         `json:"id"`
+	DocumentID        string         `json:"document_id"`
+	VersionID         string         `json:"version_id"`
+	DocumentVersionID string         `json:"document_version_id"`
+	Title             string         `json:"title"`
+	NormalizedTitle   string         `json:"normalized_title"`
+	VersionNumber     int            `json:"version_number"`
+	Status            string         `json:"status"`
+	PublishState      string         `json:"publish_state"`
+	DocumentType      string         `json:"document_type"`
+	ReviewStatus      string         `json:"review_status"`
+	IsCurrentVersion  bool           `json:"is_current_version"`
+	ChunkIndex        int            `json:"chunk_index"`
+	Section           string         `json:"section"`
+	SectionPath       any            `json:"section_path"`
+	Heading           string         `json:"heading"`
+	Content           string         `json:"content"`
+	DisplayText       string         `json:"display_text"`
+	RetrievalText     string         `json:"retrieval_text"`
+	TokenCount        int            `json:"token_count"`
+	Metadata          map[string]any `json:"metadata"`
+	UnitType          string         `json:"unit_type"`
+	ChunkType         string         `json:"chunk_type"`
+	RiskLevel         string         `json:"risk_level"`
+	RiskPriority      int            `json:"risk_priority"`
+	SourceRefQuality  string         `json:"source_ref_quality"`
+	SourceRefs        any            `json:"source_refs"`
+	ParentSectionID   string         `json:"parent_section_id"`
+	ParentChunkID     string         `json:"parent_chunk_id"`
+	Audience          any            `json:"audience"`
+	Visibility        string         `json:"visibility"`
+	Scope             string         `json:"scope"`
+	PolicyType        string         `json:"policy_type"`
+	AuthorityLevel    string         `json:"authority_level"`
+	AuthorityPriority int            `json:"authority_priority"`
+	Vertical          any            `json:"vertical"`
+	Category          any            `json:"category"`
+	Collections       any            `json:"collections"`
+	Tags              any            `json:"tags"`
+	CaseReasons       any            `json:"case_reasons"`
+	MacroText         string         `json:"macro_text"`
+	ForbiddenPhrases  any            `json:"forbidden_phrases"`
+	Keywords          any            `json:"keywords"`
+	EffectiveFrom     any            `json:"effective_from"`
+	UpdatedAt         any            `json:"updated_at"`
 }
 
 func NewStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Store, error) {
@@ -535,6 +555,66 @@ func (s *Store) RecentlyUpdated(ctx context.Context, limit int) ([]model.SOP, er
 	return sops, nil
 }
 
+func (s *Store) AutocompleteSuggestions(ctx context.Context, query string, limit int) ([]string, error) {
+	limit = max(1, min(limit, 12))
+	normalized := normalize(query)
+	static := []string{
+		"quy định nội dung phản hồi",
+		"mẫu câu email mở đầu",
+		"không cung cấp quy trình nội bộ",
+		"khi nào dùng xin lỗi",
+		"bộ phận chuyên môn",
+	}
+	output := make([]string, 0, limit)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range output {
+			if strings.EqualFold(existing, value) {
+				return
+			}
+		}
+		output = append(output, value)
+	}
+	for _, item := range static {
+		if normalized == "" || strings.Contains(normalize(item), normalized) {
+			add(item)
+		}
+		if len(output) >= limit {
+			return output, nil
+		}
+	}
+
+	like := "%" + normalized + "%"
+	rows, err := s.db.Query(ctx, `
+SELECT DISTINCT s.title
+FROM kb_sops s
+JOIN kb_sop_versions v ON v.id = s.current_version_id
+WHERE s.status = 'active'
+  AND v.status = 'published'
+  AND ($1 = '' OR lower(s.title) LIKE $2 OR lower(s.category) LIKE $2)
+ORDER BY s.title
+LIMIT $3
+`, normalized, like, limit)
+	if err != nil {
+		return output, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			return output, err
+		}
+		add(title)
+		if len(output) >= limit {
+			break
+		}
+	}
+	return output, rows.Err()
+}
+
 func (s *Store) IndexPublishedSOPs(ctx context.Context) error {
 	sops, err := s.ListSOPs(ctx)
 	if err != nil {
@@ -565,29 +645,52 @@ func (s *Store) IndexAIDocument(ctx context.Context, payload map[string]any) err
 	if err := s.DeleteAIChunksFromMeili(ctx, documentID); err != nil {
 		s.logger.WarnContext(ctx, "delete existing AI chunks from meili failed", "document_id", documentID, "error", err)
 	}
-	if err := s.ensureMeiliIndex(ctx, "ai_documents", []string{"status", "publish_state", "vertical", "category", "tags", "case_reasons"}); err != nil {
+	if err := s.ensureMeiliIndex(ctx, "ai_documents", aiDocumentFilterableAttributes()); err != nil {
+		return err
+	}
+	if err := s.ensureMeiliIndex(ctx, "sop_documents", sopDocumentFilterableAttributes()); err != nil {
 		return err
 	}
 	metadata, _ := payload["metadata"].(map[string]any)
+	versionID, _ := payload["version_id"].(string)
+	updatedAt := time.Now().UTC()
 	doc := map[string]any{
-		"document_id":    documentID,
-		"version_id":     payload["version_id"],
-		"external_id":    payload["external_id"],
-		"title":          payload["title"],
-		"version_number": payload["version_number"],
-		"status":         payload["status"],
-		"publish_state":  payload["publish_state"],
-		"document_type":  payload["document_type"],
-		"review_status":  payload["review_status"],
-		"chunk_count":    payload["chunk_count"],
-		"metadata":       metadata,
-		"audience":       metadata["audience"],
-		"vertical":       metadata["vertical"],
-		"category":       metadata["category"],
-		"tags":           metadata["tags"],
-		"case_reasons":   metadata["case_reasons"],
+		"id":                  documentID,
+		"document_id":         documentID,
+		"document_version_id": versionID,
+		"version_id":          versionID,
+		"external_id":         payload["external_id"],
+		"title":               payload["title"],
+		"summary":             firstAny(metadata["summary"], metadata["description"], payload["title"]),
+		"section_titles":      firstAny(metadata["section_titles"], metadata["headings"], []string{}),
+		"version_number":      payload["version_number"],
+		"status":              payload["status"],
+		"publish_state":       payload["publish_state"],
+		"is_current_version":  true,
+		"document_type":       payload["document_type"],
+		"review_status":       payload["review_status"],
+		"chunk_count":         payload["chunk_count"],
+		"metadata":            metadata,
+		"audience":            metadata["audience"],
+		"visibility":          stringFromAny(firstAny(metadata["visibility"], "internal_only")),
+		"scope":               stringFromAny(firstAny(metadata["scope"], metadata["retrieval_scope"], "generic")),
+		"policy_type":         stringFromAny(firstAny(metadata["policy_type"], metadata["document_type"], payload["document_type"])),
+		"authority_level":     stringFromAny(firstAny(metadata["authority_level"], "policy")),
+		"authority_priority":  authorityPriority(stringFromAny(firstAny(metadata["authority_level"], "policy"))),
+		"vertical":            metadata["vertical"],
+		"category":            metadata["category"],
+		"collections":         firstAny(metadata["collections"], metadata["collection_slug"]),
+		"tags":                metadata["tags"],
+		"case_reasons":        metadata["case_reasons"],
+		"risk_level":          metadata["risk_level"],
+		"risk_priority":       riskPriority(stringFromAny(metadata["risk_level"])),
+		"effective_from":      metadata["effective_from"],
+		"updated_at":          updatedAt,
 	}
 	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_documents/documents?primaryKey=document_id", []map[string]any{doc}, nil); err != nil {
+		return err
+	}
+	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/sop_documents/documents?primaryKey=document_id", []map[string]any{doc}, nil); err != nil {
 		return err
 	}
 	if err := s.indexAIChunks(ctx, payload, metadata); err != nil {
@@ -601,7 +704,10 @@ func (s *Store) DeleteAIDocumentFromMeili(ctx context.Context, documentID string
 	if documentID == "" {
 		return nil
 	}
-	return s.meiliRequest(ctx, http.MethodDelete, "/indexes/ai_documents/documents/"+documentID, nil, nil)
+	if err := s.meiliRequest(ctx, http.MethodDelete, "/indexes/ai_documents/documents/"+documentID, nil, nil); err != nil {
+		return err
+	}
+	return s.meiliRequest(ctx, http.MethodDelete, "/indexes/sop_documents/documents/"+documentID, nil, nil)
 }
 
 func (s *Store) DeleteAIChunksFromMeili(ctx context.Context, documentID string) error {
@@ -609,8 +715,12 @@ func (s *Store) DeleteAIChunksFromMeili(ctx context.Context, documentID string) 
 		return nil
 	}
 	_ = s.ensureMeiliIndex(ctx, "ai_chunks", aiChunkFilterableAttributes())
+	_ = s.ensureMeiliIndex(ctx, "sop_chunks", sopChunkFilterableAttributes())
 	payload := map[string]string{"filter": `document_id = "` + documentID + `"`}
-	return s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents/delete", payload, nil)
+	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents/delete", payload, nil); err != nil {
+		return err
+	}
+	return s.meiliRequest(ctx, http.MethodPost, "/indexes/sop_chunks/documents/delete", payload, nil)
 }
 
 func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metadata map[string]any) error {
@@ -654,33 +764,56 @@ func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metad
 		if len(chunk.Metadata) > 0 {
 			chunkMetadata = chunk.Metadata
 		}
+		chunkType := stringFromAny(firstAny(chunkMetadata["chunk_type"], chunkMetadata["unit_type"], chunk.Section))
+		authorityLevel := stringFromAny(firstAny(chunkMetadata["authority_level"], "policy"))
+		riskLevel := stringFromAny(chunkMetadata["risk_level"])
 		docs = append(docs, aiChunkDocument{
-			ChunkID:          chunk.ChunkID,
-			DocumentID:       documentID,
-			VersionID:        versionID,
-			Title:            fmt.Sprint(payload["title"]),
-			VersionNumber:    intFromAny(payload["version_number"]),
-			Status:           fmt.Sprint(payload["status"]),
-			PublishState:     fmt.Sprint(payload["publish_state"]),
-			DocumentType:     fmt.Sprint(payload["document_type"]),
-			ReviewStatus:     fmt.Sprint(payload["review_status"]),
-			Metadata:         chunkMetadata,
-			ChunkIndex:       chunk.ChunkIndex,
-			Section:          chunk.Section,
-			Heading:          chunk.Heading,
-			Content:          chunk.Content,
-			TokenCount:       chunk.TokenCount,
-			UnitType:         stringFromAny(firstAny(chunkMetadata["unit_type"], chunk.Section)),
-			ChunkType:        stringFromAny(firstAny(chunkMetadata["chunk_type"], chunkMetadata["unit_type"], chunk.Section)),
-			RiskLevel:        stringFromAny(chunkMetadata["risk_level"]),
-			SourceRefQuality: stringFromAny(chunkMetadata["source_ref_quality"]),
-			ParentSectionID:  stringFromAny(chunkMetadata["parent_section_id"]),
-			ParentChunkID:    stringFromAny(chunkMetadata["parent_chunk_id"]),
-			Audience:         chunkMetadata["audience"],
-			Vertical:         chunkMetadata["vertical"],
-			Category:         chunkMetadata["category"],
-			Tags:             chunkMetadata["tags"],
-			CaseReasons:      chunkMetadata["case_reasons"],
+			ChunkID:           chunk.ChunkID,
+			ID:                chunk.ChunkID,
+			DocumentID:        documentID,
+			VersionID:         versionID,
+			DocumentVersionID: versionID,
+			Title:             fmt.Sprint(payload["title"]),
+			NormalizedTitle:   normalize(fmt.Sprint(firstAny(chunk.Heading, payload["title"]))),
+			VersionNumber:     intFromAny(payload["version_number"]),
+			Status:            fmt.Sprint(payload["status"]),
+			PublishState:      fmt.Sprint(payload["publish_state"]),
+			DocumentType:      fmt.Sprint(payload["document_type"]),
+			ReviewStatus:      fmt.Sprint(payload["review_status"]),
+			IsCurrentVersion:  true,
+			Metadata:          chunkMetadata,
+			ChunkIndex:        chunk.ChunkIndex,
+			Section:           chunk.Section,
+			SectionPath:       firstAny(chunkMetadata["section_path"], []string{}),
+			Heading:           chunk.Heading,
+			Content:           chunk.Content,
+			DisplayText:       stringFromAny(firstAny(chunkMetadata["display_text"], chunk.Content)),
+			RetrievalText:     stringFromAny(firstAny(chunkMetadata["retrieval_text"], chunk.Content)),
+			TokenCount:        chunk.TokenCount,
+			UnitType:          stringFromAny(firstAny(chunkMetadata["unit_type"], chunk.Section)),
+			ChunkType:         chunkType,
+			RiskLevel:         riskLevel,
+			RiskPriority:      riskPriority(riskLevel),
+			SourceRefQuality:  stringFromAny(chunkMetadata["source_ref_quality"]),
+			SourceRefs:        firstAny(chunkMetadata["source_refs"], []map[string]any{}),
+			ParentSectionID:   stringFromAny(chunkMetadata["parent_section_id"]),
+			ParentChunkID:     stringFromAny(chunkMetadata["parent_chunk_id"]),
+			Audience:          chunkMetadata["audience"],
+			Visibility:        stringFromAny(firstAny(chunkMetadata["visibility"], "internal_only")),
+			Scope:             stringFromAny(firstAny(chunkMetadata["scope"], chunkMetadata["retrieval_scope"], "generic")),
+			PolicyType:        stringFromAny(firstAny(chunkMetadata["policy_type"], chunkType)),
+			AuthorityLevel:    authorityLevel,
+			AuthorityPriority: authorityPriority(authorityLevel),
+			Vertical:          chunkMetadata["vertical"],
+			Category:          chunkMetadata["category"],
+			Collections:       firstAny(chunkMetadata["collections"], chunkMetadata["collection_slug"]),
+			Tags:              chunkMetadata["tags"],
+			CaseReasons:       chunkMetadata["case_reasons"],
+			MacroText:         stringFromAny(firstAny(chunkMetadata["macro_text"], conditionalText(chunkType, chunk.Content, "macro"))),
+			ForbiddenPhrases:  firstAny(chunkMetadata["forbidden_phrases"], []string{}),
+			Keywords:          firstAny(chunkMetadata["keywords"], chunkMetadata["aliases"], []string{}),
+			EffectiveFrom:     firstAny(chunkMetadata["effective_from"], metadata["effective_from"]),
+			UpdatedAt:         time.Now().UTC(),
 		})
 	}
 	if len(docs) == 0 {
@@ -690,7 +823,13 @@ func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metad
 	if err := s.ensureMeiliIndex(ctx, "ai_chunks", aiChunkFilterableAttributes()); err != nil {
 		return err
 	}
+	if err := s.ensureMeiliIndex(ctx, "sop_chunks", sopChunkFilterableAttributes()); err != nil {
+		return err
+	}
 	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents?primaryKey=chunk_id", docs, nil); err != nil {
+		return err
+	}
+	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/sop_chunks/documents?primaryKey=chunk_id", docs, nil); err != nil {
 		return err
 	}
 	s.logger.InfoContext(ctx, "AI chunks indexed", "document_id", documentID, "version_id", versionID, "chunk_count", len(docs))
@@ -705,7 +844,7 @@ func (s *Store) DeleteSOPFromMeili(ctx context.Context, sopID string) error {
 }
 
 func (s *Store) ClearSearchIndexes(ctx context.Context) map[string]string {
-	indexes := []string{"sops", "ai_documents", "ai_chunks"}
+	indexes := []string{"sops", "ai_documents", "ai_chunks", "sop_documents", "sop_chunks"}
 	results := make(map[string]string, len(indexes))
 	for _, index := range indexes {
 		if err := s.meiliRequest(ctx, http.MethodDelete, "/indexes/"+index+"/documents", nil, nil); err != nil {
@@ -880,7 +1019,10 @@ func (s *Store) ensureMeiliIndex(ctx context.Context, index string, filterable [
 	_ = s.meiliRequest(ctx, http.MethodPost, "/indexes", map[string]string{"uid": index}, nil)
 	settings := map[string]any{
 		"filterableAttributes": filterable,
-		"sortableAttributes":   []string{"updated_at"},
+		"sortableAttributes":   sortableAttributesForIndex(index),
+	}
+	if searchable := searchableAttributesForIndex(index); len(searchable) > 0 {
+		settings["searchableAttributes"] = searchable
 	}
 	return s.meiliRequest(ctx, http.MethodPatch, "/indexes/"+index+"/settings", settings, nil)
 }
@@ -963,6 +1105,11 @@ func meiliFilter(filters model.SearchFilters) string {
 	add("category", filters.Category)
 	add("tags", filters.Tags)
 	add("case_reasons", filters.CaseReasons)
+	add("collections", filters.Collections)
+	add("visibility", filters.Visibility)
+	add("scope", filters.Scope)
+	add("policy_type", filters.PolicyType)
+	add("authority_level", filters.AuthorityLevel)
 	return strings.Join(parts, " AND ")
 }
 
@@ -1092,11 +1239,19 @@ func aiChunkFilterableAttributes() []string {
 	return []string{
 		"document_id",
 		"version_id",
+		"document_version_id",
 		"status",
 		"publish_state",
+		"is_current_version",
 		"review_status",
 		"vertical",
 		"category",
+		"collections",
+		"audience",
+		"visibility",
+		"scope",
+		"policy_type",
+		"authority_level",
 		"tags",
 		"case_reasons",
 		"unit_type",
@@ -1106,4 +1261,81 @@ func aiChunkFilterableAttributes() []string {
 		"parent_section_id",
 		"parent_chunk_id",
 	}
+}
+
+func sopChunkFilterableAttributes() []string {
+	return aiChunkFilterableAttributes()
+}
+
+func aiDocumentFilterableAttributes() []string {
+	return []string{"status", "publish_state", "is_current_version", "vertical", "category", "collections", "audience", "visibility", "scope", "policy_type", "authority_level", "risk_level", "tags", "case_reasons"}
+}
+
+func sopDocumentFilterableAttributes() []string {
+	return aiDocumentFilterableAttributes()
+}
+
+func searchableAttributesForIndex(index string) []string {
+	switch index {
+	case "ai_chunks", "sop_chunks":
+		return []string{"title", "normalized_title", "macro_text", "forbidden_phrases", "section_path", "heading", "content", "retrieval_text", "keywords"}
+	case "ai_documents", "sop_documents":
+		return []string{"title", "summary", "section_titles", "category", "collections", "tags", "case_reasons"}
+	case "sops":
+		return []string{"title", "snippet", "category", "tags", "case_reasons"}
+	default:
+		return nil
+	}
+}
+
+func sortableAttributesForIndex(index string) []string {
+	switch index {
+	case "ai_chunks", "sop_chunks":
+		return []string{"updated_at", "risk_priority", "authority_priority"}
+	case "ai_documents", "sop_documents":
+		return []string{"updated_at", "risk_priority", "authority_priority", "effective_from"}
+	default:
+		return []string{"updated_at"}
+	}
+}
+
+func riskPriority(value string) int {
+	switch normalize(value) {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func authorityPriority(value string) int {
+	switch normalize(value) {
+	case "source of truth", "source_of_truth":
+		return 5
+	case "policy":
+		return 4
+	case "procedure":
+		return 3
+	case "reference":
+		return 2
+	case "example":
+		return 1
+	case "deprecated":
+		return -2
+	default:
+		return 0
+	}
+}
+
+func conditionalText(chunkType string, content string, expected string) string {
+	if strings.Contains(normalize(chunkType), normalize(expected)) {
+		return content
+	}
+	return ""
 }
