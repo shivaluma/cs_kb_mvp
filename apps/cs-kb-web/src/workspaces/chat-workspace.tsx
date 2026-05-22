@@ -415,6 +415,7 @@ function Composer({
   const [scopeOpen, setScopeOpen] = useState(false);
   const scopedValues = [filters.collection, filters.audience, filters.vertical, filters.taskType];
   const activeScopeCount = scopedValues.filter((value) => value && value !== "all").length;
+  const selectedRouteLabel = routeOptions.find((route) => route.route === modelRoute)?.label ?? modelRoute;
   const scopeOptions = {
     collection: [{ label: "All collections", value: "all" }, ...collectionOptions],
     audience: dynamicFilterOptions.audience.length
@@ -521,19 +522,20 @@ function Composer({
                 >
                   <SelectTrigger
                     aria-label="Select model route"
-                    className="h-9 max-w-[12rem] rounded-full border-0 bg-transparent px-2 text-base text-muted-foreground shadow-none hover:bg-accent hover:text-foreground focus-visible:ring-0"
+                    className="h-9 w-48 max-w-[42vw] rounded-full border-0 bg-transparent px-2 text-base text-muted-foreground shadow-none hover:bg-accent hover:text-foreground focus-visible:ring-0"
                     size="sm"
+                    title={selectedRouteLabel}
                   >
-                    <SelectValue />
+                    <span className="min-w-0 flex-1 truncate text-left">{selectedRouteLabel}</span>
                   </SelectTrigger>
-                  <SelectContent align="end" className="w-80">
+                  <SelectContent align="end" className="w-80" position="popper" side="top" sideOffset={8}>
                     {groupRouteOptions(routeOptions).map((group) => (
                       <div className="px-1 py-1" key={group.label}>
                         <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                           {group.label}
                         </div>
                         {group.routes.map((route) => (
-                          <SelectItem key={route.route} value={route.route}>
+                          <SelectItem key={route.route} textValue={route.label} value={route.route}>
                             <div className="flex flex-col">
                               <span className="text-sm font-medium">{route.label}</span>
                               {route.description ? (
