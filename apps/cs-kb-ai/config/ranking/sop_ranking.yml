@@ -66,7 +66,7 @@
       "third_or_more": -16
     },
     "example_penalty_when_policy_exists": -8,
-    "full_sop_penalty_for_specific_query": -10
+    "full_sop_penalty_for_specific_query": -60
   },
   "chunk_type_priorities": {
     "macro": {

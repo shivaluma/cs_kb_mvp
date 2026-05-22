@@ -101,6 +101,23 @@ def test_mixed_docx_sop_creates_parent_table_rows_groups_and_titles() -> None:
     assert any('Không nói "ĐÓNG HỖ TRỢ TẠI ĐÂY"' in title for title in titles)
     assert any('Khi nào dùng "xin lỗi"' in title for title in titles)
     assert any("quy trình xử lý nội bộ" in title.lower() for title in titles)
+    assert any("[bộ phận chuyên môn]" in title for title in titles)
+
+
+def test_docx_style_headings_override_numbered_heading_heuristic() -> None:
+    doc = Document()
+    doc.add_heading("Quy định phản hồi CS", level=1)
+    doc.add_heading("1. Email", level=1)
+    doc.add_paragraph("Mẫu câu email.")
+    doc.add_heading("4. Khiếu nại đối tượng còn lại", level=1)
+    doc.add_paragraph("Không cung cấp quy trình xử lý nội bộ.")
+    buffer = BytesIO()
+    doc.save(buffer)
+
+    _raw_text, blocks, _tables = extract_docx_structure(buffer.getvalue(), filename="numbered-headings.docx")
+    target = next(block for block in blocks if block.get("text") == "4. Khiếu nại đối tượng còn lại")
+
+    assert target["section_path"] == ["4. Khiếu nại đối tượng còn lại"]
 
 
 def test_formatter_normalizes_array_and_preserves_raw_fallback() -> None:
@@ -247,6 +264,9 @@ def build_policy_docx_fixture() -> bytes:
 class SOPParentChildChunkingTest(unittest.TestCase):
     def test_mixed_docx_sop_creates_parent_table_rows_groups_and_titles(self) -> None:
         test_mixed_docx_sop_creates_parent_table_rows_groups_and_titles()
+
+    def test_docx_style_headings_override_numbered_heading_heuristic(self) -> None:
+        test_docx_style_headings_override_numbered_heading_heuristic()
 
     def test_formatter_normalizes_array_and_preserves_raw_fallback(self) -> None:
         test_formatter_normalizes_array_and_preserves_raw_fallback()

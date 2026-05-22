@@ -526,6 +526,12 @@ def docx_section_heading(text: str, style: str, numbering: dict[str, Any]) -> di
     if roman and len(stripped) <= 180:
         return {"level": 1, "text": stripped, "kind": "roman_section"}
 
+    style_key = style.lower()
+    if style_key.startswith("heading") and len(stripped) <= 180:
+        level_match = re.search(r"(\d+)", style_key)
+        level = int(level_match.group(1)) if level_match else 1
+        return {"level": min(max(level, 1), 4), "text": stripped, "kind": "style_heading"}
+
     numbered = NUMBERED_SECTION_RE.match(stripped)
     if numbered and len(stripped) <= 160:
         remainder = numbered.group(2).strip()
@@ -534,12 +540,6 @@ def docx_section_heading(text: str, style: str, numbering: dict[str, Any]) -> di
 
     if DOCX_TEXT_HEADING_RE.match(stripped) and len(stripped) <= 120:
         return {"level": 2, "text": stripped, "kind": "text_heading"}
-
-    style_key = style.lower()
-    if style_key.startswith("heading") and len(stripped) <= 180:
-        level_match = re.search(r"(\d+)", style_key)
-        level = int(level_match.group(1)) if level_match else 1
-        return {"level": min(max(level, 1), 4), "text": stripped, "kind": "style_heading"}
 
     if looks_like_docx_top_level_heading_text(stripped, style, numbering):
         return {"level": 1, "text": stripped, "kind": "inferred_top_level_heading"}

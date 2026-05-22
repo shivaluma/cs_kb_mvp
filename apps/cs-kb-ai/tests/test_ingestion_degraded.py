@@ -551,14 +551,24 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         ]
         self.assertTrue(any("xin lỗi" in unit["content"].lower() for unit in apology_units))
 
-        sanction_rule = next(chunk for chunk in chunks if "chế tài" in chunk["content"] and chunk["metadata"].get("unit_type") != "full_sop")
+        sanction_rule = next(
+            chunk
+            for chunk in chunks
+            if "chế tài" in chunk["content"]
+            and chunk["metadata"].get("chunk_type") == "atomic_child"
+        )
         self.assertEqual(sanction_rule["metadata"]["unit_type"], "compliance_rule")
         self.assertEqual(sanction_rule["metadata"]["risk_level"], "critical")
         self.assertEqual(sanction_rule["metadata"]["actor"], "cs")
         self.assertEqual(sanction_rule["metadata"]["affected_audience"], ["driver", "customer"])
         self.assertNotEqual(sanction_rule["metadata"].get("affected_audience"), ["Customer Service"])
 
-        internal_rule = next(chunk for chunk in chunks if "quy trình xử lý nội bộ" in chunk["content"] and chunk["metadata"].get("unit_type") != "full_sop")
+        internal_rule = next(
+            chunk
+            for chunk in chunks
+            if "quy trình xử lý nội bộ" in chunk["content"]
+            and chunk["metadata"].get("chunk_type") == "atomic_child"
+        )
         self.assertEqual(internal_rule["metadata"]["unit_type"], "compliance_rule")
         self.assertEqual(internal_rule["metadata"]["risk_level"], "critical")
         self.assertIn("internal_process_disclosure", internal_rule["metadata"]["risk_category"])

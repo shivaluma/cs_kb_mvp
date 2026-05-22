@@ -951,7 +951,30 @@ def chunk_type_priority(candidate: SearchCandidate, intent: str, config: dict[st
     priorities = config.get("chunk_type_priorities") if isinstance(config.get("chunk_type_priorities"), dict) else {}
     intent_map = priorities.get(intent) if isinstance(priorities.get(intent), dict) else {}
     generic_map = priorities.get("generic") if isinstance(priorities.get("generic"), dict) else {}
-    return float(intent_map.get(candidate.chunk_type, generic_map.get(candidate.chunk_type, 0)) or 0)
+    for key in ranking_chunk_type_keys(candidate):
+        if key in intent_map:
+            return float(intent_map.get(key) or 0)
+        if key in generic_map:
+            return float(generic_map.get(key) or 0)
+    return 0.0
+
+
+def ranking_chunk_type_keys(candidate: SearchCandidate) -> list[str]:
+    metadata = candidate.raw_row.get("metadata") if isinstance(candidate.raw_row.get("metadata"), dict) else {}
+    unit_type = first_text(metadata.get("unit_type"), candidate.raw_row.get("section"))
+    raw_chunk_type = first_text(metadata.get("chunk_type"), candidate.chunk_type)
+    keys: list[str] = []
+    if raw_chunk_type == "grouped_parent" and unit_type:
+        keys.append(f"{unit_type}_group")
+    if raw_chunk_type in {"atomic_child", "parent_table"} and unit_type:
+        keys.append(unit_type)
+    if candidate.chunk_type:
+        keys.append(candidate.chunk_type)
+    if unit_type:
+        keys.append(unit_type)
+    if raw_chunk_type:
+        keys.append(raw_chunk_type)
+    return list(dict.fromkeys(key for key in keys if key))
 
 
 def status_weight(candidate: SearchCandidate, stable: dict[str, Any]) -> float:

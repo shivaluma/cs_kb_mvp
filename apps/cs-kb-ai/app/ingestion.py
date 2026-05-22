@@ -1643,7 +1643,7 @@ def mixed_docx_unit_type(block: dict[str, Any]) -> str:
         return "wording_rule"
     if any(signal in normalized for signal in ["vi du", "vd", "example"]):
         return "example"
-    if normalized.startswith(("luu y", "note", "ghi chu")):
+    if normalized.startswith(("luu y", "note", "ghi chu", "chi dung", "chi su dung", "only use")):
         return "operational_note"
     if any(signal in normalized for signal in ["xin chao", "chao anh", "chao chi", "quy khach hang"]) and any(channel in section or channel in normalized for channel in ["email", "call", "chat"]):
         return "macro_script"

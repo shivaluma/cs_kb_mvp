@@ -10,6 +10,7 @@ from app.ranking import (
     RankingOptions,
     SearchCandidate,
     business_rerank,
+    candidate_from_row,
     load_ranking_config,
     maybe_model_rerank,
     normalize_query_understanding,
@@ -158,6 +159,55 @@ class SOPRankingPipelineTest(unittest.TestCase):
         )
 
         self.assertEqual(ranked[0].chunk_id, "full")
+
+    def test_atomic_child_uses_business_unit_type_for_priority(self) -> None:
+        macro = candidate_from_row(
+            {
+                "chunk_id": "macro-row",
+                "document_id": "doc-1",
+                "version_id": "version-1",
+                "heading": "EMAIL macro: Mail: Open / Mở đầu",
+                "content": "Trong phần Email, Mail: Open / Mở đầu; Macro: Xin chào anh/chị + Tên; Lưu ý: Nếu không xác định được giới tính KH, sử dụng Xin chào Quý khách hàng.",
+                "score": 0.45,
+                "status": "published",
+                "review_status": "approved",
+                "metadata": {
+                    "chunk_type": "atomic_child",
+                    "unit_type": "macro_script",
+                    "source_ref_quality": "table_row",
+                    "source_refs": [{"source_type": "docx_table", "table_index": 0, "row_index": 1}],
+                },
+            },
+            source="meilisearch",
+        )
+        broad_parent = candidate_from_row(
+            {
+                "chunk_id": "parent",
+                "document_id": "doc-1",
+                "version_id": "version-1",
+                "heading": "SOP section: Email",
+                "content": "Mẫu câu Email và một số nội dung chung.",
+                "score": 0.5,
+                "status": "published",
+                "review_status": "approved",
+                "metadata": {
+                    "chunk_type": "parent_section",
+                    "unit_type": "text_section",
+                    "source_ref_quality": "paragraph_only",
+                    "source_refs": [{"source_type": "docx", "paragraph_index": 2}],
+                },
+            },
+            source="meilisearch",
+        )
+
+        ranked = business_rerank(
+            "mẫu câu email mở đầu cho khách không rõ giới tính",
+            [broad_parent, macro],
+            RankingOptions(mode="portal_search", debug=True),
+        )
+
+        self.assertEqual(ranked[0].chunk_id, "macro-row")
+        self.assertEqual(ranked[0].score_debug["boosts"]["chunk_type_priority"], 20.0)
 
     def test_model_rerank_gating_and_failure_fallback(self) -> None:
         rows = [
