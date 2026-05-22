@@ -25,6 +25,7 @@ export function PortalWorkspace({
   onOpenSOP,
   onSearch,
   query,
+  suggestions,
   setQuery,
   sops,
 }: {
@@ -36,6 +37,7 @@ export function PortalWorkspace({
   onOpenSOP: (sop: SOP) => void;
   onSearch: (query?: string) => void;
   query: string;
+  suggestions: string[];
   setQuery: (query: string) => void;
   sops: SOP[];
 }) {
@@ -65,9 +67,15 @@ export function PortalWorkspace({
           actionLabel="Search SOPs"
           id="portal-sop-search"
           loading={loading}
+          minLength={2}
           onChange={setQuery}
           onSearch={() => onSearch(query)}
-          placeholder="Search case reason, policy, channel, macro, or customer issue"
+          onSuggestionSelect={(suggestion) => {
+            setQuery(suggestion);
+            onSearch(suggestion);
+          }}
+          placeholder="Try: tài xế bị khóa, mẫu email mở đầu, khi nào xin lỗi"
+          suggestions={suggestions}
           value={query}
         />
 

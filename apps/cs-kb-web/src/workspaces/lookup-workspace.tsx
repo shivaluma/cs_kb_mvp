@@ -32,6 +32,7 @@ import {
 import { OperationalFeedbackButtons } from "@/components/operational-feedback";
 import { formatDate } from "@/lib/format";
 import { groupResultsByDisplaySource, type SourceDisplayGroup } from "@/lib/source-display";
+import { isDebugUiEnabled } from "@/lib/ui-mode";
 import { cn } from "@/lib/utils";
 import type { AISuggestion, FilterOption, FilterState, Macro, RetrievalResult, SearchResult, SOP } from "@/types";
 
@@ -51,6 +52,7 @@ export function LookupWorkspace({
   onOpenSOP,
   onRunSearch,
   onSelectDocumentMatch,
+  onSuggestionSelect,
   onUpdateFilter,
   query,
   selected,
@@ -58,6 +60,7 @@ export function LookupWorkspace({
   selectedVersion,
   semanticResults,
   searchEventId,
+  suggestions,
   setQuery,
 }: {
   aiSuggestion: AISuggestion | null;
@@ -75,6 +78,7 @@ export function LookupWorkspace({
   onOpenSOP: (id: string) => void;
   onRunSearch: () => void;
   onSelectDocumentMatch: (match: RetrievalResult) => void;
+  onSuggestionSelect: (value: string) => void;
   onUpdateFilter: (key: keyof FilterState, value: string) => void;
   query: string;
   selected: SOP | null;
@@ -82,9 +86,10 @@ export function LookupWorkspace({
   selectedVersion: SOP["current_version"] | undefined;
   semanticResults: RetrievalResult[];
   searchEventId: string;
+  suggestions: string[];
   setQuery: (query: string) => void;
 }) {
-  const canSearch = query.trim().length > 0;
+  const canSearch = query.trim().length >= 2;
   const [filtersOpen, setFiltersOpen] = useState(false);
   const groupedSourceResults = groupResultsByDisplaySource(semanticResults);
   const aiSuggestedSops = aiSuggestion?.suggested_sops ?? [];
@@ -100,6 +105,7 @@ export function LookupWorkspace({
     : null;
   const visibleCount = listSource.length + groupedSourceResults.length + selectedCitationGroups.length + aiSuggestedSops.length;
   const activeFilterCount = countActiveFilters(filters);
+  const debugEnabled = isDebugUiEnabled();
 
   function openFullSop(match: RetrievalResult) {
     onSelectDocumentMatch(match);
@@ -117,9 +123,12 @@ export function LookupWorkspace({
             actionLabel="Search"
             id="sop-search"
             loading={loading}
+            minLength={2}
             onChange={setQuery}
             onSearch={onRunSearch}
-            placeholder="Search SOP, case reason, policy keyword, or natural language question"
+            onSuggestionSelect={onSuggestionSelect}
+            placeholder="Search case reason, macro, policy wording, or customer issue"
+            suggestions={suggestions}
             value={query}
           />
         </div>
@@ -167,8 +176,8 @@ export function LookupWorkspace({
                 <EmptyPanel
                   compact
                   icon={Search}
-                  text="Search results appear after you run a lookup."
-                  title="Enter a query"
+                  text="Try a case reason, customer issue, macro name, or policy wording. Suggestions appear after two characters."
+                  title="Search published SOPs"
                 />
               ) : loading || booting ? (
                 <ResultSkeleton />
@@ -190,13 +199,14 @@ export function LookupWorkspace({
                           onOpenSource={() => openFullSop(group.results[0])}
                           onSelect={() => onSelectDocumentMatch(group.results[0])}
                           selected={Boolean(selectedDocumentMatch && group.results.some((result) => result.chunk_id === selectedDocumentMatch.chunk_id))}
+                          showDebugScore={debugEnabled}
                         />
                       ))}
                     </ResultGroup>
                   ) : null}
 
                   {groupedSourceResults.length ? (
-                    <ResultGroup accent count={groupedSourceResults.length} title="Published source matches">
+                    <ResultGroup accent count={groupedSourceResults.length} title="Best SOP evidence">
                       {groupedSourceResults.map((group) => (
                         <SourceContextCard
                           compact
@@ -206,13 +216,14 @@ export function LookupWorkspace({
                           onOpenSource={() => openFullSop(group.results[0])}
                           onSelect={() => onSelectDocumentMatch(group.results[0])}
                           selected={Boolean(selectedDocumentMatch && group.results.some((result) => result.chunk_id === selectedDocumentMatch.chunk_id))}
+                          showDebugScore={debugEnabled}
                         />
                       ))}
                     </ResultGroup>
                   ) : null}
 
                   {listSource.length ? (
-                    <ResultGroup count={listSource.length} title="SOP catalog matches">
+                    <ResultGroup count={listSource.length} title="SOP documents">
                       {listSource.map((item) => (
                         <SopResultRow
                           item={item}
@@ -243,7 +254,7 @@ export function LookupWorkspace({
                               type="button"
                               variant="outline"
                             >
-                              Open source
+                              Open in SOP
                             </Button>
                           </div>
                         </div>
@@ -276,7 +287,7 @@ export function LookupWorkspace({
             <EmptyPanel
               compact
               icon={Search}
-              text="Search or choose a SOP/document match to inspect the latest published content."
+              text="Choose a result to read the full SOP context and verify the highlighted source."
               title="Select a result"
             />
           )}
@@ -376,10 +387,12 @@ function DocumentMatchDetail({ group, query, searchEventId }: { group: SourceDis
               {group.collections.length ? <span className="text-muted-foreground/70"> · {group.collections.join(", ")}</span> : null}
             </p>
           </div>
-          <div className="shrink-0 text-right text-[11px] text-muted-foreground">
-            <div>score</div>
-            <div className="font-medium tabular-nums text-foreground">{group.score.toFixed(4)}</div>
-          </div>
+          {isDebugUiEnabled() ? (
+            <div className="shrink-0 text-right text-[11px] text-muted-foreground">
+              <div>score</div>
+              <div className="font-medium tabular-nums text-foreground">{group.score.toFixed(4)}</div>
+            </div>
+          ) : null}
         </div>
       </header>
       <div className="space-y-5 p-5">
@@ -387,6 +400,7 @@ function DocumentMatchDetail({ group, query, searchEventId }: { group: SourceDis
           autoScrollToHighlight
           group={group}
           onCopyExcerpt={(text) => void navigator.clipboard.writeText(text)}
+          showDebugScore={isDebugUiEnabled()}
         />
         {group.matches.length > 1 ? (
           <section>
@@ -571,8 +585,8 @@ function SOPDetail({
           <TabsContent className="mt-4 space-y-3" value="governance">
             <dl className="grid gap-x-6 gap-y-2 md:grid-cols-2">
               <GovernanceItem label="Change summary" value={selectedVersion.change_summary} />
-              <GovernanceItem label="Version ID" value={selectedVersion.id} />
-              <GovernanceItem label="Current version pointer" value={selected.current_version_id} />
+              {isDebugUiEnabled() ? <GovernanceItem label="Version ID" value={selectedVersion.id} /> : null}
+              {isDebugUiEnabled() ? <GovernanceItem label="Current version pointer" value={selected.current_version_id} /> : null}
               <GovernanceItem label="Case reasons" value={selected.case_reasons.join(", ")} />
             </dl>
           </TabsContent>

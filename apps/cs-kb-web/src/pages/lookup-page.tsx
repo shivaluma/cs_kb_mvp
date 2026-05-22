@@ -4,7 +4,7 @@ import { RouteLoading } from "@/components/route-loading";
 import { defaultFilters } from "@/constants";
 import { useHomepage } from "@/hooks/api/homepage";
 import { useCollections, useRecordKBEvent } from "@/hooks/api/kb-index";
-import { useAISuggest, useSearch, useSearchFilterOptions, useSOP } from "@/hooks/api/search";
+import { useAISuggest, useSearch, useSearchAutocomplete, useSearchFilterOptions, useSOP } from "@/hooks/api/search";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { compactFilters, optionizeFilterValues, toSearchResult } from "@/lib/format";
 import { useFeedback } from "@/providers/feedback-context";
@@ -38,6 +38,7 @@ export function LookupPage() {
   const collectionsQuery = useCollections();
   const filterOptionsQuery = useSearchFilterOptions();
   const searchMutation = useSearch();
+  const autocompleteQuery = useSearchAutocomplete(query);
   const sopMutation = useSOP();
   const aiSuggestMutation = useAISuggest();
   const eventMutation = useRecordKBEvent();
@@ -278,6 +279,10 @@ export function LookupPage() {
         onCopyMacro={copyMacro}
         onOpenSOP={openSOP}
         onRunSearch={() => runSearch()}
+        onSuggestionSelect={(suggestion) => {
+          setQuery(suggestion);
+          runSearch(suggestion);
+        }}
         onSelectDocumentMatch={selectDocumentMatch}
         onUpdateFilter={updateFilter}
         query={query}
@@ -286,6 +291,7 @@ export function LookupPage() {
         selectedVersion={selected?.current_version}
         semanticResults={semanticResults}
         searchEventId={searchEventId}
+        suggestions={autocompleteQuery.data?.suggestions ?? []}
         setQuery={setQuery}
       />
     </Suspense>

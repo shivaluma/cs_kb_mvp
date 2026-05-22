@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { isDebugUiEnabled } from "@/lib/ui-mode";
 import type {
   ActionTemplateSummary,
   FilterOption,
@@ -298,9 +299,9 @@ function CaseAssistResult({
     >
       <div className="flex items-start justify-between gap-3">
         <h3 className="min-w-0 text-sm font-semibold leading-snug">{candidate.title}</h3>
-        <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
-          {Math.round(candidate.score * 100) || 1}
-        </span>
+        <Badge className="shrink-0" variant="outline">
+          {isDebugUiEnabled() ? `${Math.round(candidate.score * 100) || 1}` : roleLabel(candidate.sourceRole)}
+        </Badge>
       </div>
       <p className="mt-1 truncate text-xs text-muted-foreground">
         {candidate.parentTitle || candidate.collection || roleLabel(candidate.sourceRole)}

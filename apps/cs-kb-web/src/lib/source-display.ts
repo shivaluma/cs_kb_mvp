@@ -80,7 +80,7 @@ export function displayContextForResult(result: RetrievalResult): DisplayContext
     collections: result.collections ?? [],
     version_number: result.version_number,
     last_updated: null,
-    content: "Source section could not be loaded for this published result.",
+    content: "Open the full SOP to verify this published result. The exact source section was not included in this response.",
     blocks: [],
     highlights: [],
     fallback_excerpt: "",
@@ -125,12 +125,12 @@ export function highlightedSegments(content: string, highlights: DisplayHighligh
 }
 
 export function sourceDisplayLabel(displayUnitType: string) {
-  if (displayUnitType === "source_document") return "Source document";
-  if (displayUnitType === "source_section") return "Source section";
+  if (displayUnitType === "source_document") return "Full SOP";
+  if (displayUnitType === "source_section") return "SOP section";
   if (displayUnitType === "table_section") return "Table section";
   if (displayUnitType === "section") return "SOP section";
-  if (displayUnitType === "missing_source") return "Source unavailable";
-  return "Source context";
+  if (displayUnitType === "missing_source") return "Needs source check";
+  return "SOP source";
 }
 
 function createSourceDisplayGroup(result: RetrievalResult, context: DisplayContext): SourceDisplayGroup {

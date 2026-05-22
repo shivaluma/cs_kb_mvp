@@ -1,5 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 
 import { apiGet, apiPost } from "@/lib/api";
 import type { AISuggestion, RetrievalResponse, RetrievalResult, SearchFilterOptions, SearchResult, SOP } from "@/types";
@@ -13,6 +14,19 @@ export function useSearchFilterOptions() {
   });
 }
 
+export function useSearchAutocomplete(query: string) {
+  const debouncedQuery = useDebouncedValue(query.trim(), 280);
+  return useQuery({
+    enabled: debouncedQuery.length >= 2,
+    queryKey: ["search-autocomplete", debouncedQuery],
+    queryFn: () =>
+      apiGet<{ query: string; suggestions: string[]; sources: string[] }>(
+        `/api/v1/search/autocomplete?q=${encodeURIComponent(debouncedQuery)}`,
+      ),
+    staleTime: 30000,
+  });
+}
+
 export function useSearch() {
   return useMutation({
     mutationFn: (payload: {
@@ -23,6 +37,15 @@ export function useSearch() {
     }) =>
       apiPost<{ results?: SearchResult[]; semantic_results?: RetrievalResult[] }>("/api/v1/search", payload),
   });
+}
+
+function useDebouncedValue(value: string, delayMs: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+  return debounced;
 }
 
 export function useSOPList() {
