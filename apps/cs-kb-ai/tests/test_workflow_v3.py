@@ -280,6 +280,109 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         self.assertIn(("node_8", "no", "node_8_2"), edge_keys)
         self.assertIn(("node_16", "next", "node_17"), edge_keys)
 
+    def test_same_line_decision_group_splits_child_actions_without_inheriting_diamond_type(self) -> None:
+        raw_text = (
+            "8. KH/Partner/NH đồng ý cung cấp? "
+            "8.1. Note email KH/Partner/NH cung cấp vào ô Back up email "
+            "8.2. Thông báo KH/Partner/NH trường hợp không cung cấp địa chỉ Email"
+        )
+        transcription = {
+            "document_metadata": {"title": "Inbound call workflow"},
+            "canvas": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "nodes": [
+                            {
+                                "id": "decision_8_group",
+                                "text": raw_text,
+                                "node_type": "decision",
+                                "shape_kind": "diamond",
+                                "lane": "Agent",
+                                "bbox": [700, 350, 980, 760],
+                            },
+                            {"id": "end", "text": "End", "node_type": "end", "shape_kind": "oval", "bbox": [1100, 350, 1220, 450]},
+                        ],
+                        "edges": [
+                            {"from_step_code": "8", "to_step_code": "8.1", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "8", "to_step_code": "8.2", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "8.1", "to_node": "end", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "8.2", "to_node": "end", "condition": "next", "confidence": 0.9},
+                        ],
+                    }
+                ]
+            },
+        }
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="inbound_call.pdf",
+            raw_text=raw_text,
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        nodes_by_code = {node["step_code"]: node for node in graph["nodes"] if node.get("step_code")}
+        self.assertIn("8.1", nodes_by_code)
+        self.assertIn("8.2", nodes_by_code)
+        self.assertEqual(nodes_by_code["8"]["type"], "decision")
+        self.assertEqual(nodes_by_code["8.1"]["type"], "action")
+        self.assertEqual(nodes_by_code["8.2"]["type"], "action")
+        self.assertNotIn("8.1", report["missing_step_codes"])
+        self.assertNotIn("8.2", report["missing_step_codes"])
+        self.assertFalse(any("workflow_v3_decision_missing_two_branches:8" == blocker for blocker in report["blockers"]))
+        self.assertFalse(any("workflow_v3_branching_node_not_decision" in blocker for blocker in report["blockers"]))
+        edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        self.assertIn(("node_8", "yes", "node_8_1"), edge_keys)
+        self.assertIn(("node_8", "no", "node_8_2"), edge_keys)
+
+    def test_multi_step_split_does_not_treat_quantities_as_step_codes(self) -> None:
+        raw_text = "8.2. Thông báo KH/Partner/NH Be chỉ có thể phản hồi qua 1 kênh duy nhất là qua SĐT đăng ký"
+        transcription = {
+            "document_metadata": {"title": "Inbound call workflow"},
+            "canvas": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "nodes": [
+                            {
+                                "id": "step_8_2",
+                                "step_code": "8.2",
+                                "text": raw_text,
+                                "node_type": "action",
+                                "shape_kind": "rectangle",
+                                "lane": "Agent",
+                                "bbox": [700, 620, 980, 760],
+                                "terminal_state": "closed_with_response",
+                            },
+                            {"id": "end", "text": "End", "node_type": "end", "shape_kind": "oval", "bbox": [1100, 350, 1220, 450]},
+                        ],
+                        "edges": [
+                            {"from_step_code": "8.2", "to_node": "end", "condition": "next", "confidence": 0.9},
+                        ],
+                    }
+                ]
+            },
+        }
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="inbound_call.pdf",
+            raw_text=raw_text,
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        nodes_by_code = {node["step_code"]: node for node in graph["nodes"] if node.get("step_code")}
+        self.assertIn("8.2", nodes_by_code)
+        self.assertNotIn("1", nodes_by_code)
+        self.assertIn("1 kênh", nodes_by_code["8.2"]["content"])
+        self.assertNotIn("1", report["covered_step_codes"])
+
     def test_boundary_nodes_with_ambiguous_zero_ids_do_not_collide(self) -> None:
         transcription = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
         page = transcription["canvas"]["pages"][0]

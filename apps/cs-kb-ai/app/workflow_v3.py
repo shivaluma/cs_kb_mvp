@@ -9,7 +9,7 @@ from app.schemas import WorkflowExtractionPayload
 
 STEP_CODE_RE = re.compile(r"(?<![\d/])(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[.)]?\s)", re.IGNORECASE)
 LINE_STEP_CODE_RE = re.compile(r"^\s*(?:yes|no|có|không)?\s*(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[.)]?\s)", re.IGNORECASE)
-MULTI_STEP_NODE_BOUNDARY_RE = re.compile(r"(?im)^\s*(?:yes|no|có|không)?\s*(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[.)]?\s)")
+MULTI_STEP_NODE_BOUNDARY_RE = re.compile(r"(?im)(?<![\d/])(?:^|\s)(?:yes|no|có|không)?\s*(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[.)]?\s)")
 NOTE_MARKER_RE = re.compile(r"^\s*(?:\(\*+\)|\([a-z]\)|lưu ý|luu y|ghi chú|ghi chu|note|quy định audit|quy dinh audit)\b", re.IGNORECASE)
 VALID_EDGE_CONDITIONS = {"yes", "no", "next", "timeout", "escalation", "fallback", "handoff", "return", "retry"}
 EXTERNAL_CONTINUATION_STATES = {"continues_with_related_sop"}
@@ -271,7 +271,7 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
 
 def split_multi_step_canvas_node(item: dict[str, Any]) -> list[dict[str, Any]]:
     text = str(item.get("text") or item.get("content") or item.get("title") or item.get("label") or "")
-    matches = list(MULTI_STEP_NODE_BOUNDARY_RE.finditer(text))
+    matches = split_step_boundary_matches(text)
     codes = [normalize_step_code(match.group(1)) for match in matches if normalize_step_code(match.group(1))]
     unique_codes = list(dict.fromkeys(codes))
     if len(unique_codes) < 2:
@@ -284,7 +284,7 @@ def split_multi_step_canvas_node(item: dict[str, Any]) -> list[dict[str, Any]]:
         if not code:
             continue
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        segment = normalize_display_text(text[match.start():end])
+        segment = normalize_display_text(text[match.start(1):end])
         if not segment:
             continue
         split_item = {**item}
@@ -292,6 +292,7 @@ def split_multi_step_canvas_node(item: dict[str, Any]) -> list[dict[str, Any]]:
         split_item["content"] = segment
         split_item["title"] = segment
         split_item["step_code"] = code
+        split_item.update(split_node_shape_and_type(item, segment, index))
         if original_id:
             split_item["id"] = f"{original_id}_step_{code.replace('.', '_')}"
         metadata = split_item.get("metadata") if isinstance(split_item.get("metadata"), dict) else {}
@@ -302,6 +303,42 @@ def split_multi_step_canvas_node(item: dict[str, Any]) -> list[dict[str, Any]]:
         }
         output.append(split_item)
     return output or [item]
+
+
+def split_step_boundary_matches(text: str) -> list[re.Match[str]]:
+    return [
+        match
+        for match in MULTI_STEP_NODE_BOUNDARY_RE.finditer(text)
+        if split_step_boundary_is_plausible(text, match)
+    ]
+
+
+def split_step_boundary_is_plausible(text: str, match: re.Match[str]) -> bool:
+    code = normalize_step_code(match.group(1))
+    if not code:
+        return False
+    after_code = text[match.end(1): match.end(1) + 1]
+    if "." in code or after_code in {".", ")"}:
+        return True
+    line_start = text.rfind("\n", 0, match.start(1)) + 1
+    line_end = text.find("\n", match.start(1))
+    if line_end < 0:
+        line_end = len(text)
+    prefix = normalized_text(text[line_start:match.start(1)])
+    if prefix not in {"", "yes", "no", "co", "khong", "buoc"}:
+        return False
+    return is_workflow_like_step_line(text[line_start:line_end])
+
+
+def split_node_shape_and_type(item: dict[str, Any], segment: str, index: int) -> dict[str, str]:
+    original_type = normalized_text(str(item.get("node_type") or item.get("type") or item.get("semantic_node_type") or ""))
+    original_shape = normalized_text(str(item.get("shape_kind") or item.get("shape") or ""))
+    segment_is_question = "?" in segment
+    if index == 0 and (segment_is_question or "decision" in original_type or "diamond" in original_shape or "rhombus" in original_shape):
+        return {"node_type": "decision", "shape_kind": "diamond"}
+    if segment_is_question and original_type not in {"action", "task", "process", "step"}:
+        return {"node_type": "decision", "shape_kind": "diamond"}
+    return {"node_type": "action", "shape_kind": "rectangle"}
 
 
 def compile_canvas_annotations(filename: str, canvas: dict[str, Any], node_lookup: dict[str, str]) -> list[dict[str, Any]]:
