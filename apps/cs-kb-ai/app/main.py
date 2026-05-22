@@ -458,6 +458,8 @@ async def upload_document(
         review_status="approved" if status == "published" else enrichment["review_status"],
         extraction_confidence=enrichment["extraction_confidence"],
     )
+    if status == "published":
+        version.update(repository.sync_qdrant_version(version["version_id"]))
     return DocumentVersionResponse(**version, warnings=warnings)
 
 
@@ -958,7 +960,9 @@ def get_version_source_page(version_id: str, page_number: int) -> Response:
 def publish_version(version_id: str, payload: PublishVersionRequest | None = None) -> dict[str, Any]:
     try:
         data = payload or PublishVersionRequest()
-        return repository.publish_version(version_id, data.actor, data.force)
+        result = repository.publish_version(version_id, data.actor, data.force)
+        result.update(repository.sync_qdrant_version(version_id))
+        return result
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -969,7 +973,9 @@ def publish_version(version_id: str, payload: PublishVersionRequest | None = Non
 def retry_version_indexing(version_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         actor = str((payload or {}).get("actor") or "api-gateway")
-        return repository.prepare_version_indexing_retry(version_id, actor)
+        result = repository.prepare_version_indexing_retry(version_id, actor)
+        result.update(repository.sync_qdrant_version(version_id))
+        return result
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

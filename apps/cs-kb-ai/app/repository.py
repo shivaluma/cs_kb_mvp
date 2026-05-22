@@ -13,6 +13,7 @@ from psycopg import Connection, sql
 from psycopg.rows import dict_row, tuple_row
 from psycopg_pool import ConnectionPool
 
+from app import qdrant_store
 from app.config import settings
 from app.embedding import vector_literal
 from app.search_labels import is_bad_search_label, meaningful_search_label
@@ -5419,7 +5420,7 @@ def lexical_search(query: str, filters: RetrievalFilters, limit: int) -> list[di
         return rerank_structural_matches(query, [dict(row) for row in rows])
 
 
-def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+def pgvector_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
     where_sql, params = filter_sql(filters)
     with connection() as conn:
         conn.row_factory = dict_row
@@ -5432,7 +5433,9 @@ def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) ->
                    d.source_filename,
                    v.version_number,
                    v.status,
+                   v.publish_state,
                    v.review_status,
+                   d.status AS document_status,
                    v.effective_from,
                    v.published_at,
                    (d.current_version_id = v.id) AS is_current_version,
@@ -5452,6 +5455,131 @@ def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) ->
             [vector_literal(vector), *params, vector_literal(vector), limit],
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def hydrate_vector_hits(hits: list[dict[str, Any]], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+    chunk_ids = [str(hit.get("chunk_id") or "") for hit in hits if hit.get("chunk_id")]
+    if not chunk_ids or limit <= 0:
+        return []
+    score_by_id = {str(hit.get("chunk_id")): float(hit.get("score") or 0.0) for hit in hits if hit.get("chunk_id")}
+    order_by_id = {chunk_id: index for index, chunk_id in enumerate(chunk_ids)}
+    where_sql, params = filter_sql(filters)
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT c.id AS chunk_id,
+                   c.document_id,
+                   c.version_id,
+                   d.title,
+                   d.source_filename,
+                   v.version_number,
+                   v.status,
+                   v.publish_state,
+                   v.review_status,
+                   d.status AS document_status,
+                   v.effective_from,
+                   v.published_at,
+                   (d.current_version_id = v.id) AS is_current_version,
+                   c.chunk_index,
+                   c.section,
+                   c.heading,
+                   c.content,
+                   c.metadata
+            FROM ai_chunks c
+            JOIN ai_documents d ON d.id = c.document_id
+            JOIN ai_document_versions v ON v.id = c.version_id
+            WHERE {where_sql}
+              AND c.id = ANY(%s::uuid[])
+            """,
+            [*params, chunk_ids],
+        ).fetchall()
+    hydrated: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        chunk_id = str(item.get("chunk_id"))
+        item["score"] = score_by_id.get(chunk_id, 0.0)
+        hydrated.append(item)
+    hydrated.sort(key=lambda item: order_by_id.get(str(item.get("chunk_id")), len(order_by_id)))
+    return hydrated[:limit]
+
+
+def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+    backend = settings.vector_backend
+    if backend == "pgvector" or not qdrant_store.qdrant_configured():
+        return pgvector_search(vector, filters, limit)
+
+    try:
+        hits = qdrant_store.search(vector, filters, limit)
+        rows = hydrate_vector_hits(hits, filters, limit)
+        if rows or backend == "qdrant":
+            return rows
+    except Exception:
+        if backend == "qdrant":
+            raise
+
+    return pgvector_search(vector, filters, limit)
+
+
+def qdrant_index_rows_for_version(version_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT c.id AS chunk_id,
+                   c.document_id,
+                   c.version_id,
+                   d.title,
+                   COALESCE(c.metadata->>'source_filename', d.source_filename) AS source_filename,
+                   v.version_number,
+                   v.status,
+                   CASE WHEN v.status = 'published' THEN 'published_ready' ELSE v.publish_state END AS publish_state,
+                   v.review_status,
+                   d.status AS document_status,
+                   (d.current_version_id = v.id) AS is_current_version,
+                   c.chunk_index,
+                   c.section,
+                   c.heading,
+                   c.content,
+                   c.metadata,
+                   c.embedding::text AS embedding
+            FROM ai_chunks c
+            JOIN ai_documents d ON d.id = c.document_id
+            JOIN ai_document_versions v ON v.id = c.version_id
+            WHERE c.version_id = %s
+              AND c.embedding IS NOT NULL
+            ORDER BY c.chunk_index ASC
+            """,
+            (version_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def sync_qdrant_version(version_id: str) -> dict[str, Any]:
+    if not qdrant_store.qdrant_configured():
+        return {
+            "vector_backend": "pgvector",
+            "vector_index_verified": True,
+            "qdrant_indexed_count": 0,
+            "vector_indexing_error": "",
+        }
+    try:
+        rows = qdrant_index_rows_for_version(version_id)
+        indexed_count = qdrant_store.upsert_points(rows)
+        verified = indexed_count > 0
+        return {
+            "vector_backend": "qdrant",
+            "vector_index_verified": verified,
+            "qdrant_indexed_count": indexed_count,
+            "vector_indexing_error": "" if verified else "qdrant_no_points_indexed",
+        }
+    except Exception as exc:
+        return {
+            "vector_backend": "qdrant",
+            "vector_index_verified": False,
+            "qdrant_indexed_count": 0,
+            "vector_indexing_error": str(exc)[:500],
+        }
 
 
 def approved_relation_target_rows(source_document_ids: list[str], exclude_chunk_ids: list[str], limit: int) -> list[dict[str, Any]]:

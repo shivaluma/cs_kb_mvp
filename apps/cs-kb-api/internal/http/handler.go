@@ -594,20 +594,46 @@ func (h *Handler) syncAIVersionIndexing(ctx context.Context, versionID string, p
 	}
 	indexPayload["publish_state"] = "published_ready"
 	err := h.store.IndexAIDocument(ctx, indexPayload)
+	vectorVerified := indexingVectorVerified(payload, err)
 	result := map[string]any{
 		"actor":                 "api-gateway",
-		"success":               err == nil,
+		"success":               err == nil && vectorVerified,
 		"lexical_index_synced":  err == nil,
-		"vector_index_verified": err == nil,
+		"vector_index_verified": vectorVerified,
 		"error":                 "",
 	}
 	if err != nil {
 		result["error"] = err.Error()
 		h.logger.ErrorContext(ctx, "AI version indexing failed", "version_id", versionID, "error", err)
+	} else if !vectorVerified {
+		result["error"] = indexingVectorError(payload)
+		h.logger.ErrorContext(ctx, "AI vector indexing failed", "version_id", versionID, "error", result["error"])
 	}
 	if markErr := h.postAIIndexingResult(ctx, versionID, result); markErr != nil {
 		h.logger.ErrorContext(ctx, "AI indexing result update failed", "version_id", versionID, "error", markErr)
 	}
+}
+
+func indexingVectorVerified(payload map[string]any, lexicalErr error) bool {
+	if lexicalErr != nil {
+		return false
+	}
+	value, ok := payload["vector_index_verified"]
+	if !ok {
+		return true
+	}
+	verified, ok := value.(bool)
+	if !ok {
+		return false
+	}
+	return verified
+}
+
+func indexingVectorError(payload map[string]any) string {
+	if value, ok := payload["vector_indexing_error"].(string); ok && strings.TrimSpace(value) != "" {
+		return value
+	}
+	return "vector_indexing_not_verified"
 }
 
 func (h *Handler) postAIIndexingResult(ctx context.Context, versionID string, payload map[string]any) error {

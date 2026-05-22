@@ -94,6 +94,12 @@ class Settings:
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()
         self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "").strip()
+        vector_backend = os.getenv("VECTOR_BACKEND", "dual").strip().lower()
+        if vector_backend not in {"pgvector", "qdrant", "dual"}:
+            vector_backend = "dual"
+        self.vector_backend = vector_backend
+        self.qdrant_collection = os.getenv("QDRANT_COLLECTION", "sop_chunks").strip() or "sop_chunks"
+        self.qdrant_timeout_seconds = float(os.getenv("QDRANT_TIMEOUT_SECONDS", "3"))
         self.embedding_dimensions = int(os.getenv("EMBEDDING_DIMENSIONS", str(EMBEDDING_DIMENSIONS)))
         self.embedding_base_url = first_non_empty(os.getenv("EMBEDDING_BASE_URL"), self.openrouter_base_url)
         self.embedding_api_key = first_non_empty(os.getenv("EMBEDDING_API_KEY"), self.openrouter_api_key)

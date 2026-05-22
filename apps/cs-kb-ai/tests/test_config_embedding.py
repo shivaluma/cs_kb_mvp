@@ -50,6 +50,21 @@ class EmbeddingConfigTest(unittest.TestCase):
 
         self.assertTrue(settings.admin_reset_enabled)
 
+    def test_vector_backend_config_supports_qdrant_dual_mode(self) -> None:
+        env = {
+            "VECTOR_BACKEND": "dual",
+            "QDRANT_URL": " http://qdrant:6333 ",
+            "QDRANT_COLLECTION": " sop_chunks_prod ",
+            "QDRANT_TIMEOUT_SECONDS": "2.5",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings()
+
+        self.assertEqual(settings.vector_backend, "dual")
+        self.assertEqual(settings.qdrant_url, "http://qdrant:6333")
+        self.assertEqual(settings.qdrant_collection, "sop_chunks_prod")
+        self.assertEqual(settings.qdrant_timeout_seconds, 2.5)
+
 
 if __name__ == "__main__":
     unittest.main()

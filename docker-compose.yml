@@ -36,6 +36,9 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgres://cs_kb:cs_kb@postgres:5432/cs_kb?sslmode=disable}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      VECTOR_BACKEND: ${VECTOR_BACKEND:-dual}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-sop_chunks}
+      QDRANT_TIMEOUT_SECONDS: ${QDRANT_TIMEOUT_SECONDS:-3}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/auto}

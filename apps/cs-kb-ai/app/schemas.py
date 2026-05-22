@@ -961,6 +961,10 @@ class DocumentVersionResponse(BaseModel):
     indexed_at: Optional[datetime] = None
     indexing_error: str = ""
     published_ready_at: Optional[datetime] = None
+    vector_backend: str = ""
+    vector_index_verified: bool = False
+    qdrant_indexed_count: int = 0
+    vector_indexing_error: str = ""
     warnings: list[str] = Field(default_factory=list)
 
 
