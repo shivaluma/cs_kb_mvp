@@ -100,12 +100,27 @@ export function PortalWorkspace({
       </section>
 
       {!loading && !publishedSops.length ? (
-        <EmptyPanel
-          compact
-          icon={BookOpen}
-          text="Published SOPs from the governed index will appear here after review and publish."
-          title="No published SOPs yet"
-        />
+        <section className="grid gap-3 rounded-lg border bg-muted/15 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <BookOpen className="size-4 text-muted-foreground" />
+              Published list unavailable
+            </div>
+            <p className="mt-1 max-w-[68ch] text-sm leading-6 text-muted-foreground">
+              The portal browse feed returned no published documents, but search and grounded chat can still query approved SOP evidence.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => onSearch(query || quickQueries[0] || "")} type="button" variant="outline">
+              <Search data-icon="inline-start" className="size-4" />
+              Search evidence
+            </Button>
+            <Button onClick={() => onOpenChat(query || quickQueries[0] || "")} type="button" variant="outline">
+              <MessageSquareText data-icon="inline-start" className="size-4" />
+              Ask chat
+            </Button>
+          </div>
+        </section>
       ) : null}
 
       {popularSops.length ? (

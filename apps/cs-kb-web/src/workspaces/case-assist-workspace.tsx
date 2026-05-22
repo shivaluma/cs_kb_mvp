@@ -32,6 +32,12 @@ import type {
   ToolLinkSummary,
 } from "@/types";
 
+const CASE_ASSIST_EXAMPLES = [
+  "khách hỏi vì sao tài xế bị khóa",
+  "khách đã nói vấn đề rồi có hỏi lại không",
+  "mẫu email mở đầu không rõ giới tính",
+];
+
 export type CaseAssistCandidate = {
   audience: string[];
   caseType: string[];
@@ -206,7 +212,20 @@ export function CaseAssistWorkspace({
               <EmptyPanel
                 compact
                 icon={Route}
-                text="Type the issue in plain language. Case Assist composes quick answer, checklist, tools, and related SOPs from approved content."
+                actions={CASE_ASSIST_EXAMPLES.map((example) => (
+                  <Button
+                    key={example}
+                    onClick={() => {
+                      setQuery(example);
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {example}
+                  </Button>
+                ))}
+                text="Start from the customer issue or policy signal. Case Assist will turn approved SOP evidence into answer, checklist, tools, and related sources."
                 title="Start with the issue"
               />
             ) : loading ? (
@@ -268,8 +287,24 @@ export function CaseAssistWorkspace({
             <EmptyPanel
               compact
               icon={Checklist}
-              text="Select a match to see the action card."
-              title="No action card selected"
+              actions={
+                !normalizedQuery ? (
+                  <Button
+                    onClick={() => setQuery(CASE_ASSIST_EXAMPLES[0])}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Try example
+                  </Button>
+                ) : undefined
+              }
+              text={
+                normalizedQuery
+                  ? "Select an approved match to see the quick answer, checklist, linked tools, and source trail."
+                  : "Search an issue first. The action card stays empty until approved SOP evidence is selected."
+              }
+              title={normalizedQuery ? "No action card selected" : "Action card"}
             />
           )}
         </section>

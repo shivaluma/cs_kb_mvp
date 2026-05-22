@@ -217,7 +217,7 @@ export function ChatWorkspace({
 
         <div className={cn("min-h-0 flex-1 overflow-y-auto", hasMessages ? "px-1 py-2" : "grid place-items-center px-4 py-10")}>
           {hasMessages ? (
-            <div className="mx-auto grid w-full max-w-3xl gap-6 pb-6">
+            <div className="mx-auto grid w-full max-w-5xl gap-6 pb-6">
               {messages.map((message) => (
                 <ChatBubble
                   key={message.id}
@@ -440,7 +440,7 @@ function Composer({
   });
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-2">
+    <div className="mx-auto w-full max-w-5xl space-y-2">
       <div className="flex justify-end">
         <Button
           aria-expanded={scopeOpen}
@@ -627,7 +627,7 @@ function ChatBubble({
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const sourceCount = groupedSources.reduce((total, group) => total + group.sources.length, 0);
   return (
-    <article className={cn("min-w-0", isUser ? "ml-auto max-w-[78%]" : "mr-auto w-full max-w-3xl")}>
+    <article className={cn("min-w-0", isUser ? "ml-auto max-w-[78%]" : "mr-auto w-full max-w-5xl")}>
       <div
         className={cn(
           "min-w-0 break-words text-sm leading-6",
@@ -784,24 +784,44 @@ function ActionSteps({ steps }: { steps: string[] }) {
 }
 
 function Warnings({ showDebug, warnings }: { showDebug: boolean; warnings: string[] }) {
-  const visibleWarnings = warnings
+  const userWarnings = warnings
     .map((warning) => readableWarningLabel(warning, showDebug))
     .filter(Boolean)
     .filter((warning, index, list) => list.indexOf(warning) === index)
     .slice(0, 6);
-  if (!visibleWarnings.length) {
+  const debugWarnings = showDebug
+    ? warnings
+        .map((warning) => warning.replace(/_/g, " "))
+        .filter((warning, index, list) => list.indexOf(warning) === index)
+        .filter((warning) => !userWarnings.includes(warning))
+        .slice(0, 4)
+    : [];
+  if (!userWarnings.length && !debugWarnings.length) {
     return null;
   }
   return (
-    <section className="min-w-0 rounded-xl border border-destructive/25 bg-destructive/5 px-3 py-2.5">
-      <p className="text-xs font-semibold text-destructive">Review warning</p>
-      <div className="mt-2 flex max-w-full flex-wrap gap-1.5">
-        {visibleWarnings.map((warning, index) => (
-          <CompactBadge className="max-w-full text-destructive" key={`${warning}-${index}`}>
-            {warning}
-          </CompactBadge>
-        ))}
-      </div>
+    <section className="min-w-0 rounded-xl border bg-muted/15 px-3 py-2.5">
+      <p className="text-xs font-semibold text-muted-foreground">Review notes</p>
+      {userWarnings.length ? (
+        <ul className="mt-2 space-y-1 text-sm leading-6">
+          {userWarnings.map((warning, index) => (
+            <li className="grid grid-cols-[0.5rem_minmax(0,1fr)] gap-2" key={`${warning}-${index}`}>
+              <span className="mt-2 size-1.5 rounded-full bg-amber-500" aria-hidden="true" />
+              <span className="min-w-0 break-words">{warning}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {debugWarnings.length ? (
+        <details className="mt-2 text-xs text-muted-foreground">
+          <summary className="cursor-pointer select-none">Debug warnings</summary>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {debugWarnings.map((warning) => (
+              <CompactBadge key={warning}>{warning}</CompactBadge>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </section>
   );
 }
@@ -820,7 +840,7 @@ function readableWarningLabel(warning: string, showDebug: boolean) {
   if (normalized.includes("internal")) {
     return "Internal-only source needs care before customer wording.";
   }
-  if (!showDebug && isDebugWarning(normalized)) {
+  if (isDebugWarning(normalized)) {
     return "";
   }
   return warning.replace(/_/g, " ");

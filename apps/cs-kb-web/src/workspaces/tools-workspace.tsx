@@ -1,9 +1,11 @@
 import {
   IconExternalLink as ExternalLink,
   IconLink as Link2,
+  IconSearch as Search,
   IconTool as Wrench
 } from "@tabler/icons-react";
 
+import { EmptyPanel } from "@/components/common";
 import { DataTable, type DataTableColumn } from "@/components/data-table";
 import { SearchBar } from "@/components/search-bar";
 import { Badge } from "@/components/ui/badge";
@@ -121,19 +123,47 @@ export function ToolsWorkspace({
         </Select>
       </div>
 
-      <p className="text-sm text-muted-foreground">
-        {tools.length} approved tool{tools.length === 1 ? "" : "s"} match this view. Open links are tracked for source-unit usage.
-      </p>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          {tools.length} approved tool{tools.length === 1 ? "" : "s"} match this view. Open links are tracked for source-unit usage.
+        </p>
+        {query || collection ? (
+          <Button
+            onClick={() => {
+              setQuery("");
+              setCollection("");
+            }}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            Clear filters
+          </Button>
+        ) : null}
+      </div>
 
-      <DataTable
-        columns={columns}
-        empty="No approved tools match this view."
-        getRowKey={(row) => row.id}
-        loading={loading}
-        loadingLabel="Loading tools…"
-        minWidth="48rem"
-        rows={tools}
-      />
+      {!loading && tools.length === 0 ? (
+        <EmptyPanel
+          compact
+          icon={query || collection ? Search : Wrench}
+          text={
+            query || collection
+              ? "No approved tools matched these filters. Clear filters or search by owner, system name, form, or dashboard."
+              : "Approved operational tools will appear here once they are linked to source units or collections."
+          }
+          title={query || collection ? "No tools matched" : "No tools linked yet"}
+        />
+      ) : (
+        <DataTable
+          columns={columns}
+          empty="No approved tools match this view."
+          getRowKey={(row) => row.id}
+          loading={loading}
+          loadingLabel="Loading tools…"
+          minWidth="48rem"
+          rows={tools}
+        />
+      )}
     </div>
   );
 }

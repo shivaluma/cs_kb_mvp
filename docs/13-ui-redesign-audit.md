@@ -16,6 +16,10 @@ The UI is now oriented around the CS agent job: search a published SOP, understa
 
 ### High Severity
 
+- Chrome audit on `2026-05-23` showed the portal browse feed returning empty while search shortcuts and retrieval-backed flows still worked. The old empty state implied there was no content at all, which could send CS users away from the system even when approved evidence is searchable.
+- Lookup could stay in `Searching…` with skeleton rows for more than 10 seconds. Without a slow-search recovery path, users could not tell whether to retry, shorten the query, or switch to grounded chat.
+- Chat answers used a narrow center column inside a wide desktop viewport, while warning/debug chips took more visual weight than the answer. This made the correct answer feel less trustworthy and harder to scan.
+- Empty admin workspaces such as Tools and Case Assist showed blank panels or blank tables without examples, recovery actions, or next steps.
 - Raw retrieval scores appeared on normal source cards, which made CS users interpret backend ranking as policy confidence.
 - Chat exposed context candidates, model route, model name, latency, and retrieval debug in the normal answer view.
 - Search filters prioritized collection/content type before more familiar CS facets such as audience, category, and channel.
@@ -55,6 +59,11 @@ The UI is now oriented around the CS agent job: search a published SOP, understa
 - `SourceContextCard`: raw scores and console source diagnostics are debug-only; source labels are SOP-focused.
 - `ChatWorkspace`: retrieval trace, model route, model name, and latency are debug-only.
 - `SOPDetailWorkspace`: table of contents added; raw version IDs hidden by default.
+- `EmptyPanel`: now supports scoped actions so empty states can offer the next useful operation instead of only explanatory text.
+- `PortalWorkspace`: distinguishes an unavailable browse feed from an actually empty knowledge base and gives direct search/chat actions.
+- `LookupWorkspace`: adds a slow-search recovery panel with retry and chat fallback.
+- `CaseAssistWorkspace`: adds example issue chips and clearer action-card guidance before a result is selected.
+- `ToolsWorkspace`: replaces blank empty tables with an action-oriented empty state and a clear-filter affordance.
 
 ## Copy And Labels
 
@@ -69,6 +78,19 @@ The UI is now oriented around the CS agent job: search a published SOP, understa
 - Empty lookup now teaches what to search for.
 - No-results state tells CS users how to recover and when to send feedback.
 - Chat keeps uncertainty visible and separates review warnings from grounded answers.
+- Slow lookup now stops being an indefinite skeleton-only state and gives retry/chat alternatives.
+- Empty portal state now says "Published list unavailable" when the browse API is empty but evidence search remains available.
+- Empty Case Assist and Tools states now expose concrete examples or filter recovery actions.
+
+## Screenshot Audit Evidence
+
+Screenshots were captured through Chrome against the local web app using the deployed API and saved under `.tmp/ui-audit-20260523/`.
+
+- `portal.png`: large blank browse state said no SOPs existed while quick search prompts remained available.
+- `lookup.png`: route stayed in loading state, leaving source detail blank and no recovery action.
+- `chat-session.png`: warning/debug chips dominated the answer area and the answer column was too narrow for the available viewport.
+- `case-assist.png`: empty query state required users to invent the first query without operational examples.
+- `tools.png`: empty result table showed an empty grid instead of a decision point.
 
 ## Accessibility And Responsiveness
 

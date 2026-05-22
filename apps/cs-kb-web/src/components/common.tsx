@@ -411,11 +411,13 @@ export function EmptyResults({ query }: { query: string }) {
 
 export function EmptyPanel({
   compact = false,
+  actions,
   icon: Icon,
   text,
   title,
 }: {
   compact?: boolean;
+  actions?: React.ReactNode;
   icon: ElementType;
   text: string;
   title: string;
@@ -431,6 +433,7 @@ export function EmptyPanel({
         <Icon className="mx-auto size-8 text-muted-foreground/60" strokeWidth={1.5} />
         <h2 className="mt-3 text-sm font-semibold">{title}</h2>
         <p className="mt-1 text-sm leading-6 text-muted-foreground">{text}</p>
+        {actions ? <div className="mt-4 flex flex-wrap justify-center gap-2">{actions}</div> : null}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   IconCheck as Check,
   IconCopy as Copy,
@@ -106,6 +106,22 @@ export function LookupWorkspace({
   const visibleCount = listSource.length + groupedSourceResults.length + selectedCitationGroups.length + aiSuggestedSops.length;
   const activeFilterCount = countActiveFilters(filters);
   const debugEnabled = isDebugUiEnabled();
+  const [searchStartedAt, setSearchStartedAt] = useState<number | null>(null);
+  const [showSlowSearch, setShowSlowSearch] = useState(false);
+
+  useEffect(() => {
+    if (!loading && !booting) {
+      setSearchStartedAt(null);
+      setShowSlowSearch(false);
+      return;
+    }
+    const startedAt = searchStartedAt ?? Date.now();
+    if (!searchStartedAt) {
+      setSearchStartedAt(startedAt);
+    }
+    const timeout = window.setTimeout(() => setShowSlowSearch(true), Math.max(0, 6500 - (Date.now() - startedAt)));
+    return () => window.clearTimeout(timeout);
+  }, [booting, loading, searchStartedAt]);
 
   function openFullSop(match: RetrievalResult) {
     onSelectDocumentMatch(match);
@@ -180,7 +196,16 @@ export function LookupWorkspace({
                   title="Search published SOPs"
                 />
               ) : loading || booting ? (
-                <ResultSkeleton />
+                <>
+                  {showSlowSearch ? (
+                    <SlowSearchNotice
+                      onAskAI={onAskAI}
+                      onRetry={onRunSearch}
+                      query={query}
+                    />
+                  ) : null}
+                  <ResultSkeleton />
+                </>
               ) : visibleCount === 0 ? (
                 <EmptyResults query={query} />
               ) : (
@@ -287,13 +312,58 @@ export function LookupWorkspace({
             <EmptyPanel
               compact
               icon={Search}
-              text="Choose a result to read the full SOP context and verify the highlighted source."
-              title="Select a result"
+              actions={
+                canSearch ? (
+                  <Button onClick={onAskAI} size="sm" type="button" variant="outline">
+                    <Sparkles data-icon="inline-start" className="size-4" />
+                    Ask chat
+                  </Button>
+                ) : undefined
+              }
+              text={
+                canSearch
+                  ? "Open a match to verify the exact source block, or ask chat when you need a grounded operational answer."
+                  : "Choose a result to read the full SOP context and verify the highlighted source."
+              }
+              title={canSearch ? "Waiting for a source" : "Select a result"}
             />
           )}
         </article>
       </div>
     </div>
+  );
+}
+
+function SlowSearchNotice({
+  onAskAI,
+  onRetry,
+  query,
+}: {
+  onAskAI: () => void;
+  onRetry: () => void;
+  query: string;
+}) {
+  return (
+    <section className="rounded-lg border bg-muted/20 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold">Search is taking longer than expected</h3>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">
+            Try the same query again, shorten the wording, or use chat for a grounded answer while lookup catches up.
+          </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{query}</p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <Button onClick={onRetry} size="sm" type="button" variant="outline">
+            Search again
+          </Button>
+          <Button onClick={onAskAI} size="sm" type="button" variant="outline">
+            <Sparkles data-icon="inline-start" className="size-4" />
+            Ask chat
+          </Button>
+        </div>
+      </div>
+    </section>
   );
 }
 
