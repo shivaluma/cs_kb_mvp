@@ -34,6 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { chatWarningLabels } from "@/lib/chat-warnings";
 import { isDebugUiEnabled } from "@/lib/ui-mode";
 import { groupResultsByDisplaySource } from "@/lib/source-display";
 import type {
@@ -784,18 +785,7 @@ function ActionSteps({ steps }: { steps: string[] }) {
 }
 
 function Warnings({ showDebug, warnings }: { showDebug: boolean; warnings: string[] }) {
-  const userWarnings = warnings
-    .map((warning) => readableWarningLabel(warning, showDebug))
-    .filter(Boolean)
-    .filter((warning, index, list) => list.indexOf(warning) === index)
-    .slice(0, 6);
-  const debugWarnings = showDebug
-    ? warnings
-        .map((warning) => warning.replace(/_/g, " "))
-        .filter((warning, index, list) => list.indexOf(warning) === index)
-        .filter((warning) => !userWarnings.includes(warning))
-        .slice(0, 4)
-    : [];
+  const { userWarnings, debugWarnings } = chatWarningLabels(warnings, showDebug);
   if (!userWarnings.length && !debugWarnings.length) {
     return null;
   }
@@ -824,49 +814,6 @@ function Warnings({ showDebug, warnings }: { showDebug: boolean; warnings: strin
       ) : null}
     </section>
   );
-}
-
-function readableWarningLabel(warning: string, showDebug: boolean) {
-  const normalized = warning.toLowerCase().replace(/_/g, " ");
-  if (normalized.includes("conflict") || normalized.includes("requires review")) {
-    return "SOP guidance may conflict. Review with owner/QA.";
-  }
-  if (normalized.includes("no reliable source") || normalized.includes("insufficient")) {
-    return "Not enough published SOP evidence.";
-  }
-  if (normalized.includes("grounded published sop units only")) {
-    return "Answer is limited to published SOP evidence.";
-  }
-  if (normalized.includes("internal")) {
-    return "Internal-only source needs care before customer wording.";
-  }
-  if (isDebugWarning(normalized)) {
-    return "";
-  }
-  return warning.replace(/_/g, " ");
-}
-
-function isDebugWarning(normalizedWarning: string) {
-  return [
-    "raw_draft",
-    "raw draft",
-    "archived content excluded",
-    "chat_kb_index",
-    "chat kb index",
-    "meili",
-    "postgres",
-    "qdrant",
-    "vector",
-    "rerank",
-    "retrieval",
-    "relation_expansion",
-    "relation expansion",
-    "openrouter",
-    "model:",
-    "model confidence",
-    "cache",
-    "timeout",
-  ].some((token) => normalizedWarning.includes(token));
 }
 
 function sourceGroupsForResponse(response: NonNullable<ChatThreadMessage["response"]>): SourceGroup[] {
