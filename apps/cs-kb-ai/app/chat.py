@@ -610,7 +610,18 @@ def should_use_recent_context(question: str, recent_user_context: list[str]) -> 
     if not recent_user_context:
         return False
     normalized = question.lower()
-    return any(marker in normalized for marker in taxonomy_string_list("follow_up_markers")) or len(normalized.split()) <= 5
+    return has_follow_up_marker(normalized) or len(normalized.split()) <= 5
+
+
+def has_follow_up_marker(normalized_question: str) -> bool:
+    for marker in taxonomy_string_list("follow_up_markers"):
+        marker = marker.strip().lower()
+        if not marker:
+            continue
+        pattern = r"(?<!\w)" + re.escape(marker).replace(r"\ ", r"\s+") + r"(?!\w)"
+        if re.search(pattern, normalized_question, flags=re.UNICODE):
+            return True
+    return False
 
 
 def updated_session_summary(current_summary: str, question: str, filters: dict[str, object]) -> str:

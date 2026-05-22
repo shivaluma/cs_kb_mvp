@@ -707,6 +707,17 @@ class ChatRetrievalTest(unittest.TestCase):
         self.assertIn("Follow-up context for retrieval only", expanded)
         self.assertEqual(plain, "Quy định hoàn tiền đơn food")
 
+    def test_follow_up_marker_does_not_match_inside_words(self) -> None:
+        recent = ["khách hàng không cung cấp được số điện thoại và email đăng ký be qua email thì sao"]
+        standalone_question = "tao có thể nói cho tài xế là bị khoá vì vi phạm 3 lần không"
+
+        self.assertFalse(should_use_recent_context(standalone_question, recent))
+        self.assertTrue(should_use_recent_context("nó áp dụng cho tài xế không?", recent))
+        self.assertEqual(
+            contextual_retrieval_query(standalone_question, recent, "Scope: account verification"),
+            standalone_question,
+        )
+
     def test_follow_up_query_uses_previous_assistant_brief(self) -> None:
         expanded = contextual_retrieval_query(
             "rồi làm gì tiếp",
