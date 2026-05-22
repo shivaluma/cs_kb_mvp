@@ -67,6 +67,7 @@ type SearchRequest struct {
 	Query           string        `json:"query"`
 	Filters         SearchFilters `json:"filters"`
 	IncludeSemantic bool          `json:"include_semantic"`
+	Debug           bool          `json:"debug,omitempty"`
 }
 
 type SearchFilters struct {
@@ -91,16 +92,18 @@ type SearchResponse struct {
 }
 
 type SearchResult struct {
-	SOPID      string    `json:"sop_id"`
-	Title      string    `json:"title"`
-	Snippet    string    `json:"snippet"`
-	Category   string    `json:"category"`
-	Audience   []string  `json:"audience"`
-	Vertical   string    `json:"vertical"`
-	Tags       []string  `json:"tags"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	Version    int       `json:"version"`
-	Confidence float64   `json:"confidence"`
+	SOPID      string         `json:"sop_id"`
+	Title      string         `json:"title"`
+	Snippet    string         `json:"snippet"`
+	Category   string         `json:"category"`
+	Audience   []string       `json:"audience"`
+	Vertical   string         `json:"vertical"`
+	Tags       []string       `json:"tags"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	Version    int            `json:"version"`
+	Confidence float64        `json:"confidence"`
+	Score      float64        `json:"score,omitempty"`
+	Debug      map[string]any `json:"debug,omitempty"`
 }
 
 type SemanticResult struct {
@@ -133,6 +136,7 @@ type SemanticResult struct {
 	MatchedChunk         MatchedChunk    `json:"matched_chunk,omitempty"`
 	Parent               ParentContext   `json:"parent,omitempty"`
 	Display              ResultDisplay   `json:"display,omitempty"`
+	ScoreDebug           map[string]any  `json:"score_debug,omitempty"`
 }
 
 type MatchedChunk struct {

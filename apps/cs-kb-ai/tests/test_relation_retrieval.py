@@ -47,6 +47,7 @@ class RelationRetrievalTest(unittest.TestCase):
             patch("app.retrieval.repository.lexical_search", return_value=[base_row]),
             patch("app.retrieval.repository.vector_search", return_value=[]),
             patch("app.retrieval.repository.approved_relation_target_rows", return_value=[relation_row]) as relation_rows,
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}),
             patch("app.retrieval.repository.log_retrieval", return_value=2),
         ):
             response = retrieval.retrieve(RetrievalRequest(query="chuyen tech tasklist", mode="lexical", limit=3))
