@@ -57,6 +57,8 @@ export type SearchResult = {
   updated_at: string;
   version: number;
   confidence: number;
+  score?: number;
+  debug?: Record<string, unknown>;
 };
 
 export type Homepage = {
@@ -140,6 +142,7 @@ export type RetrievalResponse = {
   citations: Citation[];
   warnings: string[];
   latency_ms: number;
+  ranking_debug?: Record<string, unknown>;
 };
 
 export type ChatMessage = {
@@ -305,6 +308,7 @@ export type RetrievalResult = {
   matched_chunk?: MatchedChunkContext;
   parent?: ParentResultContext;
   display?: RetrievalDisplayContract;
+  score_debug?: Record<string, unknown>;
 };
 
 export type Citation = {

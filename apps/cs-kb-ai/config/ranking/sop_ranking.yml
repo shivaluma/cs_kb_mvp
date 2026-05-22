@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "modes": {
+    "portal_search": {
+      "candidate_limit": 50,
+      "output_limit": 10,
+      "model_rerank_enabled": false
+    },
+    "admin_search": {
+      "candidate_limit": 80,
+      "output_limit": 20,
+      "model_rerank_enabled": false
+    },
+    "ai_chat": {
+      "keyword_candidate_limit": 30,
+      "vector_candidate_limit": 30,
+      "merged_candidate_limit": 40,
+      "business_rerank_limit": 20,
+      "model_rerank_enabled": true,
+      "model_rerank_limit": 15,
+      "output_context_limit": 8
+    }
+  },
+  "stable_boosts": {
+    "meili_score_weight": 100,
+    "vector_score_weight": 100,
+    "fusion_bonus": 8,
+    "rrf_weight": 100,
+    "grouped_context_for_intent": 14,
+    "strong_exact_phrase_threshold": 22,
+    "strong_top_gap": 18,
+    "exact_phrase": {
+      "title": 18,
+      "normalized_title": 18,
+      "section_path": 10,
+      "macro_text": 16,
+      "forbidden_phrases": 20,
+      "content": 12,
+      "max_total": 30
+    },
+    "source_ref_quality": {
+      "table_row": 8,
+      "block_id": 6,
+      "paragraph_only": 3,
+      "none": -20
+    },
+    "status": {
+      "published": 15,
+      "approved": 5,
+      "needs_review": -20,
+      "draft": -40
+    },
+    "current_version": {
+      "true": 8,
+      "false": -25
+    },
+    "risk_for_compliance": {
+      "critical": 10,
+      "high": 7,
+      "medium": 3,
+      "low": 0
+    },
+    "stale_version_penalty": -25,
+    "duplicate_parent_penalty": {
+      "second": -8,
+      "third_or_more": -16
+    },
+    "example_penalty_when_policy_exists": -8,
+    "full_sop_penalty_for_specific_query": -10
+  },
+  "chunk_type_priorities": {
+    "macro": {
+      "macro_script": 20,
+      "macro_table": 14,
+      "source_evidence_section": 4,
+      "full_sop": -10
+    },
+    "forbidden_wording": {
+      "compliance_rule": 20,
+      "compliance_rule_group": 16,
+      "wording_rule": 8,
+      "full_sop": -12
+    },
+    "wording": {
+      "wording_rule_group": 18,
+      "wording_rule": 14,
+      "macro_script": 8,
+      "operational_note": 5,
+      "full_sop": -10
+    },
+    "compliance": {
+      "compliance_rule_group": 20,
+      "compliance_rule": 16,
+      "operational_note": 16,
+      "example": 4,
+      "full_sop": -8
+    },
+    "handling": {
+      "handling_rule_group": 18,
+      "handling_rule": 14,
+      "macro_script": 5,
+      "full_sop": -8
+    },
+    "document_title": {
+      "full_sop": 16,
+      "source_evidence_section": 10,
+      "macro_script": -8
+    },
+    "generic": {
+      "source_evidence_section": 4
+    }
+  },
+  "intent_rules": {
+    "macro": {
+      "seed_terms": ["macro", "mẫu câu", "câu chào", "email", "call", "chat"]
+    },
+    "forbidden_wording": {
+      "seed_terms": ["tuyệt đối không", "không nói", "cấm dùng"]
+    },
+    "wording": {
+      "seed_terms": ["xin lỗi", "rất tiếc", "xưng hô", "quý khách"]
+    },
+    "compliance": {
+      "seed_terms": ["chế tài", "khóa tài khoản", "khóa", "vi phạm", "quy trình nội bộ", "tiết lộ", "SI", "bộ phận chuyên môn"]
+    },
+    "handling": {
+      "seed_terms": ["khi nào", "trường hợp", "nếu", "có được", "xử lý sao"]
+    },
+    "document_title": {
+      "seed_terms": ["sop", "quy định", "tài liệu"]
+    }
+  },
+  "model_query_understanding": {
+    "enabled_for_ai_chat": true,
+    "enabled_for_portal": false,
+    "cache_ttl_seconds": 86400,
+    "output_schema": {
+      "intent": "string",
+      "confidence": "number",
+      "rewritten_query": "string",
+      "key_concepts": ["string"],
+      "must_have_terms": ["string"],
+      "preferred_chunk_types": ["string"],
+      "risk_sensitive": true
+    }
+  },
+  "model_rerank_gate": {
+    "minimum_candidates": 3,
+    "maximum_total_candidate_chars": 22000,
+    "semantic_query_min_words": 5
+  }
+}

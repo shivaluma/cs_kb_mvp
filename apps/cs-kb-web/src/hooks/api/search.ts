@@ -19,6 +19,7 @@ export function useSearch() {
       query: string;
       include_semantic: boolean;
       filters: Record<string, string[]>;
+      debug?: boolean;
     }) =>
       apiPost<{ results?: SearchResult[]; semantic_results?: RetrievalResult[] }>("/api/v1/search", payload),
   });

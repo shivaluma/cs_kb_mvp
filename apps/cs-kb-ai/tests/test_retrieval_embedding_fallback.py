@@ -33,6 +33,7 @@ class RetrievalEmbeddingFallbackTest(unittest.TestCase):
             patch("app.retrieval.repository.lexical_search", return_value=[retrieval_row()]), \
             patch("app.retrieval.repository.vector_search") as vector_search, \
             patch("app.retrieval.repository.approved_relation_target_rows", return_value=[]), \
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}), \
             patch("app.retrieval.repository.log_retrieval", return_value=12), \
             patch("app.retrieval.embed_text", side_effect=EmbeddingProviderError("down")):
             response = retrieve(RetrievalRequest(query="refund pending", mode="hybrid", limit=3))
@@ -47,6 +48,7 @@ class RetrievalEmbeddingFallbackTest(unittest.TestCase):
             patch("app.retrieval.repository.lexical_search", return_value=[retrieval_row()]), \
             patch("app.retrieval.repository.vector_search", side_effect=TypeError("bad vector dimension")), \
             patch("app.retrieval.repository.approved_relation_target_rows", return_value=[]), \
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}), \
             patch("app.retrieval.repository.log_retrieval", return_value=12), \
             patch("app.retrieval.embed_text", return_value=[0.1, 0.2]):
             response = retrieve(RetrievalRequest(query="refund pending", mode="hybrid", limit=3))

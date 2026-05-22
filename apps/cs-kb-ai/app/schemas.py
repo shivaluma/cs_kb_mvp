@@ -19,6 +19,7 @@ PublishState = Literal[
     "archived",
 ]
 RetrievalMode = Literal["lexical", "vector", "hybrid"]
+RankingMode = Literal["portal_search", "admin_search", "ai_chat"]
 DocumentType = Literal[
     "text_sop",
     "policy_table",
@@ -1320,6 +1321,9 @@ class RetrievalRequest(BaseModel):
     filters: RetrievalFilters = Field(default_factory=RetrievalFilters)
     limit: int = Field(default=8, ge=1, le=30)
     mode: RetrievalMode = "hybrid"
+    ranking_mode: RankingMode = "portal_search"
+    debug: bool = False
+    use_model_rerank: bool | None = None
 
 
 class CollectionRef(BaseModel):
@@ -1460,6 +1464,7 @@ class RetrievalResult(BaseModel):
     matched_chunk: MatchedChunkContext = Field(default_factory=MatchedChunkContext)
     parent: ParentResultContext = Field(default_factory=ParentResultContext)
     display: RetrievalDisplayContract = Field(default_factory=RetrievalDisplayContract)
+    score_debug: dict[str, Any] = Field(default_factory=dict)
 
 
 class RetrievalResponse(BaseModel):
@@ -1471,6 +1476,7 @@ class RetrievalResponse(BaseModel):
     citations: list[Citation]
     warnings: list[str] = Field(default_factory=list)
     latency_ms: int
+    ranking_debug: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatMessage(BaseModel):
@@ -1491,6 +1497,7 @@ class GroundedChatRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=14)
     conversation: list[ChatMessage] = Field(default_factory=list, max_length=8)
     model_route: ChatModelRoute = "simple"
+    debug: bool = False
 
     @field_validator("model_route", mode="before")
     @classmethod

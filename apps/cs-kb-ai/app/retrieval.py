@@ -6,8 +6,22 @@ import unicodedata
 import logging
 from typing import Any
 
+import httpx
+
+from app.config import settings
 from app.embedding import EmbeddingProviderError, embed_text
 from app import repository
+from app.ranking import (
+    RankingOptions,
+    business_rerank,
+    candidates_from_rows,
+    load_ranking_config,
+    maybe_model_rerank,
+    merge_candidates,
+    mode_config,
+    rows_from_candidates,
+    understand_query,
+)
 from app.search_labels import is_bad_search_label
 from app.schemas import (
     Citation,
@@ -17,6 +31,7 @@ from app.schemas import (
     DisplayHighlight,
     MatchedChunkContext,
     ParentResultContext,
+    RetrievalFilters,
     RetrievalDisplayContract,
     RetrievalRequest,
     RetrievalResponse,
@@ -62,15 +77,31 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
             latency_ms=latency_ms,
         )
 
+    ranking_config = load_ranking_config()
+    ranking_mode = request.ranking_mode
+    ranking_mode_config = mode_config(ranking_config, ranking_mode)
+    ranking_debug: dict[str, Any] = {}
     lexical_rows: list[dict[str, Any]] = []
     vector_rows: list[dict[str, Any]] = []
-    search_limit = max(request.limit * 4, 20)
+    if ranking_mode == "ai_chat":
+        keyword_limit = int(ranking_mode_config.get("keyword_candidate_limit") or max(request.limit * 4, 20))
+        vector_limit = int(ranking_mode_config.get("vector_candidate_limit") or max(request.limit * 4, 20))
+        merged_limit = int(ranking_mode_config.get("merged_candidate_limit") or max(request.limit * 5, 30))
+        business_limit = int(ranking_mode_config.get("business_rerank_limit") or max(request.limit * 2, 20))
+    else:
+        candidate_limit = int(ranking_mode_config.get("candidate_limit") or max(request.limit * 4, 20))
+        keyword_limit = candidate_limit
+        vector_limit = candidate_limit
+        merged_limit = candidate_limit
+        business_limit = max(request.limit, int(ranking_mode_config.get("output_limit") or request.limit))
 
     if request.mode in {"lexical", "hybrid"}:
-        lexical_rows = repository.lexical_search(normalized_query, request.filters, search_limit)
+        lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, request.filters, keyword_limit, request.debug)
+        if keyword_warning:
+            warnings.append(keyword_warning)
     if request.mode in {"vector", "hybrid"}:
         try:
-            vector_rows = repository.vector_search(embed_text(normalized_query), request.filters, search_limit)
+            vector_rows = repository.vector_search(embed_text(normalized_query), request.filters, vector_limit)
         except EmbeddingProviderError:
             warnings.append("embedding_unavailable")
             if request.mode == "vector":
@@ -112,14 +143,45 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
                     latency_ms=latency_ms,
                 )
 
+    query_understanding = understand_query(normalized_query, ranking_mode, ranking_config)
+    warnings.extend(query_understanding.warnings)
+    ranking_options = RankingOptions(
+        mode=ranking_mode,
+        debug=request.debug,
+        query_understanding=query_understanding,
+        force_model_rerank=request.use_model_rerank,
+    )
     if request.mode == "lexical":
-        fused_rows = rows_from_single_mode(lexical_rows, "lexical", search_limit)
+        candidates = candidates_from_rows(lexical_rows, "meilisearch" if any(row.get("from_meilisearch") for row in lexical_rows) else "lexical")
     elif request.mode == "vector":
-        fused_rows = rows_from_single_mode(vector_rows, "vector", search_limit)
+        candidates = candidates_from_rows(vector_rows, "vector")
     else:
-        fused_rows = reciprocal_rank_fusion(lexical_rows, vector_rows, search_limit)
+        keyword_source = "meilisearch" if any(row.get("from_meilisearch") for row in lexical_rows) else "lexical"
+        candidates = merge_candidates(
+            candidates_from_rows(lexical_rows, keyword_source),
+            candidates_from_rows(vector_rows, "vector"),
+            merged_limit,
+            ranking_config,
+        )
 
-    fused_rows = rerank_by_query_intent(normalized_query, fused_rows)[: request.limit]
+    business_ranked = business_rerank(normalized_query, candidates, ranking_options, ranking_config)[:business_limit]
+    model_ranked, rerank_decision = maybe_model_rerank(normalized_query, business_ranked, ranking_options, ranking_config)
+    fused_rows = rows_from_candidates(model_ranked[: request.limit], debug=request.debug)
+    ranking_debug = {
+        "ranking_mode": ranking_mode,
+        "intent": query_understanding.intent,
+        "query_understanding_used": query_understanding.source == "model",
+        "keyword_candidate_count": len(lexical_rows),
+        "vector_candidate_count": len(vector_rows),
+        "merged_candidate_count": len(candidates),
+        "business_candidate_count": len(business_ranked),
+        "model_rerank": rerank_decision,
+        "top_before_business_rerank": candidates[0].chunk_id if candidates else "",
+        "top_after_business_rerank": business_ranked[0].chunk_id if business_ranked else "",
+        "final_selected_context_ids": [str(row.get("chunk_id") or "") for row in fused_rows],
+    }
+    if rerank_decision.get("fallback"):
+        warnings.append(str(rerank_decision.get("skip_reason") or "model_rerank_failed"))
     fused_rows = [row for row in fused_rows if is_reliable(row)]
     if include_relation_expansion:
         relation_rows = repository.approved_relation_target_rows(
@@ -152,6 +214,8 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         enriched_rows.append(item)
 
     results = [to_result(row) for row in enriched_rows]
+    ranking_debug["final_result_count"] = len(results)
+    ranking_debug["final_selected_context_ids"] = [result.chunk_id for result in results]
     return RetrievalResponse(
         query=request.query,
         normalized_query=normalized_query,
@@ -161,6 +225,7 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         citations=[result.citation for result in results],
         warnings=warnings,
         latency_ms=latency_ms,
+        ranking_debug=ranking_debug if request.debug else {},
     )
 
 
@@ -175,6 +240,135 @@ def rows_from_single_mode(rows: list[dict[str, Any]], mode: str, limit: int) -> 
         item["rrf_rank"] = rank
         output.append(item)
     return output
+
+
+def keyword_candidate_rows(
+    query: str,
+    filters: RetrievalFilters,
+    limit: int,
+    debug: bool = False,
+) -> tuple[list[dict[str, Any]], str]:
+    if settings.meili_host:
+        try:
+            return meili_ai_chunk_search(query, filters, limit, debug), ""
+        except Exception as exc:
+            logger.warning(
+                "meili_ai_chunk_search_failed",
+                extra={"event": "meili_ai_chunk_search_failed", "error": exc.__class__.__name__},
+            )
+            return repository.lexical_search(query, filters, limit), f"meili_keyword_fallback:{exc.__class__.__name__}"
+    return repository.lexical_search(query, filters, limit), "meili_keyword_unconfigured_postgres_fallback"
+
+
+def meili_ai_chunk_search(query: str, filters: RetrievalFilters, limit: int, debug: bool = False) -> list[dict[str, Any]]:
+    payload: dict[str, Any] = {
+        "q": query,
+        "limit": limit,
+        "showRankingScore": True,
+        "attributesToRetrieve": [
+            "chunk_id",
+            "document_id",
+            "version_id",
+            "title",
+            "version_number",
+            "status",
+            "publish_state",
+            "document_type",
+            "review_status",
+            "chunk_index",
+            "section",
+            "heading",
+            "content",
+            "metadata",
+            "audience",
+            "vertical",
+            "category",
+            "tags",
+            "case_reasons",
+        ],
+    }
+    if debug:
+        payload["showRankingScoreDetails"] = True
+    filter_text = meili_ai_chunk_filter(filters)
+    if filter_text:
+        payload["filter"] = filter_text
+    headers = {"Content-Type": "application/json"}
+    if settings.meili_master_key:
+        headers["Authorization"] = f"Bearer {settings.meili_master_key}"
+    with httpx.Client(timeout=2.0) as client:
+        response = client.post(f"{settings.meili_host.rstrip('/')}/indexes/ai_chunks/search", json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+    rows = []
+    for rank, hit in enumerate(data.get("hits") or [], start=1):
+        if not isinstance(hit, dict):
+            continue
+        metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+        row = {
+            "chunk_id": str(hit.get("chunk_id") or ""),
+            "document_id": str(hit.get("document_id") or ""),
+            "version_id": str(hit.get("version_id") or ""),
+            "title": str(hit.get("title") or ""),
+            "source_filename": str(metadata.get("source_filename") or ""),
+            "version_number": int(hit.get("version_number") or 0),
+            "chunk_index": int(hit.get("chunk_index") or 0),
+            "section": str(hit.get("section") or ""),
+            "heading": str(hit.get("heading") or ""),
+            "content": str(hit.get("content") or ""),
+            "metadata": metadata,
+            "score": float(hit.get("_rankingScore") or 0),
+            "meili_score": float(hit.get("_rankingScore") or 0),
+            "lexical_score": float(hit.get("_rankingScore") or 0),
+            "vector_score": 0.0,
+            "rank_source": ["meilisearch"],
+            "best_rank": rank,
+            "meili_rank": rank,
+            "from_meilisearch": True,
+            "status": str(hit.get("status") or ""),
+            "review_status": str(hit.get("review_status") or ""),
+            "publish_state": str(hit.get("publish_state") or ""),
+            "category": hit.get("category") or metadata.get("category") or "",
+            "vertical": hit.get("vertical") or metadata.get("vertical") or "",
+            "audience": hit.get("audience") or metadata.get("audience") or [],
+            "is_current_version": True,
+        }
+        if debug and hit.get("_rankingScoreDetails") is not None:
+            row["meili_ranking_score_details"] = hit.get("_rankingScoreDetails")
+        rows.append(row)
+    return rows
+
+
+def meili_ai_chunk_filter(filters: RetrievalFilters) -> str:
+    clauses = []
+    statuses = filters.status or ["published"]
+    clauses.append(or_filter("status", [str(status) for status in statuses]))
+    if statuses == ["published"]:
+        clauses.append('publish_state = "published_ready"')
+    for field, values in [
+        ("audience", filters.audience),
+        ("vertical", filters.vertical),
+        ("category", filters.category),
+        ("tags", filters.tags),
+        ("case_reasons", filters.case_reasons),
+        ("collections", filters.collections),
+        ("document_id", filters.document_ids),
+    ]:
+        clause = or_filter(field, values)
+        if clause:
+            clauses.append(clause)
+    unit_clause = or_filter("unit_type", filters.unit_types)
+    if unit_clause:
+        clauses.append(unit_clause)
+    return " AND ".join(clause for clause in clauses if clause)
+
+
+def or_filter(field: str, values: list[str]) -> str:
+    cleaned = [str(value).replace('"', '\\"') for value in values if str(value).strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return f'{field} = "{cleaned[0]}"'
+    return "(" + " OR ".join(f'{field} = "{value}"' for value in cleaned) + ")"
 
 
 def reciprocal_rank_fusion(
@@ -429,6 +623,7 @@ def to_result(row: dict[str, Any]) -> RetrievalResult:
         matched_chunk=matched_chunk_context(row, metadata),
         parent=parent_result_context(row, metadata, display_context),
         display=retrieval_display_contract(row, metadata, display_context, source_anchor),
+        score_debug=row.get("score_debug") if isinstance(row.get("score_debug"), dict) else metadata.get("score_debug") if isinstance(metadata.get("score_debug"), dict) else {},
     )
 
 

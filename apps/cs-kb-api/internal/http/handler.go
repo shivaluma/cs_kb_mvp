@@ -721,9 +721,11 @@ func (h *Handler) syncMeilisearchSynonyms(w http.ResponseWriter, r *http.Request
 
 func (h *Handler) retrieveAI(ctx context.Context, req model.SearchRequest) ([]model.SemanticResult, error) {
 	payload := map[string]any{
-		"query": req.Query,
-		"mode":  "hybrid",
-		"limit": 6,
+		"query":        req.Query,
+		"mode":         "hybrid",
+		"ranking_mode": "portal_search",
+		"debug":        req.Debug,
+		"limit":        6,
 		"filters": map[string]any{
 			"audience":     emptySlice(req.Filters.Audience),
 			"vertical":     emptySlice(req.Filters.Vertical),

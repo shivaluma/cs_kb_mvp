@@ -46,6 +46,10 @@ DIRECT_SOP_UNIT_TYPES = {
     "warning",
     "operational_note",
     "macro_script",
+    "macro_table",
+    "wording_rule",
+    "compliance_rule",
+    "threshold_rule",
     "security_note",
     "compliance_note",
 }
@@ -291,6 +295,8 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
             filters=filters_with_unit_types(base_filters, DIRECT_SOP_UNIT_TYPES),
             limit=direct_limit,
             mode="hybrid",
+            ranking_mode="ai_chat",
+            debug=request.debug,
         ),
         include_relation_expansion=False,
     )
@@ -300,6 +306,8 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
             filters=filters_with_unit_types(base_filters, INDEX_UNIT_TYPES),
             limit=index_limit,
             mode="hybrid",
+            ranking_mode="ai_chat",
+            debug=request.debug,
         ),
         include_relation_expansion=False,
     )
@@ -338,6 +346,18 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
     ]
     related_results = rerank_stage_results(query_text, related_results, answer_scope, policy_facets)
     exclude_ids.extend(result.chunk_id for result in related_results)
+    section_parent_ids = parent_chunk_ids_for_expansion([*direct_results, *related_results], context_limit)
+    section_parent_rows = repository.published_chunk_rows_by_ids(
+        section_parent_ids,
+        [*exclude_ids],
+        max(4, request.limit // 2),
+    ) if section_parent_ids else []
+    section_parent_results = [
+        annotate_result(to_result(row), "parent_sop", "parent_section_expansion")
+        for row in section_parent_rows
+    ]
+    section_parent_results = rerank_stage_results(query_text, section_parent_results, answer_scope, policy_facets)
+    exclude_ids.extend(result.chunk_id for result in section_parent_results)
     parent_context_skipped_by_scope = answer_scope.is_narrow and bool(direct_results or related_results)
     parent_rows = [] if parent_context_skipped_by_scope else repository.parent_sop_context_rows(
         [result.chunk_id for result in relation_seed_candidates([*direct_results, *related_results], context_limit)],
@@ -348,7 +368,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         annotate_result(to_result(row), "parent_sop", "parent_full_sop_context")
         for row in parent_rows
     ]
-    context_candidates = [*session_context_results, *direct_results, *index_results, *related_results, *parent_results]
+    context_candidates = [*session_context_results, *direct_results, *index_results, *related_results, *section_parent_results, *parent_results]
     deduped_context_candidates = semantic_dedupe_results(context_candidates)
     ranked_context_candidates = rank_chat_results(deduped_context_candidates, max(context_limit * 2, context_limit))
     final_results, excluded_context_results = select_minimal_context(ranked_context_candidates, context_limit, answer_scope)
@@ -380,6 +400,7 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         "direct_count": len(direct_candidates),
         "index_count": len(index_candidates),
         "relation_count": len(related_results),
+        "section_parent_count": len(section_parent_results),
         "parent_count": len(parent_results),
         "direct_context_count": len([result for result in final_results if source_role(result) == "direct_sop"]),
         "index_context_count": len([result for result in final_results if source_role(result) == "issue_router"]),
@@ -394,6 +415,8 @@ def retrieve_for_chat(request: GroundedChatRequest) -> ChatRetrievalBundle:
         "answer_scope": answer_scope.model_dump(),
         "policy_facets": policy_facets.model_dump(),
         "parent_context_skipped_by_scope": parent_context_skipped_by_scope,
+        "direct_retrieval_ranking": direct_retrieval.ranking_debug,
+        "index_retrieval_ranking": index_retrieval.ranking_debug,
         "candidate_debug": [
             candidate_debug_payload(result, "selected")
             for result in final_results
@@ -961,6 +984,19 @@ def relation_seed_candidates(results: list[RetrievalResult], context_limit: int)
         ),
     )
     return ranked[: max(3, min(context_limit, 6))]
+
+
+def parent_chunk_ids_for_expansion(results: list[RetrievalResult], context_limit: int) -> list[str]:
+    parent_ids: list[str] = []
+    for result in results:
+        metadata = result.metadata or {}
+        unit_type = str(metadata.get("unit_type") or result.section or "")
+        if unit_type in {"full_sop", "source_evidence_section"}:
+            continue
+        parent_id = str(metadata.get("parent_chunk_id") or metadata.get("parent_unit_id") or "")
+        if parent_id and parent_id != result.chunk_id:
+            parent_ids.append(parent_id)
+    return list(dict.fromkeys(parent_ids))[: max(2, min(context_limit, 6))]
 
 
 def query_intent(text: str) -> set[str]:

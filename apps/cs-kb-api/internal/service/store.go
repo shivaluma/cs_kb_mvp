@@ -34,39 +34,47 @@ type meiliSearchResponse struct {
 }
 
 type meiliSOPDocument struct {
-	SOPID       string    `json:"sop_id"`
-	Title       string    `json:"title"`
-	Snippet     string    `json:"snippet"`
-	Category    string    `json:"category"`
-	Audience    []string  `json:"audience"`
-	Vertical    string    `json:"vertical"`
-	Tags        []string  `json:"tags"`
-	CaseReasons []string  `json:"case_reasons"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Version     int       `json:"version"`
+	SOPID               string         `json:"sop_id"`
+	Title               string         `json:"title"`
+	Snippet             string         `json:"snippet"`
+	Category            string         `json:"category"`
+	Audience            []string       `json:"audience"`
+	Vertical            string         `json:"vertical"`
+	Tags                []string       `json:"tags"`
+	CaseReasons         []string       `json:"case_reasons"`
+	UpdatedAt           time.Time      `json:"updated_at"`
+	Version             int            `json:"version"`
+	RankingScore        float64        `json:"_rankingScore,omitempty"`
+	RankingScoreDetails map[string]any `json:"_rankingScoreDetails,omitempty"`
 }
 
 type aiChunkDocument struct {
-	ChunkID       string         `json:"chunk_id"`
-	DocumentID    string         `json:"document_id"`
-	VersionID     string         `json:"version_id"`
-	Title         string         `json:"title"`
-	VersionNumber int            `json:"version_number"`
-	Status        string         `json:"status"`
-	PublishState  string         `json:"publish_state"`
-	DocumentType  string         `json:"document_type"`
-	ReviewStatus  string         `json:"review_status"`
-	ChunkIndex    int            `json:"chunk_index"`
-	Section       string         `json:"section"`
-	Heading       string         `json:"heading"`
-	Content       string         `json:"content"`
-	TokenCount    int            `json:"token_count"`
-	Metadata      map[string]any `json:"metadata"`
-	Audience      any            `json:"audience"`
-	Vertical      any            `json:"vertical"`
-	Category      any            `json:"category"`
-	Tags          any            `json:"tags"`
-	CaseReasons   any            `json:"case_reasons"`
+	ChunkID          string         `json:"chunk_id"`
+	DocumentID       string         `json:"document_id"`
+	VersionID        string         `json:"version_id"`
+	Title            string         `json:"title"`
+	VersionNumber    int            `json:"version_number"`
+	Status           string         `json:"status"`
+	PublishState     string         `json:"publish_state"`
+	DocumentType     string         `json:"document_type"`
+	ReviewStatus     string         `json:"review_status"`
+	ChunkIndex       int            `json:"chunk_index"`
+	Section          string         `json:"section"`
+	Heading          string         `json:"heading"`
+	Content          string         `json:"content"`
+	TokenCount       int            `json:"token_count"`
+	Metadata         map[string]any `json:"metadata"`
+	UnitType         string         `json:"unit_type"`
+	ChunkType        string         `json:"chunk_type"`
+	RiskLevel        string         `json:"risk_level"`
+	SourceRefQuality string         `json:"source_ref_quality"`
+	ParentSectionID  string         `json:"parent_section_id"`
+	ParentChunkID    string         `json:"parent_chunk_id"`
+	Audience         any            `json:"audience"`
+	Vertical         any            `json:"vertical"`
+	Category         any            `json:"category"`
+	Tags             any            `json:"tags"`
+	CaseReasons      any            `json:"case_reasons"`
 }
 
 func NewStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Store, error) {
@@ -600,7 +608,7 @@ func (s *Store) DeleteAIChunksFromMeili(ctx context.Context, documentID string) 
 	if documentID == "" {
 		return nil
 	}
-	_ = s.ensureMeiliIndex(ctx, "ai_chunks", []string{"document_id", "version_id", "status", "publish_state", "vertical", "category", "tags", "case_reasons"})
+	_ = s.ensureMeiliIndex(ctx, "ai_chunks", aiChunkFilterableAttributes())
 	payload := map[string]string{"filter": `document_id = "` + documentID + `"`}
 	return s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents/delete", payload, nil)
 }
@@ -647,33 +655,39 @@ func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metad
 			chunkMetadata = chunk.Metadata
 		}
 		docs = append(docs, aiChunkDocument{
-			ChunkID:       chunk.ChunkID,
-			DocumentID:    documentID,
-			VersionID:     versionID,
-			Title:         fmt.Sprint(payload["title"]),
-			VersionNumber: intFromAny(payload["version_number"]),
-			Status:        fmt.Sprint(payload["status"]),
-			PublishState:  fmt.Sprint(payload["publish_state"]),
-			DocumentType:  fmt.Sprint(payload["document_type"]),
-			ReviewStatus:  fmt.Sprint(payload["review_status"]),
-			Metadata:      chunkMetadata,
-			ChunkIndex:    chunk.ChunkIndex,
-			Section:       chunk.Section,
-			Heading:       chunk.Heading,
-			Content:       chunk.Content,
-			TokenCount:    chunk.TokenCount,
-			Audience:      chunkMetadata["audience"],
-			Vertical:      chunkMetadata["vertical"],
-			Category:      chunkMetadata["category"],
-			Tags:          chunkMetadata["tags"],
-			CaseReasons:   chunkMetadata["case_reasons"],
+			ChunkID:          chunk.ChunkID,
+			DocumentID:       documentID,
+			VersionID:        versionID,
+			Title:            fmt.Sprint(payload["title"]),
+			VersionNumber:    intFromAny(payload["version_number"]),
+			Status:           fmt.Sprint(payload["status"]),
+			PublishState:     fmt.Sprint(payload["publish_state"]),
+			DocumentType:     fmt.Sprint(payload["document_type"]),
+			ReviewStatus:     fmt.Sprint(payload["review_status"]),
+			Metadata:         chunkMetadata,
+			ChunkIndex:       chunk.ChunkIndex,
+			Section:          chunk.Section,
+			Heading:          chunk.Heading,
+			Content:          chunk.Content,
+			TokenCount:       chunk.TokenCount,
+			UnitType:         stringFromAny(firstAny(chunkMetadata["unit_type"], chunk.Section)),
+			ChunkType:        stringFromAny(firstAny(chunkMetadata["chunk_type"], chunkMetadata["unit_type"], chunk.Section)),
+			RiskLevel:        stringFromAny(chunkMetadata["risk_level"]),
+			SourceRefQuality: stringFromAny(chunkMetadata["source_ref_quality"]),
+			ParentSectionID:  stringFromAny(chunkMetadata["parent_section_id"]),
+			ParentChunkID:    stringFromAny(chunkMetadata["parent_chunk_id"]),
+			Audience:         chunkMetadata["audience"],
+			Vertical:         chunkMetadata["vertical"],
+			Category:         chunkMetadata["category"],
+			Tags:             chunkMetadata["tags"],
+			CaseReasons:      chunkMetadata["case_reasons"],
 		})
 	}
 	if len(docs) == 0 {
 		s.logger.WarnContext(ctx, "AI chunks fetch returned no chunks", "document_id", documentID, "version_id", versionID)
 		return nil
 	}
-	if err := s.ensureMeiliIndex(ctx, "ai_chunks", []string{"document_id", "version_id", "status", "publish_state", "vertical", "category", "tags", "case_reasons"}); err != nil {
+	if err := s.ensureMeiliIndex(ctx, "ai_chunks", aiChunkFilterableAttributes()); err != nil {
 		return err
 	}
 	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/ai_chunks/documents?primaryKey=chunk_id", docs, nil); err != nil {
@@ -819,8 +833,12 @@ func (s *Store) searchPostgres(ctx context.Context, req model.SearchRequest) ([]
 
 func (s *Store) searchMeili(ctx context.Context, req model.SearchRequest) ([]model.SearchResult, error) {
 	payload := map[string]any{
-		"q":     req.Query,
-		"limit": 20,
+		"q":                req.Query,
+		"limit":            50,
+		"showRankingScore": true,
+	}
+	if req.Debug {
+		payload["showRankingScoreDetails"] = true
 	}
 	if filter := meiliFilter(req.Filters); filter != "" {
 		payload["filter"] = filter
@@ -831,14 +849,28 @@ func (s *Store) searchMeili(ctx context.Context, req model.SearchRequest) ([]mod
 	}
 	results := make([]model.SearchResult, 0, len(decoded.Hits))
 	for index, hit := range decoded.Hits {
-		confidence := 1 - float64(index)*0.06
+		confidence := hit.RankingScore
+		if confidence <= 0 {
+			confidence = 1 - float64(index)*0.06
+		}
 		if confidence < 0.18 {
 			confidence = 0.18
+		}
+		debug := map[string]any(nil)
+		if req.Debug {
+			debug = map[string]any{
+				"score_debug": map[string]any{
+					"meili_score":           hit.RankingScore,
+					"ranking_score_details": hit.RankingScoreDetails,
+					"rank":                  index + 1,
+					"mode":                  "portal_search",
+				},
+			}
 		}
 		results = append(results, model.SearchResult{
 			SOPID: hit.SOPID, Title: hit.Title, Snippet: hit.Snippet, Category: hit.Category,
 			Audience: hit.Audience, Vertical: hit.Vertical, Tags: hit.Tags, UpdatedAt: hit.UpdatedAt,
-			Version: hit.Version, Confidence: confidence,
+			Version: hit.Version, Confidence: confidence, Score: confidence, Debug: debug,
 		})
 	}
 	return results, nil
@@ -1031,5 +1063,47 @@ func intFromAny(value any) int {
 		return int(output)
 	default:
 		return 0
+	}
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func firstAny(values ...any) any {
+	for _, value := range values {
+		if strings.TrimSpace(stringFromAny(value)) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func aiChunkFilterableAttributes() []string {
+	return []string{
+		"document_id",
+		"version_id",
+		"status",
+		"publish_state",
+		"review_status",
+		"vertical",
+		"category",
+		"tags",
+		"case_reasons",
+		"unit_type",
+		"chunk_type",
+		"risk_level",
+		"source_ref_quality",
+		"parent_section_id",
+		"parent_chunk_id",
 	}
 }
