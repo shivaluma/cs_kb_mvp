@@ -33,6 +33,7 @@ from app.text_processing import (
     extract_text,
     is_docx_file,
     is_spreadsheet_file,
+    normalize_cell_text,
     render_pdf_pages_as_data_urls,
     spreadsheet_hyperlinks_from_row,
     spreadsheet_related_documents_from_row,
@@ -784,8 +785,11 @@ def extract_mixed_docx_policy_chunks(
     document_risk = mixed_docx_risk_metadata(raw_text)
     document_channels = infer_mixed_docx_channels(raw_text)
     document_audience = infer_affected_audience(raw_text)
+    full_sop_unit_id = "full_sop"
     full_metadata = {
+        "unit_id": full_sop_unit_id,
         "unit_type": "full_sop",
+        "chunk_type": "full_sop",
         "retrieval_scope": "document",
         "document_type": classification.document_type,
         "source_type": classification.source_type,
@@ -810,6 +814,7 @@ def extract_mixed_docx_policy_chunks(
             "example",
         ],
         "source_refs": document_source_refs,
+        "source_block_ids": source_block_ids_from_refs(document_source_refs),
         "source_ref_quality": source_ref_quality_from_refs(document_source_refs),
         "source_ref_acknowledged": True,
         "docx_order_preserved": True,
@@ -818,6 +823,9 @@ def extract_mixed_docx_policy_chunks(
         "tags": ["communication_guideline", "mixed_docx", *document_channels],
         "aliases": [path_title(filename), "quy định nội dung phản hồi TX KH", "mẫu câu phản hồi CS"],
     }
+    full_metadata["normalized_title"] = normalized_key(path_title(filename))
+    full_metadata["display_text"] = raw_text[:30000]
+    full_metadata["retrieval_text"] = mixed_docx_full_sop_retrieval_text(path_title(filename), raw_text)
     chunks.append(
         Chunk(
             chunk_index=0,
@@ -828,6 +836,16 @@ def extract_mixed_docx_policy_chunks(
             metadata=full_metadata,
         )
     )
+    section_chunks, section_parent_ids = mixed_docx_section_parent_chunks(
+        filename=filename,
+        blocks=blocks,
+        tables=tables,
+        classification=classification,
+        document_audience=document_audience,
+        document_channels=document_channels,
+        full_sop_unit_id=full_sop_unit_id,
+    )
+    chunks.extend(section_chunks)
 
     macro_table_ids: dict[int, str] = {}
     consumed_note_paragraphs: set[int] = set()
@@ -840,6 +858,7 @@ def extract_mixed_docx_policy_chunks(
             continue
         section_path = [str(item) for item in table.get("section_path", []) if str(item).strip()]
         channels = infer_mixed_docx_channels(" ".join(section_path) + " " + json.dumps(table, ensure_ascii=False))
+        parent_section_id = section_parent_id_for_path(section_path, section_parent_ids)
         notes = following_note_blocks_for_table(blocks, table_index)
         consumed_note_paragraphs.update(
             int(note.get("paragraph_index"))
@@ -860,17 +879,22 @@ def extract_mixed_docx_policy_chunks(
         ]
         note_texts = [str(note.get("text") or "").strip() for note in notes if str(note.get("text") or "").strip()]
         content = mixed_docx_macro_table_content(table, note_texts)
+        table_title = mixed_docx_macro_table_title(section_path, channels, table_index)
         chunks.append(
             Chunk(
                 chunk_index=len(chunks),
                 section="macro_table",
-                heading=mixed_docx_macro_table_title(section_path, channels, table_index),
+                heading=table_title,
                 content=content,
                 token_count=len(tokenize(content)),
                 metadata={
+                    "unit_id": table_id,
                     "unit_type": "macro_table",
+                    "chunk_type": "parent_table",
                     "retrieval_scope": "unit",
-                    "parent_unit_id": table_id,
+                    "parent_unit_id": parent_section_id or full_sop_unit_id,
+                    "parent_section_id": parent_section_id,
+                    "parent_chunk_id": "",
                     "document_type": classification.document_type,
                     "source_type": classification.source_type,
                     "sub_type": "communication_guideline",
@@ -887,15 +911,20 @@ def extract_mixed_docx_policy_chunks(
                     "block_id": f"table_{table_index}",
                     "source_table_index": table_index,
                     "headers": [str(column) for column in table.get("columns", [])],
+                    "column_names": [str(column) for column in table.get("columns", [])],
                     "rows": rows,
                     "notes": note_texts,
                     "source_refs": table_refs,
+                    "source_block_ids": source_block_ids_from_refs(table_refs),
                     "source_ref_quality": "table_row",
                     "source_ref_acknowledged": True,
                     "docx_order_preserved": True,
                     "risk_level": "low",
                     "confidence": 0.88,
                     "review_status": "needs_review",
+                    "normalized_title": normalized_key(table_title),
+                    "display_text": content,
+                    "retrieval_text": content,
                     "tags": ["macro_table", "communication_guideline", *(channels or [])],
                     "aliases": mixed_docx_aliases("macro_table", section_path, content),
                 },
@@ -913,16 +942,23 @@ def extract_mixed_docx_policy_chunks(
                 [str(column) for column in table.get("columns", [])],
                 str(row.get("cell_text") or row.get("text") or ""),
             )
+            row_title = mixed_docx_row_heading(row, channels, row_index)
+            row_unit_id = f"{table_id}_row_{row_index}"
             chunks.append(
                 Chunk(
                     chunk_index=len(chunks),
                     section="macro_script",
-                    heading=mixed_docx_row_heading(row, channels, row_index),
+                    heading=row_title,
                     content=row_content,
                     token_count=len(tokenize(row_content)),
                     metadata={
+                        "unit_id": row_unit_id,
                         "unit_type": "macro_script",
+                        "chunk_type": "atomic_child",
                         "retrieval_scope": "unit",
+                        "parent_unit_id": table_id,
+                        "parent_chunk_id": table_id,
+                        "parent_section_id": parent_section_id,
                         "document_type": classification.document_type,
                         "source_type": classification.source_type,
                         "sub_type": "communication_guideline",
@@ -941,7 +977,10 @@ def extract_mixed_docx_policy_chunks(
                         "source_table_index": table_index,
                         "source_row_index": row_index,
                         "cells": row.get("cells", {}),
+                        "cell_values": row.get("cell_values", []),
+                        "column_names": [str(column) for column in table.get("columns", [])],
                         "source_refs": [row_ref],
+                        "source_block_ids": source_block_ids_from_refs([row_ref]),
                         "source_ref_quality": "table_row",
                         "source_ref_acknowledged": True,
                         "attached_to": table_id,
@@ -949,6 +988,9 @@ def extract_mixed_docx_policy_chunks(
                         "risk_level": "low",
                         "confidence": 0.86,
                         "review_status": "needs_review",
+                        "normalized_title": normalized_key(row_title),
+                        "display_text": row_content,
+                        "retrieval_text": row_content,
                         "tags": ["macro_script", *(channels or [])],
                         "aliases": mixed_docx_aliases("macro_script", section_path, row_content),
                     },
@@ -975,12 +1017,20 @@ def extract_mixed_docx_policy_chunks(
             continue
         section_path = [str(item) for item in block.get("section_path", []) if str(item).strip()]
         channels = infer_mixed_docx_channels(" ".join(section_path) + " " + text) or document_channels
+        parent_section_id = section_parent_id_for_path(section_path, section_parent_ids)
         risk = mixed_docx_risk_metadata(text)
         refs = [mixed_docx_source_ref_for_block(filename, block)]
         attached_to = mixed_docx_attached_table_id_for_note(block, blocks, macro_table_ids)
+        title = mixed_docx_heading(unit_type, text, section_path)
+        unit_id = mixed_docx_unit_id(unit_type, section_path, text, block.get("block_id") or block.get("paragraph_index") or len(chunks))
         metadata = {
+            "unit_id": unit_id,
             "unit_type": unit_type,
+            "chunk_type": "atomic_child",
             "retrieval_scope": "unit",
+            "parent_unit_id": parent_section_id or full_sop_unit_id,
+            "parent_section_id": parent_section_id,
+            "parent_chunk_id": parent_section_id,
             "document_type": classification.document_type,
             "source_type": classification.source_type,
             "sub_type": "communication_guideline",
@@ -998,6 +1048,7 @@ def extract_mixed_docx_policy_chunks(
             "numbering": block.get("numbering") or {},
             "style": block.get("style") or "",
             "source_refs": refs,
+            "source_block_ids": source_block_ids_from_refs(refs),
             "source_ref_quality": source_ref_quality_from_refs(refs),
             "source_ref_acknowledged": True,
             "risk_level": risk["risk_level"],
@@ -1006,6 +1057,9 @@ def extract_mixed_docx_policy_chunks(
             "docx_order_preserved": True,
             "confidence": 0.82 if unit_type in {"compliance_rule", "warning"} else 0.76,
             "review_status": "needs_review",
+            "normalized_title": normalized_key(title),
+            "display_text": text,
+            "retrieval_text": mixed_docx_retrieval_text(title, text, section_path),
             "tags": mixed_docx_tags(unit_type, text, channels, risk),
             "aliases": mixed_docx_aliases(unit_type, section_path, text),
             **mixed_docx_condition_action_metadata(text),
@@ -1015,14 +1069,433 @@ def extract_mixed_docx_policy_chunks(
             Chunk(
                 chunk_index=len(chunks),
                 section=unit_type,
-                heading=mixed_docx_heading(unit_type, text, section_path),
+                heading=title,
                 content=text,
                 token_count=len(tokenize(text)),
                 metadata=metadata,
             )
         )
 
+    chunks = mixed_docx_add_group_parent_chunks(chunks, classification, document_audience, document_channels)
     return chunks if len(chunks) > 1 else []
+
+
+def mixed_docx_full_sop_retrieval_text(title: str, raw_text: str) -> str:
+    preview = normalize_cell_text(raw_text)[:5000]
+    return "\n".join(part for part in [title, preview] if part).strip()
+
+
+def mixed_docx_section_parent_chunks(
+    *,
+    filename: str,
+    blocks: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+    classification: Any,
+    document_audience: list[str],
+    document_channels: list[str],
+    full_sop_unit_id: str,
+) -> tuple[list[Chunk], dict[tuple[str, ...], str]]:
+    grouped_blocks: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        section_path = tuple(str(item) for item in block.get("section_path", []) if str(item).strip())
+        if not section_path:
+            continue
+        grouped_blocks.setdefault(section_path, []).append(block)
+
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        section_path = tuple(str(item) for item in table.get("section_path", []) if str(item).strip())
+        if not section_path:
+            continue
+        table_index = int(table.get("table_index") or 0)
+        rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+        grouped_blocks.setdefault(section_path, []).append(
+            {
+                "type": "docx_table",
+                "block_type": "docx_table",
+                "block_id": f"table_{table_index}",
+                "table_index": table_index,
+                "row_index": None,
+                "section_path": list(section_path),
+                "text": mixed_docx_table_parent_preview(table),
+                "source_refs": [
+                    docx_table_source_ref(
+                        filename,
+                        table_index,
+                        int(row.get("row_index") or 0),
+                        [str(column) for column in table.get("columns", [])],
+                        str(row.get("cell_text") or row.get("text") or ""),
+                    )
+                    for row in rows
+                    if isinstance(row, dict)
+                ],
+            }
+        )
+
+    section_ids = {path: mixed_docx_section_id(path) for path in grouped_blocks}
+    chunks: list[Chunk] = []
+    for section_path, section_blocks in sorted(grouped_blocks.items(), key=lambda item: min(int(block.get("index") or 0) for block in item[1] if isinstance(block, dict))):
+        section_id = section_ids[section_path]
+        parent_path = tuple(section_path[:-1])
+        parent_unit_id = section_ids.get(parent_path) or full_sop_unit_id
+        refs = mixed_docx_refs_from_section_blocks(filename, section_blocks)
+        content = mixed_docx_section_content(list(section_path), section_blocks)
+        if not content:
+            continue
+        title = last_nonempty(list(section_path)) or "SOP section"
+        channels = infer_mixed_docx_channels(" ".join(section_path) + " " + content) or document_channels
+        chunks.append(
+            Chunk(
+                chunk_index=0,
+                section="text_section",
+                heading=f"SOP section: {title}"[:180],
+                content=content,
+                token_count=len(tokenize(content)),
+                metadata={
+                    "unit_id": section_id,
+                    "unit_type": "text_section",
+                    "chunk_type": "parent_section",
+                    "retrieval_scope": "section",
+                    "parent_unit_id": parent_unit_id,
+                    "parent_section_id": section_ids.get(parent_path, ""),
+                    "parent_chunk_id": parent_unit_id if parent_unit_id != full_sop_unit_id else "",
+                    "document_type": classification.document_type,
+                    "source_type": classification.source_type,
+                    "sub_type": "communication_guideline",
+                    "structure_type": "mixed_docx",
+                    "actor": "cs",
+                    "affected_audience": infer_affected_audience(content) or document_audience,
+                    "audience": infer_affected_audience(content) or document_audience,
+                    "channel": channels,
+                    "section_path": list(section_path),
+                    "section_title": title,
+                    "section_id": section_id,
+                    "block_id": f"{section_id}_section",
+                    "source_refs": refs,
+                    "source_block_ids": source_block_ids_from_refs(refs),
+                    "source_ref_quality": source_ref_quality_from_refs(refs),
+                    "source_ref_acknowledged": True,
+                    "docx_order_preserved": True,
+                    "risk_level": mixed_docx_risk_metadata(content)["risk_level"],
+                    "confidence": 0.8,
+                    "review_status": "needs_review",
+                    "normalized_title": normalized_key(title),
+                    "display_text": content,
+                    "retrieval_text": mixed_docx_retrieval_text(title, content, list(section_path)),
+                    "tags": ["communication_guideline", "parent_section", *(channels or [])],
+                },
+            )
+        )
+    return chunks, section_ids
+
+
+def mixed_docx_table_parent_preview(table: dict[str, Any]) -> str:
+    lines = []
+    columns = [str(column) for column in table.get("columns", []) if str(column).strip()]
+    if columns:
+        lines.append(" | ".join(columns))
+    for row in table.get("rows", []) if isinstance(table.get("rows"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        row_text = str(row.get("cell_text") or row.get("text") or "").strip()
+        if row_text:
+            lines.append(row_text)
+    return "\n".join(lines).strip()
+
+
+def mixed_docx_refs_from_section_blocks(filename: str, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_refs = block.get("source_refs") if isinstance(block.get("source_refs"), list) else []
+        if not block_refs:
+            block_refs = [mixed_docx_source_ref_for_block(filename, block)]
+        for ref in block_refs:
+            if not isinstance(ref, dict):
+                continue
+            key = json.dumps(ref, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(ref)
+            if len(refs) >= 24:
+                return refs
+    return refs
+
+
+def mixed_docx_section_content(section_path: list[str], blocks: list[dict[str, Any]]) -> str:
+    lines = [" > ".join(section_path)]
+    seen: set[str] = set()
+    for block in sorted(blocks, key=lambda item: int(item.get("index") or 0)):
+        text = str(block.get("text") or "").strip()
+        block_type = str(block.get("block_type") or block.get("type") or "")
+        if not text or (block_type == "heading" and text in section_path):
+            continue
+        key = normalize_for_signal(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(text)
+        if len("\n".join(lines)) > 6000:
+            lines.append("[Section preview truncated for review display.]")
+            break
+    return "\n".join(lines).strip()
+
+
+def section_parent_id_for_path(section_path: list[str], section_parent_ids: dict[tuple[str, ...], str]) -> str:
+    path = tuple(str(item) for item in section_path if str(item).strip())
+    while path:
+        if path in section_parent_ids:
+            return section_parent_ids[path]
+        path = path[:-1]
+    return ""
+
+
+def mixed_docx_section_id(section_path: tuple[str, ...] | list[str]) -> str:
+    return f"section_{normalized_key(' '.join(str(item) for item in section_path))[:90] or 'body'}"
+
+
+def mixed_docx_unit_id(unit_type: str, section_path: list[str], text: str, source_id: Any) -> str:
+    section = normalized_key(" ".join(section_path))[:48] or "body"
+    source = normalized_key(str(source_id or ""))[:24]
+    phrase = normalized_key(first_meaningful_title_phrase(text))[:48]
+    return "_".join(part for part in [unit_type, section, source, phrase] if part)[:140]
+
+
+def mixed_docx_retrieval_text(title: str, text: str, section_path: list[str]) -> str:
+    section = " > ".join(item for item in section_path if item)
+    return "\n".join(part for part in [section, title, text] if part).strip()
+
+
+def mixed_docx_add_group_parent_chunks(
+    chunks: list[Chunk],
+    classification: Any,
+    document_audience: list[str],
+    document_channels: list[str],
+) -> list[Chunk]:
+    output = list(chunks)
+    group_specs: list[tuple[str, str, str, list[int]]] = []
+    group_specs.extend(mixed_docx_wording_group_specs(output))
+    group_specs.extend(mixed_docx_conditional_group_specs(output))
+    group_specs.extend(mixed_docx_compliance_group_specs(output))
+
+    claimed_children: set[int] = set()
+    for unit_type, group_title, group_key, indexes in group_specs:
+        child_indexes = [index for index in indexes if index not in claimed_children]
+        if len(child_indexes) < 2:
+            continue
+        claimed_children.update(child_indexes)
+        children = [output[index] for index in child_indexes]
+        section_path = first_list_metadata(children, "section_path")
+        section_id = first_text_metadata(children, "parent_section_id") or first_text_metadata(children, "section_id") or mixed_docx_section_id(section_path)
+        group_id = f"group_{normalized_key(group_key or group_title)[:90] or len(output)}"
+        content = "\n".join(
+            f"- {child.heading}: {child.content}"
+            for child in children
+            if child.content
+        ).strip()
+        refs = merge_many_source_refs([child.metadata.get("source_refs") for child in children])
+        group_metadata = {
+            "unit_id": group_id,
+            "unit_type": unit_type,
+            "chunk_type": "grouped_parent",
+            "retrieval_scope": "unit",
+            "parent_unit_id": section_id,
+            "parent_section_id": section_id,
+            "parent_chunk_id": section_id,
+            "child_unit_ids": [str(child.metadata.get("unit_id") or "") for child in children if child.metadata.get("unit_id")],
+            "child_chunk_types": list(dict.fromkeys(str(child.metadata.get("unit_type") or child.section) for child in children)),
+            "document_type": classification.document_type,
+            "source_type": classification.source_type,
+            "sub_type": "communication_guideline",
+            "structure_type": "mixed_docx",
+            "actor": "cs",
+            "affected_audience": infer_affected_audience(content) or document_audience,
+            "audience": infer_affected_audience(content) or document_audience,
+            "channel": infer_mixed_docx_channels(" ".join(section_path) + " " + content) or document_channels,
+            "section_path": section_path,
+            "section_title": last_nonempty(section_path),
+            "section_id": section_id,
+            "block_id": group_id,
+            "source_refs": refs,
+            "source_block_ids": source_block_ids_from_refs(refs),
+            "source_ref_quality": source_ref_quality_from_refs(refs),
+            "source_ref_acknowledged": True,
+            "risk_level": max_child_risk(children),
+            "risk_category": first_text_metadata(children, "risk_category"),
+            "confidence": min(float(child.metadata.get("confidence") or 0.78) for child in children),
+            "review_status": "needs_review",
+            "normalized_title": normalized_key(group_title),
+            "display_text": content,
+            "retrieval_text": mixed_docx_retrieval_text(group_title, content, section_path),
+            "tags": list(dict.fromkeys(["communication_guideline", "grouped_rule", unit_type, *flatten_child_tags(children)])),
+            "aliases": list(dict.fromkeys([group_title, *flatten_child_aliases(children)])),
+        }
+        group_chunk = Chunk(
+            chunk_index=len(output),
+            section=unit_type,
+            heading=group_title[:180],
+            content=content,
+            token_count=len(tokenize(content)),
+            metadata=group_metadata,
+        )
+        output.append(group_chunk)
+        for index in child_indexes:
+            child = output[index]
+            metadata = {
+                **child.metadata,
+                "chunk_type": "atomic_child",
+                "parent_unit_id": group_id,
+                "parent_chunk_id": group_id,
+                "parent_section_id": child.metadata.get("parent_section_id") or section_id,
+                "grouped_parent_unit_id": group_id,
+                "group_label": group_title,
+            }
+            output[index] = replace_chunk_metadata(child, metadata)
+    return output
+
+
+def mixed_docx_wording_group_specs(chunks: list[Chunk]) -> list[tuple[str, str, str, list[int]]]:
+    by_section: dict[str, list[int]] = {}
+    for index, chunk in enumerate(chunks):
+        metadata = chunk.metadata or {}
+        if metadata.get("unit_type") != "wording_rule" or metadata.get("chunk_type") == "grouped_parent":
+            continue
+        text = normalized_search_text(f"{chunk.heading} {chunk.content}")
+        quoted = key_quoted_phrase(chunk.content)
+        if quoted or any(term in text for term in ["xin loi", "rat tiec", "wording", "mau cau"]):
+            by_section.setdefault(str(metadata.get("section_id") or metadata.get("parent_section_id") or chunk.section), []).append(index)
+    specs = []
+    for section_id, indexes in by_section.items():
+        if len(indexes) >= 2:
+            phrases = list(dict.fromkeys(key_quoted_phrase(chunks[index].content) for index in indexes if key_quoted_phrase(chunks[index].content)))
+            label = " và ".join(f"\"{phrase}\"" for phrase in phrases[:2]) if len(phrases) >= 2 else "các wording phản hồi"
+            specs.append(("wording_rule", f"Wording rule group: Phân biệt {label}", f"wording_{section_id}_{label}", indexes))
+    return specs
+
+
+def mixed_docx_conditional_group_specs(chunks: list[Chunk]) -> list[tuple[str, str, str, list[int]]]:
+    grouped: dict[str, list[int]] = {}
+    for index, chunk in enumerate(chunks):
+        metadata = chunk.metadata or {}
+        if metadata.get("unit_type") != "handling_rule" or metadata.get("chunk_type") == "grouped_parent":
+            continue
+        text = normalized_search_text(f"{chunk.heading} {chunk.content}")
+        if not any(marker in text for marker in ["neu ", "truong hop", "chua ", "da ", "already", "not yet"]):
+            continue
+        key = str(metadata.get("list_group") or metadata.get("section_id") or metadata.get("parent_section_id") or chunk.section)
+        grouped.setdefault(key, []).append(index)
+    specs = []
+    for key, indexes in grouped.items():
+        if len(indexes) >= 2:
+            title = conditional_group_title([chunks[index] for index in indexes])
+            specs.append(("handling_rule", title, f"conditional_{key}_{title}", indexes))
+    return specs
+
+
+def mixed_docx_compliance_group_specs(chunks: list[Chunk]) -> list[tuple[str, str, str, list[int]]]:
+    by_section: dict[str, list[int]] = {}
+    for index, chunk in enumerate(chunks):
+        metadata = chunk.metadata or {}
+        if metadata.get("unit_type") != "compliance_rule" or metadata.get("chunk_type") == "grouped_parent":
+            continue
+        key = str(metadata.get("section_id") or metadata.get("parent_section_id") or chunk.section)
+        by_section.setdefault(key, []).append(index)
+    specs = []
+    for key, indexes in by_section.items():
+        if len(indexes) >= 2:
+            section_title = first_text_metadata([chunks[index] for index in indexes], "section_title")
+            title = f"Compliance rule group: {section_title or 'Các nội dung không được cung cấp'}"
+            specs.append(("compliance_rule", title[:180], f"compliance_{key}", indexes))
+    return specs
+
+
+def conditional_group_title(children: list[Chunk]) -> str:
+    section = first_text_metadata(children, "section_title")
+    condition_labels = [
+        condition_title_phrase(child.content)
+        for child in children
+        if condition_title_phrase(child.content)
+    ]
+    if condition_labels:
+        label = " / ".join(condition_labels[:2])
+        return f"Handling rule group: {label}"[:180]
+    return f"Handling rule group: {section or 'Điều kiện xử lý'}"[:180]
+
+
+def condition_title_phrase(text: str) -> str:
+    stripped = normalize_cell_text(text)
+    match = re.search(r"\b(Nếu|Trường hợp|Khi|If|When)\b([^:.;\n]{3,120})", stripped, re.IGNORECASE)
+    if match:
+        return normalize_cell_text(f"{match.group(1)}{match.group(2)}").strip(" :-")[:100]
+    return ""
+
+
+def first_list_metadata(chunks: list[Chunk], key: str) -> list[str]:
+    for chunk in chunks:
+        value = chunk.metadata.get(key) if isinstance(chunk.metadata, dict) else None
+        if isinstance(value, list):
+            return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def first_text_metadata(chunks: list[Chunk], key: str) -> str:
+    for chunk in chunks:
+        value = chunk.metadata.get(key) if isinstance(chunk.metadata, dict) else None
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def merge_many_source_refs(ref_groups: list[Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for refs in ref_groups:
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            key = json.dumps(ref, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(ref)
+    return output
+
+
+def flatten_child_tags(children: list[Chunk]) -> list[str]:
+    tags: list[str] = []
+    for child in children:
+        value = child.metadata.get("tags") if isinstance(child.metadata, dict) else []
+        if isinstance(value, list):
+            tags.extend(str(item) for item in value if str(item))
+    return tags
+
+
+def flatten_child_aliases(children: list[Chunk]) -> list[str]:
+    aliases: list[str] = []
+    for child in children:
+        value = child.metadata.get("aliases") if isinstance(child.metadata, dict) else []
+        if isinstance(value, list):
+            aliases.extend(str(item) for item in value if str(item))
+    return aliases
+
+
+def max_child_risk(children: list[Chunk]) -> str:
+    order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    best = "low"
+    for child in children:
+        risk = normalize_risk_level(child.metadata.get("risk_level") if isinstance(child.metadata, dict) else "")
+        if order.get(risk, 0) > order.get(best, 0):
+            best = risk
+    return best
 
 
 def looks_like_macro_docx_table(table: dict[str, Any]) -> bool:
@@ -1148,9 +1621,13 @@ def mixed_docx_macro_table_title(section_path: list[str], channels: list[str], t
 
 def mixed_docx_row_heading(row: dict[str, Any], channels: list[str], row_index: int) -> str:
     cells = row.get("cells") if isinstance(row.get("cells"), dict) else row.get("values") if isinstance(row.get("values"), dict) else {}
-    label = next((str(value).strip() for value in cells.values() if str(value).strip()), f"Dòng {row_index}")
-    channel_label = "/".join(channels) if channels else "macro"
-    return f"{channel_label} {label}".strip()[:180]
+    headers = list(cells.keys())
+    values = [str(value).strip() for value in cells.values()]
+    label = next((value for value in values if value), f"Dòng {row_index}")
+    first_header = str(headers[0]).strip() if headers else ""
+    channel_label = "/".join(channel.upper() if channel == "email" else channel.title() for channel in channels) if channels else "Macro"
+    row_label = f"{first_header}: {label}" if first_header else label
+    return f"{channel_label} macro: {row_label}".strip()[:180]
 
 
 def mixed_docx_unit_type(block: dict[str, Any]) -> str:
@@ -1196,19 +1673,112 @@ def mixed_docx_condition_action_metadata(text: str) -> dict[str, str]:
 def mixed_docx_heading(unit_type: str, text: str, section_path: list[str]) -> str:
     section_tail = section_path[-1] if section_path else ""
     if unit_type == "compliance_rule":
-        return "Quy định không tiết lộ"
+        return compliance_rule_title(text, section_tail)
     if unit_type == "warning":
-        return "Cảnh báo tuân thủ"
+        return warning_rule_title(text, section_tail)
     if unit_type == "wording_rule":
-        return "Quy định wording xin lỗi"
+        return wording_rule_title(text, section_tail)
     if unit_type == "macro_script":
-        return "Script chào hỏi"
+        return macro_script_title(text, section_tail)
     if unit_type == "example":
         return "Ví dụ phản hồi"
     if unit_type == "operational_note":
-        return "Lưu ý vận hành"
+        return operational_note_title(text, section_tail)
+    if unit_type == "handling_rule":
+        condition = condition_title_phrase(text)
+        if condition:
+            return f"Handling rule: {condition}"[:180]
     first = re.split(r"[.;\n]", text, maxsplit=1)[0].strip()
     return (first or section_tail or unit_type.replace("_", " ").title())[:180]
+
+
+def compliance_rule_title(text: str, section_tail: str = "") -> str:
+    phrase = key_quoted_phrase(text)
+    normalized = normalized_search_text(text)
+    if phrase and any(signal in normalized for signal in ["khong noi", "khong gui", "tuyet doi khong", "never say"]):
+        return f"Compliance rule: Không nói \"{phrase}\""[:180]
+    if "quy trinh xu ly noi bo" in normalized:
+        return "Compliance rule: Không cung cấp quy trình xử lý nội bộ"
+    if "che tai" in normalized:
+        if any(term in normalized for term in ["nguong", "ly do", "reason", "threshold"]):
+            return "Compliance rule: Không cung cấp ngưỡng và lý do chế tài"
+        return "Compliance rule: Không chủ động cung cấp thông tin chế tài"
+    if "khong chu dong cung cap" in normalized:
+        phrase = clause_after_signal(text, "không chủ động cung cấp") or clause_after_signal(text, "khong chu dong cung cap")
+        return f"Compliance rule: Không chủ động cung cấp {phrase}".strip()[:180]
+    if "tuyet doi khong" in normalized:
+        phrase = clause_after_signal(text, "TUYỆT ĐỐI KHÔNG") or first_meaningful_title_phrase(text)
+        return f"Compliance rule: Tuyệt đối không {phrase}".strip()[:180]
+    return f"Compliance rule: {first_meaningful_title_phrase(text) or section_tail or 'Quy định tuân thủ'}"[:180]
+
+
+def warning_rule_title(text: str, section_tail: str = "") -> str:
+    phrase = key_quoted_phrase(text)
+    if phrase:
+        return f"Warning: \"{phrase}\""[:180]
+    return f"Cảnh báo: {first_meaningful_title_phrase(text) or section_tail or 'Tuân thủ'}"[:180]
+
+
+def wording_rule_title(text: str, section_tail: str = "") -> str:
+    phrase = key_quoted_phrase(text)
+    normalized = normalized_search_text(text)
+    if phrase:
+        return f"Wording rule: Khi nào dùng \"{phrase}\""[:180]
+    for candidate in ("xin lỗi", "rất tiếc", "mong quý khách thông cảm"):
+        if normalized_search_text(candidate) in normalized:
+            return f"Wording rule: Khi nào dùng \"{candidate}\""[:180]
+    return f"Wording rule: {first_meaningful_title_phrase(text) or section_tail or 'Cách dùng từ'}"[:180]
+
+
+def macro_script_title(text: str, section_tail: str = "") -> str:
+    phrase = key_quoted_phrase(text)
+    if phrase:
+        return f"Macro script: \"{phrase}\""[:180]
+    return f"Macro script: {first_meaningful_title_phrase(text) or section_tail or 'Script phản hồi'}"[:180]
+
+
+def operational_note_title(text: str, section_tail: str = "") -> str:
+    normalized = normalized_search_text(text)
+    if normalized.startswith(("chi dung", "chỉ dùng")):
+        return f"Operational note: {first_meaningful_title_phrase(text)}"[:180]
+    if "kiem tra" in normalized:
+        phrase = clause_after_signal(text, "kiểm tra") or first_meaningful_title_phrase(text)
+        return f"Operational note: Kiểm tra {phrase}".strip()[:180]
+    phrase = first_meaningful_title_phrase(text)
+    return f"Operational note: {phrase or section_tail or 'Lưu ý vận hành'}"[:180]
+
+
+def key_quoted_phrase(text: str) -> str:
+    for pattern in (r"[\"“”']([^\"“”']{2,90})[\"“”']", r"\[([^\[\]]{2,90})\]"):
+        match = re.search(pattern, text)
+        if match:
+            return normalize_cell_text(match.group(1))
+    return ""
+
+
+def clause_after_signal(text: str, signal: str) -> str:
+    if not signal:
+        return ""
+    pattern = re.compile(re.escape(signal), re.IGNORECASE)
+    match = pattern.search(text)
+    if not match:
+        return ""
+    tail = text[match.end():]
+    clause = re.split(r"[.;\n]", tail, maxsplit=1)[0]
+    return normalize_cell_text(clause).strip(" :-")[:120]
+
+
+def first_meaningful_title_phrase(text: str) -> str:
+    stripped = normalize_cell_text(text)
+    stripped = re.sub(r"^(lưu ý|luu y|note|warning)\s*:?\s*", "", stripped, flags=re.IGNORECASE)
+    condition = condition_title_phrase(stripped)
+    if condition:
+        return condition
+    phrase = re.split(r"[.;\n]", stripped, maxsplit=1)[0].strip(" :-")
+    words = phrase.split()
+    if len(words) > 14:
+        phrase = " ".join(words[:14])
+    return phrase[:140]
 
 
 def infer_mixed_docx_channels(text: str) -> list[str]:
@@ -4243,12 +4813,50 @@ def normalize_units(chunks: list[Any]) -> list[Any]:
         for chunk in chunks
         if str(chunk.content or "").strip()
     ]
-    return attach_notes_to_nearest_parent(normalized)
+    return dedupe_chunk_titles(attach_notes_to_nearest_parent(normalized))
+
+
+def dedupe_chunk_titles(chunks: list[Any]) -> list[Any]:
+    output = []
+    seen: dict[str, int] = {}
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        unit_type = str(metadata.get("unit_type") or chunk.section or "")
+        if unit_type == "full_sop":
+            output.append(chunk)
+            continue
+        title = str(chunk.heading or "").strip() or unit_type.replace("_", " ").title()
+        key = normalized_key(title) or normalized_key(unit_type)
+        count = seen.get(key, 0) + 1
+        seen[key] = count
+        if count == 1:
+            output.append(replace_chunk_metadata(chunk, {**metadata, "normalized_title": metadata.get("normalized_title") or key}))
+            continue
+        suffixed_title = f"{title} ({count})"[:180]
+        output.append(
+            Chunk(
+                chunk_index=chunk.chunk_index,
+                section=chunk.section,
+                heading=suffixed_title,
+                content=chunk.content,
+                token_count=chunk.token_count,
+                metadata={
+                    **metadata,
+                    "normalized_title": f"{key}_{count}",
+                    "title_deduped": True,
+                    "title_dedupe_suffix": count,
+                    "original_title": metadata.get("original_title") or title,
+                },
+            )
+        )
+    return output
 
 
 def with_structural_display_metadata(chunk: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
     ref = next((item for item in refs if isinstance(item, dict)), {})
+    unit_type = str(metadata.get("unit_type") or chunk.section or "text_section")
+    retrieval_scope = str(metadata.get("retrieval_scope") or ("document" if unit_type == "full_sop" else "unit"))
     section_path = metadata.get("section_path") if isinstance(metadata.get("section_path"), list) else ref.get("heading_path") if isinstance(ref.get("heading_path"), list) else []
     section_title = str(metadata.get("section_title") or last_nonempty(section_path) or chunk.heading or chunk.section or "").strip()
     section_id = str(metadata.get("section_id") or metadata.get("source_section_id") or normalized_key(section_title or chunk.section) or chunk.section or "").strip()
@@ -4268,11 +4876,31 @@ def with_structural_display_metadata(chunk: Any, metadata: dict[str, Any]) -> di
         "column_key": column_key,
     }
     is_table = bool(table_id and row_index is not None) or metadata.get("source_ref_quality") in {"table_row", "sheet_row"} or metadata.get("unit_type") == "table_row"
+    chunk_type = str(metadata.get("chunk_type") or "")
+    if not chunk_type:
+        if unit_type == "full_sop" or retrieval_scope == "document":
+            chunk_type = "full_sop"
+        elif retrieval_scope == "section":
+            chunk_type = "parent_section"
+        elif metadata.get("child_unit_ids"):
+            chunk_type = "grouped_parent"
+        else:
+            chunk_type = "atomic_child"
+    title = str(chunk.heading or section_title or unit_type).strip()
+    parent_section_id = str(metadata.get("parent_section_id") or ("" if chunk_type == "parent_section" else section_id)).strip()
     return {
         **metadata,
+        "unit_type": unit_type,
+        "chunk_type": chunk_type,
+        "retrieval_scope": retrieval_scope,
+        "normalized_title": metadata.get("normalized_title") or normalized_key(title),
+        "display_text": metadata.get("display_text") or chunk.content,
+        "retrieval_text": metadata.get("retrieval_text") or embedding_text_for_unit(chunk.heading, chunk.content, unit_type),
         "section_id": section_id,
         "section_title": section_title,
+        "parent_section_id": parent_section_id,
         "block_id": block_id,
+        "source_block_ids": metadata.get("source_block_ids") or source_block_ids_from_refs(refs),
         **({"table_id": table_id} if table_id else {}),
         **({"row_index": row_index} if row_index is not None else {}),
         **({"column_key": column_key} if column_key else {}),
@@ -4854,6 +5482,12 @@ def attach_notes_to_nearest_parent(chunks: list[Any]) -> list[Any]:
     for chunk in chunks:
         metadata = dict(chunk.metadata or {})
         unit_type = str(metadata.get("unit_type") or chunk.section or "")
+        if unit_type == "full_sop":
+            metadata["unit_id"] = metadata.get("unit_id") or "full_sop"
+            metadata["parent_unit_id"] = metadata.get("parent_unit_id") or ""
+            metadata["parent_chunk_id"] = metadata.get("parent_chunk_id") or ""
+            output.append(replace_chunk_metadata(chunk, metadata))
+            continue
         parent_id = str(
             metadata.get("parent_unit_id")
             or metadata.get("rule_id")
@@ -4868,7 +5502,7 @@ def attach_notes_to_nearest_parent(chunks: list[Any]) -> list[Any]:
             else:
                 metadata["attachment_status"] = "needs_review_no_parent"
                 metadata["review_status"] = "needs_review"
-        if not is_note_like and unit_type != "full_sop":
+        if not is_note_like:
             last_parent_id = parent_id
         metadata["parent_unit_id"] = metadata.get("parent_unit_id") or parent_id
         output.append(replace_chunk_metadata(chunk, metadata))
@@ -4932,7 +5566,8 @@ def embed_chunks(source_chunks: list[Any], base_metadata: dict[str, Any], enrich
             "publish_state": chunk.metadata.get("publish_state") or ("blocked" if publish_blocked else "draft"),
             "unit_type": unit_type,
         }
-        embedding_inputs.append(embedding_text_for_unit(chunk.heading, chunk.content, unit_type))
+        retrieval_text = str(chunk.metadata.get("retrieval_text") or "").strip()
+        embedding_inputs.append(retrieval_text or embedding_text_for_unit(chunk.heading, chunk.content, unit_type))
         prepared_chunks.append(
             {
                 "chunk_index": chunk.chunk_index,
@@ -5120,6 +5755,43 @@ def source_ref_quality_from_refs(refs: Any) -> str:
     if any(isinstance(ref, dict) and ref.get("page") for ref in refs):
         return "page_only"
     return "none"
+
+
+def source_block_ids_from_refs(refs: Any) -> list[str]:
+    if not isinstance(refs, list):
+        return []
+    output: list[str] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        block_id = str(ref.get("block_id") or "").strip()
+        if block_id:
+            output.append(block_id)
+            continue
+        source_type = str(ref.get("source_type") or "")
+        if source_type == "docx_table":
+            table_index = ref.get("table_index")
+            row_index = ref.get("row_index")
+            if table_index is not None and row_index is not None:
+                output.append(f"table_{table_index}_row_{row_index}")
+            elif table_index is not None:
+                output.append(f"table_{table_index}")
+            continue
+        if source_type == "docx" and ref.get("paragraph_index") is not None:
+            paragraph_id = f"p{ref.get('paragraph_index')}"
+            if ref.get("inline_item_index") is not None:
+                paragraph_id = f"{paragraph_id}_i{ref.get('inline_item_index')}"
+            output.append(paragraph_id)
+            continue
+        if source_type == "excel" and ref.get("sheet"):
+            row_start = ref.get("row_start") or ref.get("row_index")
+            output.append(f"sheet_{normalized_key(str(ref.get('sheet')))}_row_{row_start or 1}")
+            continue
+        if ref.get("line_start") is not None:
+            output.append(f"line_{ref.get('line_start')}")
+        elif ref.get("page") is not None:
+            output.append(f"page_{ref.get('page')}")
+    return list(dict.fromkeys(item for item in output if item))
 
 
 def source_refs_from_chunk(chunk: Any) -> list[dict[str, Any]]:

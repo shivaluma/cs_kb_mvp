@@ -302,6 +302,9 @@ export type RetrievalResult = {
   highlight_end_offset?: number | null;
   display_context?: DisplayContext | null;
   source_anchor?: SourceAnchor;
+  matched_chunk?: MatchedChunkContext;
+  parent?: ParentResultContext;
+  display?: RetrievalDisplayContract;
 };
 
 export type Citation = {
@@ -379,6 +382,34 @@ export type DisplayContext = {
   source_anchor?: SourceAnchor;
   source_resolution_status?: string;
   source_resolution_reason?: string;
+};
+
+export type MatchedChunkContext = {
+  chunk_id: string;
+  title: string;
+  snippet: string;
+  chunk_type: string;
+  score: number;
+  source_refs: Array<Record<string, unknown>>;
+};
+
+export type ParentResultContext = {
+  parent_section_id: string;
+  parent_chunk_id?: string;
+  title: string;
+  section_path: string[];
+  markdown?: string;
+};
+
+export type RetrievalDisplayContract = {
+  open_mode: "full_document" | string;
+  highlight_source_refs: Array<Record<string, unknown>>;
+  scroll_target: {
+    block_id?: string;
+    paragraph_index?: number | null;
+    table_index?: number | null;
+    row_index?: number | null;
+  };
 };
 
 export type DocumentSummary = {

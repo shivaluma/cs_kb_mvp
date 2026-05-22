@@ -1274,6 +1274,140 @@ def int_or_none(value: Any) -> int | None:
         return None
 
 
+def float_or_default(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_source_evidence_formatter_payload(
+    parsed: Any,
+    *,
+    document_title: str,
+    raw_text: str,
+    repaired: bool = False,
+) -> tuple[dict[str, Any], list[str]]:
+    warnings: list[str] = []
+    if isinstance(parsed, list):
+        sections = normalize_source_evidence_array_sections(parsed)
+        markdown = render_source_evidence_sections_markdown(sections)
+        warnings.append("model_returned_array_normalized_to_object")
+        return (
+            {
+                "title": document_title,
+                "markdown": markdown or raw_text.strip(),
+                "sections": sections,
+                "warnings": ["model_returned_array_normalized_to_object"],
+                "coverage_report": {
+                    "raw_text_chars": len(raw_text),
+                    "formatted_chars": len(markdown or raw_text.strip()),
+                    "normalization": "array_to_object",
+                },
+            },
+            warnings,
+        )
+
+    if not isinstance(parsed, dict):
+        warnings.append("model_returned_non_object_normalized_to_raw_text")
+        return (
+            {
+                "title": document_title,
+                "markdown": raw_text.strip(),
+                "sections": [],
+                "warnings": ["model_returned_non_object_normalized_to_raw_text"],
+                "coverage_report": {
+                    "raw_text_chars": len(raw_text),
+                    "formatted_chars": len(raw_text.strip()),
+                    "normalization": "non_object_to_raw_text",
+                },
+            },
+            warnings,
+        )
+
+    normalized = dict(parsed)
+    if not str(normalized.get("title") or "").strip():
+        normalized["title"] = document_title
+        warnings.append("source_evidence_title_defaulted")
+    if not isinstance(normalized.get("sections"), list):
+        normalized["sections"] = []
+        warnings.append("source_evidence_sections_defaulted")
+    else:
+        normalized["sections"] = normalize_source_evidence_array_sections(normalized["sections"])
+    if not isinstance(normalized.get("warnings"), list):
+        normalized["warnings"] = []
+        warnings.append("source_evidence_warnings_defaulted")
+    if repaired:
+        normalized["warnings"] = [*normalized["warnings"], "json_repair_used"]
+    if not isinstance(normalized.get("coverage_report"), dict):
+        normalized["coverage_report"] = {}
+        warnings.append("source_evidence_coverage_report_defaulted")
+    markdown = str(normalized.get("markdown") or "").strip()
+    if not markdown and normalized["sections"]:
+        markdown = render_source_evidence_sections_markdown(normalized["sections"])
+        normalized["markdown"] = markdown
+        warnings.append("source_evidence_markdown_rendered_from_sections")
+    return normalized, warnings
+
+
+def normalize_source_evidence_array_sections(items: list[Any]) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        if isinstance(item, dict):
+            title = str(item.get("title") or item.get("heading") or item.get("name") or f"Section {index}").strip()
+            markdown = str(item.get("markdown") or item.get("content") or item.get("text") or item.get("body") or "").strip()
+            source_hint = str(item.get("source_hint") or item.get("source") or item.get("id") or "").strip()
+            confidence = item.get("confidence", 0.5)
+        else:
+            title = f"Section {index}"
+            markdown = str(item or "").strip()
+            source_hint = ""
+            confidence = 0.4
+        if not title and not markdown:
+            continue
+        sections.append(
+            {
+                "title": title[:240] or f"Section {index}",
+                "markdown": markdown,
+                "source_hint": source_hint,
+                "confidence": float_or_default(confidence, 0.5),
+            }
+        )
+    return sections
+
+
+def render_source_evidence_sections_markdown(sections: list[dict[str, Any]]) -> str:
+    blocks: list[str] = []
+    for section in sections:
+        title = str(section.get("title") or "").strip()
+        markdown = str(section.get("markdown") or section.get("content") or "").strip()
+        if title:
+            blocks.append(f"## {title}")
+        if markdown:
+            blocks.append(markdown)
+    return "\n\n".join(blocks).strip()
+
+
+def source_evidence_raw_fallback(filename: str, raw_text: str, reason: str) -> dict[str, Any]:
+    markdown = raw_text.strip()[:120000]
+    return {
+        "title": filename.rsplit(".", 1)[0],
+        "format": "markdown",
+        "formatter": "raw_source_evidence_fallback",
+        "model": settings.openrouter_refine_model,
+        "markdown": markdown,
+        "markdown_truncated": len(raw_text.strip()) > len(markdown),
+        "raw_text_chars": len(raw_text),
+        "sections": [],
+        "warnings": [reason, "raw_source_evidence_preserved"],
+        "coverage_report": {
+            "raw_text_chars": len(raw_text),
+            "formatted_chars": len(markdown),
+            "fallback_reason": reason,
+        },
+    }
+
+
 def format_source_evidence_view(
     filename: str,
     raw_text: str,
@@ -1299,6 +1433,7 @@ def format_source_evidence_view(
         "- Với Excel nhiều sheet, mỗi sheet nên thành một section. Sheet lịch sử/cũ/chưa áp dụng phải ghi rõ trong heading hoặc note nếu raw source thể hiện.\n"
         "- Với dòng dạng label:value, render thành label rõ ràng. Với đoạn dài chứa nhiều điều kiện, tách thành list lồng nhau vừa đủ để scan.\n"
         "- Nếu không chắc cấu trúc, giữ nguyên text trong blockquote hoặc bullet và thêm warning, không tự suy diễn.\n\n"
+        "Return exactly one JSON object. Do not return an array.\n"
         "Trả CHỈ JSON object shape:\n"
         "{\"title\":\"\",\"markdown\":\"\",\"sections\":[],\"warnings\":[],\"coverage_report\":{}}.\n\n"
         "markdown phải là Markdown thuần, không HTML. Dùng tiếng Việt tự nhiên, ngắn gọn, dễ đọc cho CS.\n"
@@ -1341,15 +1476,17 @@ def format_source_evidence_view(
     try:
         content = completion_content(payload, headers)
         parsed, repaired = parse_json_with_repair(content, payload, headers)
-        if not isinstance(parsed, dict):
-            error = "source_evidence_formatter_not_object"
-            output_warnings = [error]
-            return {}, output_warnings, error
+        parsed, normalization_warnings = normalize_source_evidence_formatter_payload(
+            parsed,
+            document_title=filename.rsplit(".", 1)[0],
+            raw_text=raw_text,
+            repaired=repaired,
+        )
         markdown = str(parsed.get("markdown") or "").strip()
         if not markdown:
-            error = "source_evidence_formatter_empty_markdown"
-            output_warnings = [error]
-            return {}, output_warnings, error
+            markdown = raw_text.strip()[:120000]
+            parsed["markdown"] = markdown
+            normalization_warnings.append("source_evidence_formatter_empty_markdown_used_raw_text")
         model_warnings = [str(warning) for warning in parsed.get("warnings", []) if warning] if isinstance(parsed.get("warnings"), list) else []
         coverage_report = parsed.get("coverage_report") if isinstance(parsed.get("coverage_report"), dict) else {}
         sections = parsed.get("sections") if isinstance(parsed.get("sections"), list) else []
@@ -1369,19 +1506,27 @@ def format_source_evidence_view(
                 "formatted_chars": len(markdown),
             },
         }
-        output_warnings = ["openrouter_source_evidence_formatter_used", *[f"source_evidence_warning:{warning}" for warning in model_warnings[:10]]]
+        output_warnings = [
+            "openrouter_source_evidence_formatter_used",
+            *normalization_warnings,
+            *[f"source_evidence_warning:{warning}" for warning in model_warnings[:10]],
+        ]
         if repaired:
             output_warnings.append("openrouter_json_repair_used")
         status = "completed"
         return output, output_warnings, ""
     except json.JSONDecodeError as exc:
         error = f"source_evidence_formatter_invalid_json:{exc.msg}:{exc.pos}"
-        output_warnings = [error]
-        return {}, output_warnings, error
+        fallback = source_evidence_raw_fallback(filename, raw_text, error)
+        output_warnings = [error, "source_evidence_formatter_raw_fallback_used"]
+        status = "degraded"
+        return fallback, output_warnings, ""
     except Exception as exc:
         error = f"source_evidence_formatter_failed:{exc.__class__.__name__}"
-        output_warnings = [error]
-        return {}, output_warnings, error
+        fallback = source_evidence_raw_fallback(filename, raw_text, error)
+        output_warnings = [error, "source_evidence_formatter_raw_fallback_used"]
+        status = "degraded"
+        return fallback, output_warnings, ""
     finally:
         record_ai_breakdown(
             {

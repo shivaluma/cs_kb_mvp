@@ -115,6 +115,8 @@ type SemanticResult struct {
 	Heading              string          `json:"heading"`
 	Content              string          `json:"content"`
 	Score                float64         `json:"score"`
+	LexicalScore         float64         `json:"lexical_score,omitempty"`
+	VectorScore          float64         `json:"vector_score,omitempty"`
 	RankSource           []string        `json:"rank_source"`
 	Metadata             map[string]any  `json:"metadata"`
 	SOPID                string          `json:"sop_id,omitempty"`
@@ -128,6 +130,39 @@ type SemanticResult struct {
 	HighlightEndOffset   *int            `json:"highlight_end_offset,omitempty"`
 	DisplayContext       *DisplayContext `json:"display_context,omitempty"`
 	SourceAnchor         SourceAnchor    `json:"source_anchor,omitempty"`
+	MatchedChunk         MatchedChunk    `json:"matched_chunk,omitempty"`
+	Parent               ParentContext   `json:"parent,omitempty"`
+	Display              ResultDisplay   `json:"display,omitempty"`
+}
+
+type MatchedChunk struct {
+	ChunkID    string           `json:"chunk_id"`
+	Title      string           `json:"title"`
+	Snippet    string           `json:"snippet"`
+	ChunkType  string           `json:"chunk_type"`
+	Score      float64          `json:"score"`
+	SourceRefs []map[string]any `json:"source_refs"`
+}
+
+type ParentContext struct {
+	ParentSectionID string   `json:"parent_section_id"`
+	ParentChunkID   string   `json:"parent_chunk_id"`
+	Title           string   `json:"title"`
+	SectionPath     []string `json:"section_path"`
+	Markdown        string   `json:"markdown,omitempty"`
+}
+
+type ResultDisplay struct {
+	OpenMode            string           `json:"open_mode"`
+	HighlightSourceRefs []map[string]any `json:"highlight_source_refs"`
+	ScrollTarget        ScrollTarget     `json:"scroll_target"`
+}
+
+type ScrollTarget struct {
+	BlockID        string `json:"block_id"`
+	ParagraphIndex *int   `json:"paragraph_index"`
+	TableIndex     *int   `json:"table_index"`
+	RowIndex       *int   `json:"row_index"`
 }
 
 type CollectionRef struct {
