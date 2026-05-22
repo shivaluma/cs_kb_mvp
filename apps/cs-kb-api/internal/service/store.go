@@ -29,8 +29,12 @@ type Store struct {
 	logger *slog.Logger
 }
 
-type meiliSearchResponse struct {
+type meiliSOPSearchResponse struct {
 	Hits []meiliSOPDocument `json:"hits"`
+}
+
+type meiliChunkSearchResponse struct {
+	Hits []aiChunkDocument `json:"hits"`
 }
 
 type meiliSOPDocument struct {
@@ -49,52 +53,54 @@ type meiliSOPDocument struct {
 }
 
 type aiChunkDocument struct {
-	ChunkID           string         `json:"chunk_id"`
-	ID                string         `json:"id"`
-	DocumentID        string         `json:"document_id"`
-	VersionID         string         `json:"version_id"`
-	DocumentVersionID string         `json:"document_version_id"`
-	Title             string         `json:"title"`
-	NormalizedTitle   string         `json:"normalized_title"`
-	VersionNumber     int            `json:"version_number"`
-	Status            string         `json:"status"`
-	PublishState      string         `json:"publish_state"`
-	DocumentType      string         `json:"document_type"`
-	ReviewStatus      string         `json:"review_status"`
-	IsCurrentVersion  bool           `json:"is_current_version"`
-	ChunkIndex        int            `json:"chunk_index"`
-	Section           string         `json:"section"`
-	SectionPath       any            `json:"section_path"`
-	Heading           string         `json:"heading"`
-	Content           string         `json:"content"`
-	DisplayText       string         `json:"display_text"`
-	RetrievalText     string         `json:"retrieval_text"`
-	TokenCount        int            `json:"token_count"`
-	Metadata          map[string]any `json:"metadata"`
-	UnitType          string         `json:"unit_type"`
-	ChunkType         string         `json:"chunk_type"`
-	RiskLevel         string         `json:"risk_level"`
-	RiskPriority      int            `json:"risk_priority"`
-	SourceRefQuality  string         `json:"source_ref_quality"`
-	SourceRefs        any            `json:"source_refs"`
-	ParentSectionID   string         `json:"parent_section_id"`
-	ParentChunkID     string         `json:"parent_chunk_id"`
-	Audience          any            `json:"audience"`
-	Visibility        string         `json:"visibility"`
-	Scope             string         `json:"scope"`
-	PolicyType        string         `json:"policy_type"`
-	AuthorityLevel    string         `json:"authority_level"`
-	AuthorityPriority int            `json:"authority_priority"`
-	Vertical          any            `json:"vertical"`
-	Category          any            `json:"category"`
-	Collections       any            `json:"collections"`
-	Tags              any            `json:"tags"`
-	CaseReasons       any            `json:"case_reasons"`
-	MacroText         string         `json:"macro_text"`
-	ForbiddenPhrases  any            `json:"forbidden_phrases"`
-	Keywords          any            `json:"keywords"`
-	EffectiveFrom     any            `json:"effective_from"`
-	UpdatedAt         any            `json:"updated_at"`
+	ChunkID             string         `json:"chunk_id"`
+	ID                  string         `json:"id"`
+	DocumentID          string         `json:"document_id"`
+	VersionID           string         `json:"version_id"`
+	DocumentVersionID   string         `json:"document_version_id"`
+	Title               string         `json:"title"`
+	NormalizedTitle     string         `json:"normalized_title"`
+	VersionNumber       int            `json:"version_number"`
+	Status              string         `json:"status"`
+	PublishState        string         `json:"publish_state"`
+	DocumentType        string         `json:"document_type"`
+	ReviewStatus        string         `json:"review_status"`
+	IsCurrentVersion    bool           `json:"is_current_version"`
+	ChunkIndex          int            `json:"chunk_index"`
+	Section             string         `json:"section"`
+	SectionPath         any            `json:"section_path"`
+	Heading             string         `json:"heading"`
+	Content             string         `json:"content"`
+	DisplayText         string         `json:"display_text"`
+	RetrievalText       string         `json:"retrieval_text"`
+	TokenCount          int            `json:"token_count"`
+	Metadata            map[string]any `json:"metadata"`
+	UnitType            string         `json:"unit_type"`
+	ChunkType           string         `json:"chunk_type"`
+	RiskLevel           string         `json:"risk_level"`
+	RiskPriority        int            `json:"risk_priority"`
+	SourceRefQuality    string         `json:"source_ref_quality"`
+	SourceRefs          any            `json:"source_refs"`
+	ParentSectionID     string         `json:"parent_section_id"`
+	ParentChunkID       string         `json:"parent_chunk_id"`
+	Audience            any            `json:"audience"`
+	Visibility          string         `json:"visibility"`
+	Scope               string         `json:"scope"`
+	PolicyType          string         `json:"policy_type"`
+	AuthorityLevel      string         `json:"authority_level"`
+	AuthorityPriority   int            `json:"authority_priority"`
+	Vertical            any            `json:"vertical"`
+	Category            any            `json:"category"`
+	Collections         any            `json:"collections"`
+	Tags                any            `json:"tags"`
+	CaseReasons         any            `json:"case_reasons"`
+	MacroText           string         `json:"macro_text"`
+	ForbiddenPhrases    any            `json:"forbidden_phrases"`
+	Keywords            any            `json:"keywords"`
+	EffectiveFrom       any            `json:"effective_from"`
+	UpdatedAt           any            `json:"updated_at"`
+	RankingScore        float64        `json:"_rankingScore,omitempty"`
+	RankingScoreDetails map[string]any `json:"_rankingScoreDetails,omitempty"`
 }
 
 func NewStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Store, error) {
@@ -971,9 +977,82 @@ func (s *Store) searchPostgres(ctx context.Context, req model.SearchRequest) ([]
 }
 
 func (s *Store) searchMeili(ctx context.Context, req model.SearchRequest) ([]model.SearchResult, error) {
+	chunkResults, chunkErr := s.searchMeiliChunks(ctx, req)
+	sopResults, sopErr := s.searchMeiliSOPs(ctx, req)
+	if chunkErr != nil && sopErr != nil {
+		return nil, chunkErr
+	}
+	results := make([]model.SearchResult, 0, len(chunkResults)+len(sopResults))
+	seen := map[string]bool{}
+	for _, result := range chunkResults {
+		key := "chunk:" + result.ChunkID
+		if result.ChunkID == "" {
+			key = "doc:" + result.DocumentID + ":" + result.Title
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		results = append(results, result)
+	}
+	for _, result := range sopResults {
+		key := "sop:" + result.SOPID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func (s *Store) searchMeiliChunks(ctx context.Context, req model.SearchRequest) ([]model.SearchResult, error) {
 	payload := map[string]any{
 		"q":                req.Query,
-		"limit":            50,
+		"limit":            30,
+		"showRankingScore": true,
+	}
+	if req.Debug {
+		payload["showRankingScoreDetails"] = true
+	}
+	filter := combineMeiliFilters("status = \"published\"", "is_current_version = true", meiliFilter(req.Filters))
+	if filter != "" {
+		payload["filter"] = filter
+	}
+	var decoded meiliChunkSearchResponse
+	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/sop_chunks/search", payload, &decoded); err != nil {
+		return nil, err
+	}
+	results := make([]model.SearchResult, 0, len(decoded.Hits))
+	for index, hit := range decoded.Hits {
+		confidence := hit.RankingScore
+		if confidence <= 0 {
+			confidence = 1 - float64(index)*0.06
+		}
+		if confidence < 0.18 {
+			confidence = 0.18
+		}
+		debug := map[string]any(nil)
+		if req.Debug {
+			debug = map[string]any{
+				"score_debug": map[string]any{
+					"meili_score":           hit.RankingScore,
+					"ranking_score_details": hit.RankingScoreDetails,
+					"rank":                  index + 1,
+					"mode":                  "portal_search",
+					"index":                 "sop_chunks",
+				},
+			}
+		}
+		results = append(results, aiChunkToSearchResult(hit, confidence, debug))
+	}
+	return results, nil
+}
+
+func (s *Store) searchMeiliSOPs(ctx context.Context, req model.SearchRequest) ([]model.SearchResult, error) {
+	payload := map[string]any{
+		"q":                req.Query,
+		"limit":            20,
 		"showRankingScore": true,
 	}
 	if req.Debug {
@@ -982,7 +1061,7 @@ func (s *Store) searchMeili(ctx context.Context, req model.SearchRequest) ([]mod
 	if filter := meiliFilter(req.Filters); filter != "" {
 		payload["filter"] = filter
 	}
-	var decoded meiliSearchResponse
+	var decoded meiliSOPSearchResponse
 	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/sops/search", payload, &decoded); err != nil {
 		return nil, err
 	}
@@ -1003,11 +1082,12 @@ func (s *Store) searchMeili(ctx context.Context, req model.SearchRequest) ([]mod
 					"ranking_score_details": hit.RankingScoreDetails,
 					"rank":                  index + 1,
 					"mode":                  "portal_search",
+					"index":                 "sops",
 				},
 			}
 		}
 		results = append(results, model.SearchResult{
-			SOPID: hit.SOPID, Title: hit.Title, Snippet: hit.Snippet, Category: hit.Category,
+			SOPID: hit.SOPID, ResultType: "sop_catalog", Title: hit.Title, Snippet: hit.Snippet, Category: hit.Category,
 			Audience: hit.Audience, Vertical: hit.Vertical, Tags: hit.Tags, UpdatedAt: hit.UpdatedAt,
 			Version: hit.Version, Confidence: confidence, Score: confidence, Debug: debug,
 		})
@@ -1082,9 +1162,44 @@ func sopToMeiliDocument(sop model.SOP) meiliSOPDocument {
 
 func sopToSearchResult(sop model.SOP, confidence float64) model.SearchResult {
 	return model.SearchResult{
-		SOPID: sop.ID, Title: sop.Title, Snippet: sop.Summary, Category: sop.Category,
+		SOPID: sop.ID, ResultType: "sop_catalog", Title: sop.Title, Snippet: sop.Summary, Category: sop.Category,
 		Audience: sop.Audience, Vertical: sop.Vertical, Tags: sop.Tags, UpdatedAt: sop.UpdatedAt,
 		Version: sop.CurrentVersion.VersionNumber, Confidence: confidence,
+	}
+}
+
+func aiChunkToSearchResult(chunk aiChunkDocument, confidence float64, debug map[string]any) model.SearchResult {
+	snippet := stringFromAny(firstAny(chunk.DisplayText, chunk.Content, chunk.RetrievalText))
+	if strings.TrimSpace(snippet) == "" {
+		snippet = chunk.Heading
+	}
+	title := strings.TrimSpace(chunk.Title)
+	if title == "" {
+		title = strings.TrimSpace(chunk.Heading)
+	}
+	return model.SearchResult{
+		SOPID:             chunk.DocumentID,
+		ResultType:        "sop_chunk",
+		DocumentID:        chunk.DocumentID,
+		DocumentVersionID: chunk.DocumentVersionID,
+		VersionID:         chunk.VersionID,
+		ChunkID:           chunk.ChunkID,
+		Title:             title,
+		Snippet:           truncateString(snippet, 700),
+		Category:          stringFromAny(chunk.Category),
+		Audience:          stringSliceFromAny(chunk.Audience),
+		Vertical:          firstStringFromAny(chunk.Vertical),
+		Tags:              stringSliceFromAny(chunk.Tags),
+		Collections:       stringSliceFromAny(chunk.Collections),
+		SectionPath:       stringSliceFromAny(chunk.SectionPath),
+		ChunkType:         chunk.ChunkType,
+		RiskLevel:         chunk.RiskLevel,
+		SourceRefs:        chunk.SourceRefs,
+		UpdatedAt:         timeFromAny(chunk.UpdatedAt),
+		Version:           chunk.VersionNumber,
+		Confidence:        confidence,
+		Score:             confidence,
+		Debug:             debug,
 	}
 }
 
@@ -1110,6 +1225,18 @@ func meiliFilter(filters model.SearchFilters) string {
 	add("scope", filters.Scope)
 	add("policy_type", filters.PolicyType)
 	add("authority_level", filters.AuthorityLevel)
+	return strings.Join(parts, " AND ")
+}
+
+func combineMeiliFilters(filters ...string) string {
+	parts := make([]string, 0, len(filters))
+	for _, filter := range filters {
+		filter = strings.TrimSpace(filter)
+		if filter == "" {
+			continue
+		}
+		parts = append(parts, "("+filter+")")
+	}
 	return strings.Join(parts, " AND ")
 }
 
@@ -1217,6 +1344,17 @@ func stringFromAny(value any) string {
 	switch typed := value.(type) {
 	case string:
 		return typed
+	case []string:
+		return strings.Join(typed, ", ")
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(stringFromAny(item))
+			if text != "" {
+				values = append(values, text)
+			}
+		}
+		return strings.Join(values, ", ")
 	case fmt.Stringer:
 		return typed.String()
 	case nil:
@@ -1224,6 +1362,71 @@ func stringFromAny(value any) string {
 	default:
 		return fmt.Sprint(typed)
 	}
+}
+
+func stringSliceFromAny(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		output := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(stringFromAny(item))
+			if text != "" {
+				output = append(output, text)
+			}
+		}
+		return output
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	default:
+		text := strings.TrimSpace(stringFromAny(value))
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	}
+}
+
+func firstStringFromAny(value any) string {
+	values := stringSliceFromAny(value)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func timeFromAny(value any) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed
+	case string:
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02"} {
+			parsed, err := time.Parse(layout, typed)
+			if err == nil {
+				return parsed
+			}
+		}
+	default:
+		text := strings.TrimSpace(stringFromAny(value))
+		if text != "" && text != "<nil>" {
+			return timeFromAny(text)
+		}
+	}
+	return time.Time{}
+}
+
+func truncateString(value string, maxLength int) string {
+	value = strings.TrimSpace(value)
+	if maxLength <= 0 || len([]rune(value)) <= maxLength {
+		return value
+	}
+	runes := []rune(value)
+	return strings.TrimSpace(string(runes[:maxLength])) + "..."
 }
 
 func firstAny(values ...any) any {

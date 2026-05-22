@@ -44,6 +44,7 @@ export function LookupPage() {
   const [searchEventId, setSearchEventId] = useState("");
   const homepage = homepageQuery.data;
   const searchResults = hasSearchQuery ? (searchMutation.data?.results ?? []) : [];
+  const catalogSearchResults = searchResults.filter((result) => !result.chunk_id && result.result_type !== "sop_chunk");
   const semanticResults = hasSearchQuery ? (searchMutation.data?.semantic_results ?? []) : [];
   const aiSuggestion = (aiSuggestMutation.data as AISuggestion | undefined) ?? null;
   const booting = homepageQuery.isLoading && !homepageQuery.data && !homepageQuery.error && !searchMutation.data;
@@ -75,11 +76,11 @@ export function LookupPage() {
     if (hasStructuredFilters) {
       return [];
     }
-    if (searchResults.length > 0) {
-      return searchResults;
+    if (catalogSearchResults.length > 0) {
+      return catalogSearchResults;
     }
     return searchMutation.data ? [] : (homepage?.most_viewed ?? []).map(toSearchResult);
-  }, [hasSearchQuery, hasStructuredFilters, homepage, searchMutation.data, searchResults]);
+  }, [catalogSearchResults, hasSearchQuery, hasStructuredFilters, homepage, searchMutation.data]);
   const feedbackTotal = selected ? selected.analytics.helpful + selected.analytics.not_helpful : 0;
   const helpfulRate = feedbackTotal && selected ? Math.round((selected.analytics.helpful / feedbackTotal) * 100) : 0;
 
