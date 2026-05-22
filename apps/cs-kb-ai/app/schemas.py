@@ -1378,6 +1378,36 @@ class DisplayContext(BaseModel):
     source_resolution_reason: str = ""
 
 
+class MatchedChunkContext(BaseModel):
+    chunk_id: str = ""
+    title: str = ""
+    snippet: str = ""
+    chunk_type: str = ""
+    score: float = 0.0
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ParentResultContext(BaseModel):
+    parent_section_id: str = ""
+    parent_chunk_id: str = ""
+    title: str = ""
+    section_path: list[str] = Field(default_factory=list)
+    markdown: str = ""
+
+
+class ScrollTarget(BaseModel):
+    block_id: str = ""
+    paragraph_index: int | None = None
+    table_index: int | None = None
+    row_index: int | None = None
+
+
+class RetrievalDisplayContract(BaseModel):
+    open_mode: str = "full_document"
+    highlight_source_refs: list[dict[str, Any]] = Field(default_factory=list)
+    scroll_target: ScrollTarget = Field(default_factory=ScrollTarget)
+
+
 class Citation(BaseModel):
     document_id: str
     version_id: str
@@ -1427,6 +1457,9 @@ class RetrievalResult(BaseModel):
     highlight_end_offset: int | None = None
     display_context: DisplayContext | None = None
     source_anchor: SourceAnchor = Field(default_factory=SourceAnchor)
+    matched_chunk: MatchedChunkContext = Field(default_factory=MatchedChunkContext)
+    parent: ParentResultContext = Field(default_factory=ParentResultContext)
+    display: RetrievalDisplayContract = Field(default_factory=RetrievalDisplayContract)
 
 
 class RetrievalResponse(BaseModel):

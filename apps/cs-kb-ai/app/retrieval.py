@@ -9,7 +9,21 @@ from typing import Any
 from app.embedding import EmbeddingProviderError, embed_text
 from app import repository
 from app.search_labels import is_bad_search_label
-from app.schemas import Citation, CollectionRef, DisplayBlock, DisplayContext, DisplayHighlight, RetrievalRequest, RetrievalResponse, RetrievalResult, SourceAnchor
+from app.schemas import (
+    Citation,
+    CollectionRef,
+    DisplayBlock,
+    DisplayContext,
+    DisplayHighlight,
+    MatchedChunkContext,
+    ParentResultContext,
+    RetrievalDisplayContract,
+    RetrievalRequest,
+    RetrievalResponse,
+    RetrievalResult,
+    ScrollTarget,
+    SourceAnchor,
+)
 from app.text_processing import expand_query, normalize_phrase
 
 
@@ -412,11 +426,57 @@ def to_result(row: dict[str, Any]) -> RetrievalResult:
         highlight_end_offset=citation.highlight_end_offset,
         display_context=display_context,
         source_anchor=source_anchor,
+        matched_chunk=matched_chunk_context(row, metadata),
+        parent=parent_result_context(row, metadata, display_context),
+        display=retrieval_display_contract(row, metadata, display_context, source_anchor),
     )
 
 
 def row_context_key(row: dict[str, Any]) -> tuple[str, str]:
     return (str(row.get("document_id") or ""), str(row.get("version_id") or ""))
+
+
+def matched_chunk_context(row: dict[str, Any], metadata: dict[str, Any]) -> MatchedChunkContext:
+    refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    return MatchedChunkContext(
+        chunk_id=str(row.get("chunk_id") or ""),
+        title=str(row.get("heading") or row.get("title") or ""),
+        snippet=str(row.get("content") or ""),
+        chunk_type=str(metadata.get("chunk_type") or metadata.get("unit_type") or row.get("section") or ""),
+        score=round(float(row.get("score") or 0), 8),
+        source_refs=[ref for ref in refs if isinstance(ref, dict)],
+    )
+
+
+def parent_result_context(row: dict[str, Any], metadata: dict[str, Any], display_context: DisplayContext) -> ParentResultContext:
+    section_path = metadata.get("section_path") if isinstance(metadata.get("section_path"), list) else []
+    return ParentResultContext(
+        parent_section_id=str(metadata.get("parent_section_id") or display_context.section_id or metadata.get("section_id") or ""),
+        parent_chunk_id=str(metadata.get("parent_chunk_id") or metadata.get("parent_unit_id") or ""),
+        title=display_context.section_title or first_text(metadata.get("section_title"), row.get("heading"), row.get("section")),
+        section_path=[str(item) for item in section_path if str(item).strip()],
+        markdown=display_context.content if display_context.source_resolution_status == "resolved" else "",
+    )
+
+
+def retrieval_display_contract(
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    display_context: DisplayContext,
+    source_anchor: SourceAnchor,
+) -> RetrievalDisplayContract:
+    refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    first_ref = next((ref for ref in refs if isinstance(ref, dict)), {})
+    return RetrievalDisplayContract(
+        open_mode="full_document",
+        highlight_source_refs=[ref for ref in refs if isinstance(ref, dict)],
+        scroll_target=ScrollTarget(
+            block_id=source_anchor.block_id,
+            paragraph_index=first_int(first_ref.get("paragraph_index")),
+            table_index=first_int(first_ref.get("table_index")),
+            row_index=source_anchor.row_index,
+        ),
+    )
 
 
 def build_display_context(row: dict[str, Any], context: dict[str, Any] | None) -> DisplayContext:
