@@ -1156,6 +1156,61 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertIn("full_sop_missing_from_model_synthesized_for_review", warnings)
         self.assertIn("workflow_graph_missing_from_model_synthesized_for_review", ai_error)
 
+    def test_semantic_workflow_fallback_with_only_uncertain_edges_stays_degraded(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        semantic_refinement = {
+            "workflow_graph_candidate": {
+                "workflow_id": "wf_inbound_call",
+                "title": "Inbound call workflow",
+                "nodes": [
+                    {"id": "sem_8", "type": "decision", "semantic_node_type": "decision", "title": "8. KH/Partner/NH đồng ý cung cấp?", "content": "8. KH/Partner/NH đồng ý cung cấp?", "step_code": "8", "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [1, 2, 3, 4]}]},
+                    {"id": "sem_8_1", "type": "action", "semantic_node_type": "action", "title": "8.1 Note email", "content": "8.1. Note email KH/Partner/NH cung cấp", "step_code": "8.1", "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [5, 6, 7, 8]}]},
+                ],
+                "edges": [],
+                "uncertain_edges": [
+                    {"from_node": "sem_8", "to_node": "sem_8_1", "condition": "yes", "confidence": 0.42, "reason": "geometric_guess"}
+                ],
+                "annotations": [],
+                "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [0, 0, 100, 100]}],
+                "graph_confidence": 0.56,
+                "validation_errors": ["decision_missing_branches_or_uncertain_edges:sem_8"],
+                "topology_review_required": True,
+            },
+            "pages": [
+                {
+                    "page": 1,
+                    "semantic_nodes": [
+                        {"id": "sem_8", "semantic_node_type": "decision", "title": "8. KH/Partner/NH đồng ý cung cấp?", "content": "8. KH/Partner/NH đồng ý cung cấp?", "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [1, 2, 3, 4]}]},
+                    ],
+                    "annotations": [],
+                }
+            ],
+        }
+        ingestion.extract_workflow_units_v3 = lambda _filename, _raw_text, page_images=None, visual_context=None: (
+            [],
+            ["workflow_v3_fidelity_failed:workflow_v3_missing_visible_steps:8.1"],
+            {"workflow_fidelity_report": {"blockers": ["workflow_v3_missing_visible_steps:8.1"]}},
+        )
+        ingestion.extract_workflow_units_v2 = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_workflow_v2_disabled"])
+        ingestion.extract_workflow_units = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_workflow_legacy_disabled"])
+        ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], [])
+
+        chunks, warnings, ai_error = ingestion.try_ai_structuring(
+            filename="workflow.pdf",
+            content_type="application/pdf",
+            data=b"%PDF-1.4",
+            raw_text="8. KH/Partner/NH đồng ý cung cấp?\n8.1. Note email KH/Partner/NH cung cấp",
+            classification=classification,
+            visual_layout={"summary": {"shape_candidate_count": 2}},
+            raw_context={"workflow_semantic_refinement": semantic_refinement},
+        )
+
+        self.assertNotEqual(chunks, [])
+        self.assertTrue(all(chunk.metadata.get("extraction_status") == "degraded" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata.get("publish_blocked") for chunk in chunks))
+        self.assertIn("semantic_workflow_structuring_used_after_ai_failure", warnings)
+        self.assertIn("workflow_graph_requires_review", ai_error)
+
     def test_workflow_ai_without_atomic_units_is_not_structured_success(self) -> None:
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
 

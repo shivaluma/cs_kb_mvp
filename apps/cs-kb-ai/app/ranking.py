@@ -25,6 +25,15 @@ VALID_INTENTS = {
     "document_title",
     "generic",
 }
+INTENT_SPECIFICITY_PRIORITY = {
+    "forbidden_wording": 70,
+    "compliance": 60,
+    "wording": 50,
+    "macro": 45,
+    "document_title": 35,
+    "handling": 30,
+    "generic": 0,
+}
 RRF_K = 60
 
 
@@ -284,6 +293,7 @@ def seed_intent(query: str, config: dict[str, Any] | None = None) -> IntentMatch
     normalized_query = normalize_text(query)
     rules = config.get("intent_rules") if isinstance(config.get("intent_rules"), dict) else {}
     best = IntentMatch()
+    best_score: tuple[int, float, int, int] = (0, 0.0, 0, 0)
     for intent, rule in rules.items():
         if intent not in VALID_INTENTS or not isinstance(rule, dict):
             continue
@@ -292,8 +302,11 @@ def seed_intent(query: str, config: dict[str, Any] | None = None) -> IntentMatch
         if not matched:
             continue
         confidence = min(0.95, 0.55 + 0.15 * len(matched))
-        if len(matched) > len(best.matched_terms) or (len(matched) == len(best.matched_terms) and confidence > best.confidence):
+        specificity = max(len(normalize_text(term)) for term in matched)
+        score = (len(matched), confidence, specificity, INTENT_SPECIFICITY_PRIORITY.get(intent, 0))
+        if score > best_score:
             best = IntentMatch(intent=intent, confidence=confidence, matched_terms=matched)
+            best_score = score
     return best
 
 

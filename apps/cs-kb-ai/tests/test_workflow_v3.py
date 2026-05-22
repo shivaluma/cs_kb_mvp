@@ -187,6 +187,99 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         self.assertIn("workflow_v3_start_node_synthesized", report["warnings"])
         self.assertIn("workflow_v3_end_node_synthesized", report["warnings"])
 
+    def test_multi_step_visual_node_is_split_so_branch_targets_resolve(self) -> None:
+        raw_text = """
+7. Nhờ KH/Partner/NH cung cấp Email
+8. KH/Partner/NH đồng ý cung cấp?
+8.1. Note email KH/Partner/NH cung cấp vào ô Back up email
+8.2. Thông báo KH/Partner/NH trường hợp không cung cấp địa chỉ Email
+9. Vấn đề KH/Partner/NH yêu cầu hỗ trợ chỉ thuộc team Agent phụ trách?
+16. Agent tiếp nhận lại thông tin
+17. Kiểm tra và cung cấp hướng xử lý / kết quả cho Agent
+18. Phản hồi TX/KH dựa trên hướng dẫn / kết quả được cung cấp
+"""
+        transcription = {
+            "document_metadata": {"title": "Inbound call workflow"},
+            "canvas": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "image_size": [3600, 1600],
+                        "nodes": [
+                            {"id": "start", "text": "Thực hiện cuộc gọi vào", "node_type": "start", "shape_kind": "oval", "bbox": [100, 100, 260, 180]},
+                            {
+                                "id": "step_7_group",
+                                "text": "7. Nhờ\nKH/Partner/NH\ncung cấp Email\n8.1. Note email\nKH/Partner/NH cung cấp vào ô Back up email",
+                                "node_type": "action",
+                                "shape_kind": "rectangle",
+                                "lane": "Agent",
+                                "bbox": [350, 340, 650, 520],
+                            },
+                            {
+                                "id": "step_8",
+                                "step_code": "8",
+                                "text": "8. KH/Partner/NH đồng ý cung cấp?",
+                                "node_type": "decision",
+                                "shape_kind": "diamond",
+                                "lane": "Agent",
+                                "bbox": [700, 350, 900, 540],
+                            },
+                            {
+                                "id": "step_8_2",
+                                "step_code": "8.2",
+                                "text": "8.2. Thông báo KH/Partner/NH trường hợp KH/Partner/NH không cung cấp địa chỉ Email Be chỉ có thể phản hồi qua SĐT đăng ký",
+                                "node_type": "action",
+                                "shape_kind": "rectangle",
+                                "lane": "Agent",
+                                "bbox": [700, 620, 980, 760],
+                            },
+                            {"id": "step_9", "step_code": "9", "text": "9. Vấn đề KH/Partner/NH yêu cầu hỗ trợ chỉ thuộc team Agent phụ trách?", "node_type": "decision", "shape_kind": "diamond", "lane": "Agent", "bbox": [1060, 360, 1280, 540]},
+                            {"id": "step_10_1", "step_code": "10.1", "text": "10.1. Agent xử lý và tạo case tương ứng", "node_type": "action", "shape_kind": "rectangle", "lane": "Agent", "bbox": [1360, 330, 1580, 450], "terminal_state": "resolved"},
+                            {"id": "step_10_2", "step_code": "10.2", "text": "10.2. Hướng dẫn KH/Partner/NH liên hệ lại đúng kênh hỗ trợ theo quy định", "node_type": "action", "shape_kind": "rectangle", "lane": "Agent", "bbox": [1360, 500, 1580, 620], "terminal_state": "closed_with_response"},
+                            {"id": "step_16", "step_code": "16", "text": "16. Agent tiếp nhận lại thông tin", "node_type": "action", "shape_kind": "rectangle", "lane": "Agent", "bbox": [1880, 700, 2100, 820]},
+                            {"id": "step_17", "step_code": "17", "text": "17. Kiểm tra và cung cấp hướng xử lý / kết quả cho Agent", "node_type": "action", "shape_kind": "rectangle", "lane": "L2 ESC/TL BPLQ", "bbox": [2180, 700, 2420, 820]},
+                            {"id": "step_18", "step_code": "18", "text": "18. Phản hồi TX/KH dựa trên hướng dẫn / kết quả được cung cấp", "node_type": "action", "shape_kind": "rectangle", "lane": "Agent", "bbox": [2500, 700, 2780, 820], "terminal_state": "resolved"},
+                            {"id": "end", "text": "End", "node_type": "end", "shape_kind": "oval", "bbox": [3000, 100, 3120, 180]},
+                        ],
+                        "edges": [
+                            {"from_node": "start", "to_step_code": "7", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "7", "to_step_code": "8", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "8", "to_step_code": "8.1", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "8", "to_step_code": "8.2", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "8.1", "to_step_code": "9", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "8.2", "to_step_code": "9", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "9", "to_step_code": "10.1", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "9", "to_step_code": "10.2", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "16", "to_step_code": "17", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "17", "to_step_code": "18", "condition": "next", "confidence": 0.9},
+                        ],
+                    }
+                ]
+            },
+        }
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="inbound_call.pdf",
+            raw_text=raw_text,
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        nodes_by_code = {node["step_code"]: node for node in graph["nodes"] if node.get("step_code")}
+        self.assertIn("8.1", nodes_by_code)
+        self.assertIn("Note email", nodes_by_code["8.1"]["content"])
+        self.assertNotIn("8.1", report["missing_step_codes"])
+        self.assertFalse(any("edge_endpoint_not_resolved:8->8.1" == warning for warning in report["warnings"]))
+        self.assertFalse(any("workflow_v3_decision_missing_two_branches:8" == blocker for blocker in report["blockers"]))
+        self.assertFalse(any("workflow_v3_action_missing_terminal_or_outgoing:16" == blocker for blocker in report["blockers"]))
+        edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        self.assertIn(("node_8", "yes", "node_8_1"), edge_keys)
+        self.assertIn(("node_8", "no", "node_8_2"), edge_keys)
+        self.assertIn(("node_16", "next", "node_17"), edge_keys)
+
     def test_boundary_nodes_with_ambiguous_zero_ids_do_not_collide(self) -> None:
         transcription = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
         page = transcription["canvas"]["pages"][0]

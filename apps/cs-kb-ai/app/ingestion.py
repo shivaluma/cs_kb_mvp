@@ -558,7 +558,14 @@ def try_ai_structuring(
                     warnings.append("semantic_workflow_structuring_used_after_ai_failure")
                     if llm_warnings:
                         warnings.append(f"ai_workflow_structuring_rejected:{','.join(llm_warnings[:3])}")
-                    return mark_structured_chunks(semantic_chunks), warnings, ""
+                    review_error = workflow_graph_review_required_error(flow_candidates, "ai_failure")
+                    return mark_degraded_chunks(
+                        semantic_chunks,
+                        classification,
+                        review_error,
+                        "workflow_graph_requires_review",
+                        "degraded_structured_draft",
+                    ), warnings, review_error
                 return [], warnings, f"ai_workflow_structuring_failed:{','.join(llm_warnings)}"
             flow_candidates.append(workflow_flow_candidate("workflow_legacy", chunks, llm_warnings, raw_text, visual_context))
             selected = select_workflow_flow_candidate(flow_candidates)
@@ -583,7 +590,14 @@ def try_ai_structuring(
                         return mark_structured_chunks(selected_chunks), warnings, ""
                     warnings.append("semantic_workflow_structuring_used_after_ai_quality_reject")
                     warnings.append(f"ai_workflow_structuring_rejected:{quality_error or fidelity_error}")
-                    return mark_structured_chunks(semantic_chunks), warnings, ""
+                    review_error = workflow_graph_review_required_error(flow_candidates, quality_error or fidelity_error)
+                    return mark_degraded_chunks(
+                        semantic_chunks,
+                        classification,
+                        review_error,
+                        "workflow_graph_requires_review",
+                        "degraded_structured_draft",
+                    ), warnings, review_error
                 return [], warnings, f"ai_workflow_structuring_failed:{quality_error or fidelity_error}"
             return mark_structured_chunks(chunks), warnings, ""
     except Exception as exc:
@@ -2877,6 +2891,9 @@ def workflow_flow_candidate(
     quality_error = workflow_structuring_quality_error(chunks, flow_warnings)
     fidelity_error = workflow_graph_fidelity_quality_error(chunks, raw_text, visual_context)
     graph = workflow_graph_from_chunks(chunks)
+    flow_quality_error = workflow_flow_specific_quality_error(flow, graph)
+    if flow_quality_error:
+        quality_error = ",".join(part for part in [quality_error, flow_quality_error] if part)
     visible_codes = workflow_candidate_visible_codes(graph, raw_text, visual_context)
     covered_codes = sorted(workflow_graph_covered_step_codes(graph))
     source_step_coverage = ratio(len([code for code in visible_codes if code in set(covered_codes)]), len(visible_codes)) if visible_codes else 1.0
@@ -2929,6 +2946,23 @@ def workflow_flow_candidate(
     }
 
 
+def workflow_flow_specific_quality_error(flow: str, graph: dict[str, Any]) -> str:
+    if flow != "semantic_workflow_structuring":
+        return ""
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    uncertain_edges = graph.get("uncertain_edges") if isinstance(graph.get("uncertain_edges"), list) else []
+    validation_errors = graph.get("validation_errors") if isinstance(graph.get("validation_errors"), list) else []
+    if not edges:
+        return "semantic_workflow_graph_no_confirmed_edges"
+    if uncertain_edges:
+        return "semantic_workflow_graph_has_uncertain_edges"
+    if validation_errors:
+        return "semantic_workflow_graph_has_validation_errors"
+    if graph.get("topology_review_required"):
+        return "semantic_workflow_graph_requires_topology_review"
+    return ""
+
+
 def workflow_candidate_can_short_circuit(candidate: dict[str, Any]) -> bool:
     return bool(candidate.get("selectable")) and float(candidate.get("overall_fidelity_score") or 0) >= 0.82
 
@@ -2976,6 +3010,19 @@ def workflow_selection_warnings(candidates: list[dict[str, Any]], selected: dict
         f"workflow_flow_selection:{selected.get('flow')}:score={selected.get('overall_fidelity_score')}",
         "workflow_flow_selection_matrix:" + json.dumps(compact_scores, ensure_ascii=False, separators=(",", ":"))[:1600],
     ]
+
+
+def workflow_graph_review_required_error(candidates: list[dict[str, Any]], reason: str) -> str:
+    semantic = next((candidate for candidate in reversed(candidates) if candidate.get("flow") == "semantic_workflow_structuring"), None)
+    if semantic:
+        detail = (
+            semantic.get("quality_error")
+            or semantic.get("fidelity_error")
+            or reason
+            or "semantic_workflow_graph_candidate_needs_review"
+        )
+        return f"workflow_graph_requires_review:{detail}"
+    return f"workflow_graph_requires_review:{reason or 'topology_review_required'}"
 
 
 def apply_workflow_selection_metadata(chunks: list[Any], selected: dict[str, Any]) -> list[Any]:

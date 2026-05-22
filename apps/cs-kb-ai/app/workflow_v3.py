@@ -9,6 +9,7 @@ from app.schemas import WorkflowExtractionPayload
 
 STEP_CODE_RE = re.compile(r"(?<![\d/])(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[.)]?\s)", re.IGNORECASE)
 LINE_STEP_CODE_RE = re.compile(r"^\s*(?:yes|no|có|không)?\s*(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[.)]?\s)", re.IGNORECASE)
+MULTI_STEP_NODE_BOUNDARY_RE = re.compile(r"(?im)^\s*(?:yes|no|có|không)?\s*(?:bước\s*)?(\d{1,2}(?:\.\d{1,2})?)(?=[.)]?\s)")
 NOTE_MARKER_RE = re.compile(r"^\s*(?:\(\*+\)|\([a-z]\)|lưu ý|luu y|ghi chú|ghi chu|note|quy định audit|quy dinh audit)\b", re.IGNORECASE)
 VALID_EDGE_CONDITIONS = {"yes", "no", "next", "timeout", "escalation", "fallback", "handoff", "return", "retry"}
 EXTERNAL_CONTINUATION_STATES = {"continues_with_related_sop"}
@@ -176,7 +177,13 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
     raw_nodes: list[dict[str, Any]] = []
     conflicts: list[str] = []
     for page in canvas.get("pages", []):
-        for index, item in enumerate(page.get("nodes", []), start=1):
+        expanded_nodes = [
+            expanded
+            for item in page.get("nodes", [])
+            if isinstance(item, dict)
+            for expanded in split_multi_step_canvas_node(item)
+        ]
+        for index, item in enumerate(expanded_nodes, start=1):
             if not isinstance(item, dict):
                 continue
             text = node_text(item)
@@ -260,6 +267,41 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
         node.pop("source_ids", None)
     add_boundary_aliases(lookup, nodes)
     return nodes, lookup, conflicts
+
+
+def split_multi_step_canvas_node(item: dict[str, Any]) -> list[dict[str, Any]]:
+    text = str(item.get("text") or item.get("content") or item.get("title") or item.get("label") or "")
+    matches = list(MULTI_STEP_NODE_BOUNDARY_RE.finditer(text))
+    codes = [normalize_step_code(match.group(1)) for match in matches if normalize_step_code(match.group(1))]
+    unique_codes = list(dict.fromkeys(codes))
+    if len(unique_codes) < 2:
+        return [item]
+
+    output: list[dict[str, Any]] = []
+    original_id = str(item.get("id") or "")
+    for index, match in enumerate(matches):
+        code = normalize_step_code(match.group(1))
+        if not code:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        segment = normalize_display_text(text[match.start():end])
+        if not segment:
+            continue
+        split_item = {**item}
+        split_item["text"] = segment
+        split_item["content"] = segment
+        split_item["title"] = segment
+        split_item["step_code"] = code
+        if original_id:
+            split_item["id"] = f"{original_id}_step_{code.replace('.', '_')}"
+        metadata = split_item.get("metadata") if isinstance(split_item.get("metadata"), dict) else {}
+        split_item["metadata"] = {
+            **metadata,
+            "split_from_node_id": original_id,
+            "split_step_code": code,
+        }
+        output.append(split_item)
+    return output or [item]
 
 
 def compile_canvas_annotations(filename: str, canvas: dict[str, Any], node_lookup: dict[str, str]) -> list[dict[str, Any]]:
