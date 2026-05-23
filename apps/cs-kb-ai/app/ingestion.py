@@ -3661,9 +3661,7 @@ def is_marker_only_workflow_annotation(text: str) -> bool:
 
 def workflow_candidate_display_text(unit_type: str, content: str) -> str:
     text = str(content or "").strip()
-    if unit_type == "candidate_annotation":
-        return re.sub(r"\s+", " ", text).strip()
-    return text
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def build_workflow_semantic_refinement(

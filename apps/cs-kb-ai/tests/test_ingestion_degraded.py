@@ -854,6 +854,55 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(annotations[0].metadata["source_text"], raw_annotation)
         self.assertEqual(annotations[0].metadata["display_text"], annotations[0].content)
 
+    def test_workflow_degraded_fallback_normalizes_raw_ocr_line_breaks_for_all_candidate_units(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        raw_action = "16. Review the account\nstate with the\nescalation owner"
+        raw_decision = "17. Does the customer\nneed another\nsupport path?"
+        semantic_refinement = {
+            "workflow_graph_candidate": {"graph_confidence": 0.62, "uncertain_edges": [], "topology_review_required": True},
+            "pages": [
+                {
+                    "page": 1,
+                    "semantic_nodes": [
+                        {
+                            "id": "step_16",
+                            "semantic_node_type": "action",
+                            "title": "16. Review the account\nstate",
+                            "content": raw_action,
+                            "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [10, 20, 120, 160]}],
+                        },
+                        {
+                            "id": "step_17",
+                            "semantic_node_type": "decision",
+                            "title": "17. Does the customer\nneed another support path?",
+                            "content": raw_decision,
+                            "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [140, 20, 260, 160]}],
+                        },
+                    ],
+                    "annotations": [],
+                }
+            ],
+        }
+
+        chunks = ingestion.semantic_workflow_candidate_chunks(
+            "workflow.pdf",
+            semantic_refinement,
+            start_index=0,
+            classification=classification,
+            ai_error="workflow_graph_requires_review",
+        )
+
+        action = next(chunk for chunk in chunks if chunk.section == "candidate_action")
+        decision = next(chunk for chunk in chunks if chunk.section == "candidate_decision")
+        self.assertNotIn("\n", action.content)
+        self.assertNotIn("\n", decision.content)
+        self.assertEqual(action.content, "16. Review the account state with the escalation owner")
+        self.assertEqual(decision.content, "17. Does the customer need another support path?")
+        self.assertEqual(action.metadata["source_text"], raw_action)
+        self.assertEqual(decision.metadata["source_text"], raw_decision)
+        self.assertEqual(action.metadata["display_text"], action.content)
+        self.assertEqual(decision.metadata["display_text"], decision.content)
+
     def test_workflow_semantic_refine_does_not_treat_numbered_oval_as_start(self) -> None:
         self.assertEqual(
             ingestion.classify_semantic_node_type("10. Tạo case lưu trữ trên hệ thống", "start"),
