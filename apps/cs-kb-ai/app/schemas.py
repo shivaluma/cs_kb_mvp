@@ -60,6 +60,7 @@ ChatModelRoute = Literal[
     "high_risk",
     "complex",
     "google/gemini-2.5-flash",
+    "google/gemini-3.1-flash-lite-preview",
     "google/gemini-3-flash-preview",
     "anthropic/claude-3.5-haiku",
 ]

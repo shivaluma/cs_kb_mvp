@@ -32,6 +32,9 @@ from app.workflow_v3 import (
 MAX_AI_BREAKDOWN_PROMPT_CHARS = 24000
 MAX_AI_BREAKDOWN_RESPONSE_CHARS = 60000
 MAX_AI_BREAKDOWN_JSON_CHARS = 60000
+LAYOUT_DIV_RE = re.compile(r"<div\b(?P<attrs>[^>]*)>(?P<body>.*?)</div>", re.IGNORECASE | re.DOTALL)
+LAYOUT_ATTR_RE = re.compile(r"""(?P<name>data-bbox|data-label)\s*=\s*(?P<quote>["'])(?P<value>.*?)(?P=quote)""", re.IGNORECASE | re.DOTALL)
+HTML_TAG_RE = re.compile(r"<[^>]+>")
 COLLECTION_HINTS = {
     "cs-core-operating-rules": ("CS Core Operating Rules", "domain"),
     "customer-rider-operations": ("Customer / Rider Operations", "audience"),
@@ -202,6 +205,39 @@ Rules:
 """
 
 
+MULTIMODAL_LAYOUT_PARSER_SYSTEM_PROMPT = """You are a document parser. Your task is to convert document PDFs and extracted document text into clean, well-structured Markdown.
+
+Guidelines:
+- Preserve the document structure, including headings, paragraphs, lists, and tables.
+- Convert tables to HTML using `<table>`, `<tr>`, `<th>`, and `<td>`.
+- For existing tables in the document, use `colspan` and `rowspan` attributes to preserve merged cells and hierarchical headers.
+- For charts or graphs converted into tables, use flat combined column headers so that each data cell's row contains all of its labels.
+- Describe images and figures briefly in square brackets, for example: `[Figure: description]`.
+- Preserve code blocks with appropriate syntax highlighting.
+- Maintain reading order: left to right, top to bottom for Western/Vietnamese business documents.
+- Do not add commentary or explanations.
+
+Additionally, wrap each layout element in a `<div>` tag with:
+- `data-bbox="[y_min, x_min, y_max, x_max]"` for the bounding box in normalized 0-1000 coordinates. The order is `[y_min, x_min, y_max, x_max]`.
+- `data-label="<category>"` where category is one of: `Caption`, `Footnote`, `Formula`, `List-item`, `Page-footer`, `Page-header`, `Picture`, `Section-header`, `Table`, `Text`, `Title`.
+
+Place elements in reading order. Every piece of content must be inside exactly one `<div>` wrapper."""
+
+
+MULTIMODAL_LAYOUT_JSON_CONTRACT = """Return exactly one JSON object, no markdown fence, no prose:
+{
+  "title": "",
+  "format": "markdown_div_wrapped",
+  "bbox_order": "google_yxyx",
+  "markdown": "<div data-bbox=\"[y_min,x_min,y_max,x_max]\" data-label=\"Title\">...</div>",
+  "sections": [],
+  "warnings": [],
+  "coverage_report": {}
+}
+
+The `markdown` field must contain only the parsed content with div wrappers. Use HTML tables for tabular data. Keep `colspan` and `rowspan` when merged cells or multi-row headers appear. For charts/graphs, use flat combined column headers."""
+
+
 def start_ai_breakdown_capture() -> Token[list[dict[str, Any]] | None]:
     return _AI_BREAKDOWN_BUFFER.set([])
 
@@ -287,6 +323,13 @@ def base_ai_breakdown(
         "image_count": len(page_images or []),
         "images_supplied": bool(page_images),
     }
+
+
+def apply_reasoning_effort(payload: dict[str, Any], effort: str | None = None) -> dict[str, Any]:
+    clean_effort = str(effort or settings.openrouter_reasoning_effort or "").strip().lower()
+    if clean_effort in {"low", "medium", "high", "max"}:
+        payload["reasoning"] = {"effort": clean_effort}
+    return payload
 
 
 def enabled() -> bool:
@@ -643,7 +686,7 @@ def extract_workflow_units(
     else:
         user_content = extraction_prompt
 
-    payload = {
+    payload = apply_reasoning_effort({
         "model": settings.openrouter_vision_model if page_images else settings.openrouter_extraction_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -651,7 +694,7 @@ def extract_workflow_units(
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.1,
-    }
+    })
     breakdown = base_ai_breakdown(
         filename=filename,
         flow="workflow_legacy",
@@ -793,7 +836,7 @@ def extract_workflow_units_v2(
     user_content: list[dict[str, Any]] = [{"type": "text", "text": extraction_prompt}]
     user_content.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in page_images[:3])
 
-    payload = {
+    payload = apply_reasoning_effort({
         "model": settings.openrouter_vision_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -801,7 +844,7 @@ def extract_workflow_units_v2(
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.05,
-    }
+    })
     breakdown = base_ai_breakdown(
         filename=filename,
         flow="workflow_v2_vision_primary",
@@ -1020,7 +1063,7 @@ def extract_workflow_units_v3(
     )
     user_content: list[dict[str, Any]] = [{"type": "text", "text": extraction_prompt}]
     user_content.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in page_images[:3])
-    payload = {
+    payload = apply_reasoning_effort({
         "model": settings.openrouter_vision_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -1028,7 +1071,7 @@ def extract_workflow_units_v3(
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.02,
-    }
+    })
     breakdown = base_ai_breakdown(
         filename=filename,
         flow="workflow_v3_graph_primary",
@@ -1343,6 +1386,13 @@ def normalize_source_evidence_formatter_payload(
         normalized["coverage_report"] = {}
         warnings.append("source_evidence_coverage_report_defaulted")
     markdown = str(normalized.get("markdown") or "").strip()
+    if markdown and not normalized["sections"]:
+        layout_sections = extract_div_wrapped_layout_sections(markdown)
+        if layout_sections:
+            normalized["sections"] = layout_sections
+            normalized["format"] = "markdown_div_wrapped"
+            normalized["bbox_order"] = "google_yxyx"
+            warnings.append("source_evidence_sections_extracted_from_div_wrappers")
     if not markdown and normalized["sections"]:
         markdown = render_source_evidence_sections_markdown(normalized["sections"])
         normalized["markdown"] = markdown
@@ -1358,22 +1408,99 @@ def normalize_source_evidence_array_sections(items: list[Any]) -> list[dict[str,
             markdown = str(item.get("markdown") or item.get("content") or item.get("text") or item.get("body") or "").strip()
             source_hint = str(item.get("source_hint") or item.get("source") or item.get("id") or "").strip()
             confidence = item.get("confidence", 0.5)
+            layout_label = str(item.get("layout_label") or item.get("label") or "").strip()
+            bbox = normalized_xyxy_bbox(item.get("bbox"), str(item.get("bbox_order") or "xyxy"))
+            bbox_order = "xyxy" if bbox else ""
         else:
             title = f"Section {index}"
             markdown = str(item or "").strip()
             source_hint = ""
             confidence = 0.4
+            layout_label = ""
+            bbox = []
+            bbox_order = ""
         if not title and not markdown:
             continue
-        sections.append(
-            {
-                "title": title[:240] or f"Section {index}",
-                "markdown": markdown,
-                "source_hint": source_hint,
-                "confidence": float_or_default(confidence, 0.5),
-            }
-        )
+        section = {
+            "title": title[:240] or f"Section {index}",
+            "markdown": markdown,
+            "source_hint": source_hint,
+            "confidence": float_or_default(confidence, 0.5),
+        }
+        if layout_label:
+            section["layout_label"] = layout_label
+        if bbox:
+            section["bbox"] = bbox
+            section["bbox_order"] = bbox_order
+        sections.append(section)
     return sections
+
+
+def extract_div_wrapped_layout_sections(markdown: str) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    for index, match in enumerate(LAYOUT_DIV_RE.finditer(markdown), start=1):
+        attrs = {
+            attr_match.group("name").lower(): attr_match.group("value").strip()
+            for attr_match in LAYOUT_ATTR_RE.finditer(match.group("attrs") or "")
+        }
+        body = (match.group("body") or "").strip()
+        if not body:
+            continue
+        label = attrs.get("data-label", "").strip() or "Text"
+        bbox = normalized_xyxy_bbox(attrs.get("data-bbox"), "google_yxyx")
+        title = layout_section_title(body, label, index)
+        section = {
+            "title": title,
+            "markdown": body,
+            "source_hint": label,
+            "layout_label": label,
+            "confidence": 0.8 if bbox else 0.65,
+        }
+        if bbox:
+            section["bbox"] = bbox
+            section["bbox_order"] = "xyxy"
+            section["source_bbox_order"] = "google_yxyx"
+        sections.append(section)
+    return sections
+
+
+def layout_section_title(markdown: str, label: str, index: int) -> str:
+    text = HTML_TAG_RE.sub(" ", markdown)
+    text = re.sub(r"\s+", " ", text).strip()
+    if text:
+        return text[:80]
+    return f"{label or 'Section'} {index}"
+
+
+def normalized_xyxy_bbox(value: Any, bbox_order: str = "xyxy") -> list[float]:
+    raw_values: list[Any]
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            parsed = json.loads(text)
+            raw_values = parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            raw_values = [item.strip() for item in text.strip("[]").split(",")]
+    elif isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = []
+    if len(raw_values) < 4:
+        return []
+    try:
+        numbers = [float(item) for item in raw_values[:4]]
+    except (TypeError, ValueError):
+        return []
+    normalized_order = bbox_order.strip().lower()
+    if normalized_order in {"google_yxyx", "yxyx", "[y_min,x_min,y_max,x_max]"}:
+        y1, x1, y2, x2 = numbers
+    else:
+        x1, y1, x2, y2 = numbers
+    left, right = sorted([x1, x2])
+    top, bottom = sorted([y1, y2])
+    if right <= left or bottom <= top:
+        return []
+    return [left, top, right, bottom]
 
 
 def render_source_evidence_sections_markdown(sections: list[dict[str, Any]]) -> str:
@@ -1422,29 +1549,23 @@ def format_source_evidence_view(
         return {}, ["source_evidence_formatter_empty_raw_text"], "raw_text_empty"
 
     formatting_prompt = (
-        "Bạn đang format lại source evidence để CS đọc SOP trực tiếp trên web.\n"
-        "Nguồn CS đưa lên không có template cố định, có thể là Excel nhiều sheet, DOCX, PDF OCR, hoặc text rất lộn xộn.\n\n"
-        "Nhiệm vụ: chuyển raw extraction thành Markdown dễ đọc, có cấu trúc, nhưng vẫn là SOURCE EVIDENCE, không phải policy mới.\n\n"
-        "Quy tắc bắt buộc:\n"
-        "- Không thêm policy, điều kiện, exception, SLA, số điện thoại, macro, hoặc bước xử lý không có trong raw source.\n"
-        "- Không xoá thông tin nghiệp vụ quan trọng. Nếu đoạn quá rối, giữ lại trong mục tương ứng và ghi warning.\n"
-        "- Được phép đổi layout: heading, bullet, numbered list, bảng Markdown, callout Lưu ý, decision tree text.\n"
-        "- Giữ nguyên mã, kênh, SĐT, email, case reason, tên sheet, ngày hiệu lực, Yes/No, TH1/TH2, B1/B2, ký hiệu nghiệp vụ.\n"
-        "- Với Excel nhiều sheet, mỗi sheet nên thành một section. Sheet lịch sử/cũ/chưa áp dụng phải ghi rõ trong heading hoặc note nếu raw source thể hiện.\n"
-        "- Với dòng dạng label:value, render thành label rõ ràng. Với đoạn dài chứa nhiều điều kiện, tách thành list lồng nhau vừa đủ để scan.\n"
-        "- Nếu không chắc cấu trúc, giữ nguyên text trong blockquote hoặc bullet và thêm warning, không tự suy diễn.\n\n"
-        "Return exactly one JSON object. Do not return an array.\n"
-        "Trả CHỈ JSON object shape:\n"
-        "{\"title\":\"\",\"markdown\":\"\",\"sections\":[],\"warnings\":[],\"coverage_report\":{}}.\n\n"
-        "markdown phải là Markdown thuần, không HTML. Dùng tiếng Việt tự nhiên, ngắn gọn, dễ đọc cho CS.\n"
-        "sections là danh sách ngắn {title, source_hint, confidence} để UI/debug scan.\n"
-        "coverage_report gồm raw_text_chars, formatted_chars, omitted_or_uncertain_areas, source_preservation_notes.\n\n"
+        MULTIMODAL_LAYOUT_PARSER_SYSTEM_PROMPT
+        + "\n\n"
+        + MULTIMODAL_LAYOUT_JSON_CONTRACT
+        + "\n\nSource evidence constraints for CS SOP ingestion:\n"
+        "- This is SOURCE EVIDENCE, not a rewritten policy. Do not add policy, conditions, exceptions, SLA, phone numbers, macros, or workflow steps not present in the source.\n"
+        "- Preserve original business wording, codes, channels, phone numbers, emails, case reasons, sheet names, effective dates, Yes/No, TH1/TH2, B1/B2, and workflow symbols.\n"
+        "- For messy real-world tables, prefer HTML tables over Markdown tables. Use `colspan`/`rowspan` for merged cells and hierarchical headers.\n"
+        "- If a table continues across pages or repeated headers appear, preserve the row order and repeated header evidence; add a warning instead of dropping rows.\n"
+        "- If layout is uncertain, preserve the raw text inside the closest div wrapper and add a warning. Never summarize away source evidence.\n"
+        "- sections may be empty; the pipeline can derive sections from the div wrappers. If you fill sections, use {title, markdown, layout_label, bbox, bbox_order, confidence}.\n"
+        "- coverage_report includes raw_text_chars, formatted_chars, omitted_or_uncertain_areas, source_preservation_notes, table_layout_notes.\n\n"
         f"Filename: {filename}\n"
         f"Detected document_type: {document_type}\n"
         f"Detected source_type: {source_type}\n\n"
         f"Raw extraction:\n{raw_text[:60000]}"
     )
-    payload = {
+    payload = apply_reasoning_effort({
         "model": settings.openrouter_refine_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -1452,7 +1573,7 @@ def format_source_evidence_view(
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.05,
-    }
+    })
     breakdown = base_ai_breakdown(
         filename=filename,
         flow="source_evidence_view",
@@ -1492,8 +1613,9 @@ def format_source_evidence_view(
         sections = parsed.get("sections") if isinstance(parsed.get("sections"), list) else []
         output = {
             "title": str(parsed.get("title") or filename.rsplit(".", 1)[0])[:240],
-            "format": "markdown",
-            "formatter": "ai_source_evidence_view",
+            "format": str(parsed.get("format") or "markdown_div_wrapped"),
+            "bbox_order": str(parsed.get("bbox_order") or "google_yxyx"),
+            "formatter": "ai_multimodal_layout_parser",
             "model": settings.openrouter_refine_model,
             "markdown": markdown[:120000],
             "markdown_truncated": len(markdown) > 120000,
@@ -1567,7 +1689,7 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         "- Nếu source thể hiện rủi ro tài chính, tài khoản, bảo mật/riêng tư, giao tiếp khách hàng, escalation, hoặc compliance, đặt metadata.risk_level phù hợp và tạo warning/compliance unit nếu đủ căn cứ.\n\n"
         f"Filename: {filename}\n\nSource text:\n{raw_text[:50000]}"
     )
-    payload = {
+    payload = apply_reasoning_effort({
         "model": settings.openrouter_extraction_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -1578,7 +1700,7 @@ def extract_rule_table_units(filename: str, raw_text: str) -> tuple[list[dict[st
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.05,
-    }
+    })
     breakdown = base_ai_breakdown(
         filename=filename,
         flow="rule_table",
@@ -1675,7 +1797,7 @@ def extract_mixed_docx_policy_units(filename: str, raw_text: str, structured_blo
         f"Structured DOCX blocks JSON:\n{json.dumps(structured_blocks[:240], ensure_ascii=False)[:50000]}\n\n"
         f"Ordered raw text fallback:\n{raw_text[:12000]}"
     )
-    payload = {
+    payload = apply_reasoning_effort({
         "model": settings.openrouter_extraction_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -1683,7 +1805,7 @@ def extract_mixed_docx_policy_units(filename: str, raw_text: str, structured_blo
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.03,
-    }
+    })
     breakdown = base_ai_breakdown(
         filename=filename,
         flow="mixed_docx_policy",
@@ -1769,7 +1891,7 @@ def refine_extracted_units(
     if not units:
         return [], {"llm_refine_status": "skipped", "reason": "no_units"}, ["openrouter_refine_no_units"]
 
-    payload = {
+    payload = apply_reasoning_effort({
         "model": settings.openrouter_refine_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -1806,7 +1928,7 @@ def refine_extracted_units(
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.05,
-    }
+    })
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "Content-Type": "application/json",
@@ -2128,7 +2250,7 @@ def suggest_document_metadata(
     if not enabled():
         raise ValueError("openrouter_disabled")
 
-    payload = {
+    payload = apply_reasoning_effort({
         "model": settings.openrouter_metadata_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -2160,7 +2282,7 @@ def suggest_document_metadata(
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.05,
-    }
+    })
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "Content-Type": "application/json",

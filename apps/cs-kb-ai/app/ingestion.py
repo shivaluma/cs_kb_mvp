@@ -6177,6 +6177,28 @@ def build_source_evidence_section_chunks(
             "coverage_report": payload.get("coverage_report") if isinstance(payload.get("coverage_report"), dict) else {},
         }
 
+    layout_sections = payload.get("sections") if isinstance(payload.get("sections"), list) else []
+    layout_chunks = build_layout_source_evidence_chunks(
+        filename=filename,
+        classification=classification,
+        sections=layout_sections,
+        existing_count=len(existing_chunks),
+        formatter=str(payload.get("formatter") or "unknown_formatter"),
+        model=str(payload.get("model") or ""),
+    )
+    if layout_chunks:
+        return layout_chunks[:80], {
+            "status": "completed",
+            "reason": "",
+            "raw_text_chars": len(raw_text or ""),
+            "formatted_chars": len(source_text),
+            "source_text_kind": "layout_sections",
+            "formatter": str(payload.get("formatter") or "unknown_formatter"),
+            "section_count": len(layout_chunks[:80]),
+            "source_sections_truncated": len(layout_chunks) > 80,
+            "coverage_report": payload.get("coverage_report") if isinstance(payload.get("coverage_report"), dict) else {},
+        }
+
     base_chunks = chunk_text(source_text, target_tokens=360, overlap_tokens=0)
     max_sections = 80
     source_chunks: list[Chunk] = []
@@ -6256,6 +6278,77 @@ def build_source_evidence_section_chunks(
         "coverage_report": coverage_report,
     }
     return source_chunks, report
+
+
+def build_layout_source_evidence_chunks(
+    *,
+    filename: str,
+    classification: Any,
+    sections: list[Any],
+    existing_count: int,
+    formatter: str,
+    model: str,
+) -> list[Chunk]:
+    chunks: list[Chunk] = []
+    for offset, section in enumerate(sections[:80]):
+        if not isinstance(section, dict):
+            continue
+        content = str(section.get("markdown") or section.get("content") or section.get("text") or "").strip()
+        if not content:
+            continue
+        title = str(section.get("title") or section.get("layout_label") or f"Source evidence {offset + 1}").strip()
+        bbox = section.get("bbox") if isinstance(section.get("bbox"), list) and len(section.get("bbox")) >= 4 else []
+        source_ref: dict[str, Any] = {
+            "source_type": "source_evidence",
+            "source_file": filename,
+            "section_index": offset + 1,
+            "line_start": offset + 1,
+            "line_end": offset + 1,
+            "derived_from": "layout_sections",
+            "layout_label": str(section.get("layout_label") or ""),
+        }
+        if filename.lower().endswith(".pdf"):
+            source_ref["page"] = int(section.get("page") or 1)
+        if bbox:
+            source_ref["bbox"] = [float(value) for value in bbox[:4]]
+            source_ref["bbox_order"] = "xyxy"
+        chunks.append(
+            Chunk(
+                chunk_index=existing_count + len(chunks),
+                section="source_evidence",
+                heading=title[:240] or f"Source evidence {offset + 1}",
+                content=content,
+                token_count=len(tokenize(content)),
+                metadata={
+                    "unit_type": "source_evidence_section",
+                    "retrieval_scope": "source_evidence",
+                    "answer_role": "evidence_context",
+                    "source_evidence_only": True,
+                    "document_layer_role": "source_evidence",
+                    "document_type": classification.document_type,
+                    "source_type": classification.source_type,
+                    "structure_type": "layout_section",
+                    "source_filename": filename,
+                    "source_text_kind": "layout_sections",
+                    "source_view_formatter": formatter,
+                    **({"source_view_model": model} if model else {}),
+                    "layout_label": str(section.get("layout_label") or ""),
+                    "review_status": "approved",
+                    "confidence": float(section.get("confidence") or 0.8),
+                    "requires_human_review": False,
+                    "extraction_status": "structured",
+                    "extraction_lifecycle_status": "source_evidence_indexed",
+                    "publish_blocked": False,
+                    "publish_blocked_reason": "",
+                    "source_refs": [source_ref],
+                    "source_ref_quality": "bbox" if bbox else "structured",
+                    "source_ref_acknowledged": True,
+                    "production_ready_source_refs": True,
+                    "section_path": [title[:240] or f"Source evidence {offset + 1}"],
+                },
+            )
+        )
+    return chunks
 
 
 def build_structural_source_evidence_chunks(

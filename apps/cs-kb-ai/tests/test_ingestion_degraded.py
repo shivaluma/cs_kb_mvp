@@ -276,6 +276,46 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(full_sop["metadata"]["document_layer_role"], "overview")
         self.assertTrue(full_sop["metadata"]["full_source_in_source_evidence_sections"])
 
+    def test_source_evidence_chunks_preserve_layout_section_bbox_refs(self) -> None:
+        classification = ingestion.classify_document(
+            "purchase-order.pdf",
+            "application/pdf",
+            "Purchase order\nItem 030 quantity 4",
+        )
+        payload = {
+            "formatter": "ai_multimodal_layout_parser",
+            "model": "google/gemini-3.1-flash-lite-preview",
+            "markdown": '<div data-bbox="[100,50,180,950]" data-label="Table"><table><tr><th colspan="2">Qty</th></tr><tr><td>030</td><td>4</td></tr></table></div>',
+            "sections": [
+                {
+                    "title": "Table",
+                    "markdown": '<table><tr><th colspan="2">Qty</th></tr><tr><td>030</td><td>4</td></tr></table>',
+                    "layout_label": "Table",
+                    "bbox": [50.0, 100.0, 950.0, 180.0],
+                    "bbox_order": "xyxy",
+                    "confidence": 0.85,
+                }
+            ],
+            "coverage_report": {"raw_text_chars": 28, "formatted_chars": 128},
+        }
+
+        chunks, report = ingestion.build_source_evidence_section_chunks(
+            filename="purchase-order.pdf",
+            raw_text="Purchase order\nItem 030 quantity 4",
+            classification=classification,
+            source_view_payload=payload,
+            raw_context={},
+            existing_chunks=[],
+        )
+
+        self.assertEqual(report["source_text_kind"], "layout_sections")
+        self.assertEqual(report["formatter"], "ai_multimodal_layout_parser")
+        self.assertEqual(len(chunks), 1)
+        self.assertIn('colspan="2"', chunks[0].content)
+        self.assertEqual(chunks[0].metadata["source_refs"][0]["page"], 1)
+        self.assertEqual(chunks[0].metadata["source_refs"][0]["bbox"], [50.0, 100.0, 950.0, 180.0])
+        self.assertEqual(chunks[0].metadata["source_ref_quality"], "bbox")
+
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
         data = workbook_bytes(

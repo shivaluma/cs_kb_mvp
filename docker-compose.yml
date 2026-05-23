@@ -41,9 +41,12 @@ services:
       QDRANT_TIMEOUT_SECONDS: ${QDRANT_TIMEOUT_SECONDS:-3}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/auto}
-      OPENROUTER_REFINE_MODEL: ${OPENROUTER_REFINE_MODEL:-google/gemini-3-flash-preview}
-      OPENROUTER_VISION_MODEL: ${OPENROUTER_VISION_MODEL:-google/gemini-3-flash-preview}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-3.1-flash-lite-preview}
+      OPENROUTER_EXTRACTION_MODEL: ${OPENROUTER_EXTRACTION_MODEL:-google/gemini-3.1-flash-lite-preview}
+      OPENROUTER_REFINE_MODEL: ${OPENROUTER_REFINE_MODEL:-google/gemini-3.1-flash-lite-preview}
+      OPENROUTER_VISION_MODEL: ${OPENROUTER_VISION_MODEL:-google/gemini-3.1-flash-lite-preview}
+      OPENROUTER_METADATA_MODEL: ${OPENROUTER_METADATA_MODEL:-google/gemini-3.1-flash-lite-preview}
+      OPENROUTER_REASONING_EFFORT: ${OPENROUTER_REASONING_EFFORT:-low}
       MEILI_HOST: ${MEILI_HOST:-http://meilisearch:7700}
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-dev_master_key}
       RERANK_PROVIDER: ${RERANK_PROVIDER:-none}

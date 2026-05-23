@@ -51,8 +51,8 @@ import type {
 const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
   {
     route: "simple",
-    label: "Gemini Flash Lite",
-    model: "google/gemini-2.5-flash-lite",
+    label: "Gemini 3.1 Flash Lite",
+    model: "google/gemini-3.1-flash-lite-preview",
     description: "Simple factual SOP Q&A, nhanh và rẻ cho câu hỏi tra cứu ngắn.",
   },
   {
@@ -80,10 +80,10 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
     description: "Manual model override cân bằng tốc độ và chất lượng cho SOP chat.",
   },
   {
-    route: "google/gemini-3-flash-preview",
-    label: "Gemini 3 Flash Preview",
-    model: "google/gemini-3-flash-preview",
-    description: "Manual model override cho câu hỏi nhiều nguồn hoặc cần reasoning mới hơn.",
+    route: "google/gemini-3.1-flash-lite-preview",
+    label: "Gemini 3.1 Flash Lite Preview",
+    model: "google/gemini-3.1-flash-lite-preview",
+    description: "Manual model override cho Gemini multimodal/parser prompt và grounded SOP chat.",
   },
   {
     route: "anthropic/claude-3.5-haiku",

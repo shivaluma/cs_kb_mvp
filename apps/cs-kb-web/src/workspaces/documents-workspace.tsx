@@ -2601,6 +2601,10 @@ function SourceViewer({
 }
 
 function MarkdownEvidence({ compact = false, markdown }: { compact?: boolean; markdown: string }) {
+  const layoutBlocks = layoutEvidenceBlocks(markdown);
+  if (layoutBlocks.length) {
+    return <LayoutEvidenceBlocks blocks={layoutBlocks} compact={compact} />;
+  }
   const blocks = markdownTableAwareBlocks(markdown);
   return (
     <div className={compact ? "space-y-2 text-xs leading-5" : "space-y-3 p-5 text-sm leading-6"}>
@@ -2613,6 +2617,38 @@ function MarkdownEvidence({ compact = false, markdown }: { compact?: boolean; ma
           );
         }
         return <MarkdownLine compact={compact} key={`line-${index}`} line={block.lines[0] ?? ""} />;
+      })}
+    </div>
+  );
+}
+
+function LayoutEvidenceBlocks({
+  blocks,
+  compact,
+}: {
+  blocks: Array<{ bbox: string; body: string; label: string }>;
+  compact: boolean;
+}) {
+  return (
+    <div className={compact ? "space-y-2 text-xs leading-5" : "space-y-3 p-5 text-sm leading-6"}>
+      {blocks.map((block, index) => {
+        const safeHtml = sanitizeLayoutHtml(block.body);
+        return (
+          <section className="rounded-md border bg-background/70 p-3" key={`${block.label}-${index}`}>
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+              <span className="rounded bg-muted px-2 py-0.5 font-medium text-foreground">{block.label || "Text"}</span>
+              {block.bbox ? <span>bbox {block.bbox}</span> : null}
+            </div>
+            {safeHtml ? (
+              <div
+                className="source-layout-html overflow-auto text-muted-foreground [&_table]:w-full [&_table]:border-collapse [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:bg-muted/35 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold [&_tr]:align-top"
+                dangerouslySetInnerHTML={{ __html: safeHtml }}
+              />
+            ) : (
+              <pre className="whitespace-pre-wrap font-sans text-muted-foreground">{stripHtmlTags(block.body)}</pre>
+            )}
+          </section>
+        );
       })}
     </div>
   );
@@ -2658,6 +2694,59 @@ function MarkdownLine({ compact, line }: { compact: boolean; line: string }) {
     );
   }
   return <p className="text-muted-foreground">{inlineMarkdown(trimmed)}</p>;
+}
+
+function layoutEvidenceBlocks(markdown: string) {
+  const blocks: Array<{ bbox: string; body: string; label: string }> = [];
+  const divPattern = /<div\b([^>]*)>([\s\S]*?)<\/div>/gi;
+  for (const match of markdown.matchAll(divPattern)) {
+    const attrs = match[1] ?? "";
+    const body = (match[2] ?? "").trim();
+    if (!body) {
+      continue;
+    }
+    blocks.push({
+      bbox: attrValue(attrs, "data-bbox"),
+      label: attrValue(attrs, "data-label") || "Text",
+      body,
+    });
+  }
+  return blocks;
+}
+
+function attrValue(attrs: string, name: string) {
+  const pattern = new RegExp(`${name}\\s*=\\s*["']([^"']*)["']`, "i");
+  return attrs.match(pattern)?.[1]?.trim() ?? "";
+}
+
+function sanitizeLayoutHtml(html: string) {
+  if (typeof window === "undefined" || typeof DOMParser === "undefined") {
+    return "";
+  }
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(`<div>${html}</div>`, "text/html");
+  const allowedTags = new Set(["TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "CAPTION", "BR", "STRONG", "EM", "B", "I", "U", "CODE", "PRE", "P", "UL", "OL", "LI", "SPAN"]);
+  const allowedAttrs = new Set(["colspan", "rowspan"]);
+  const walk = (node: Element) => {
+    for (const child of Array.from(node.children)) {
+      if (!allowedTags.has(child.tagName)) {
+        child.replaceWith(doc.createTextNode(child.textContent ?? ""));
+        continue;
+      }
+      for (const attr of Array.from(child.attributes)) {
+        if (!allowedAttrs.has(attr.name.toLowerCase())) {
+          child.removeAttribute(attr.name);
+        }
+      }
+      walk(child);
+    }
+  };
+  walk(doc.body);
+  return doc.body.firstElementChild?.innerHTML ?? "";
+}
+
+function stripHtmlTags(value: string) {
+  return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function markdownTableAwareBlocks(markdown: string) {

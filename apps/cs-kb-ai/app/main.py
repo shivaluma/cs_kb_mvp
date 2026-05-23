@@ -150,7 +150,7 @@ def chat_model_routes() -> dict[str, Any]:
         "routes": [
             {
                 "route": "simple",
-                "label": "Gemini Flash Lite",
+                "label": "Gemini 3.1 Flash Lite",
                 "model": settings.openrouter_chat_simple_model,
                 "description": "Simple factual SOP Q&A.",
             },
@@ -179,10 +179,10 @@ def chat_model_routes() -> dict[str, Any]:
                 "description": "Manual model override for balanced speed and quality on grounded SOP chat.",
             },
             {
-                "route": "google/gemini-3-flash-preview",
-                "label": "Gemini 3 Flash Preview",
+                "route": "google/gemini-3.1-flash-lite-preview",
+                "label": "Gemini 3.1 Flash Lite Preview",
                 "model": settings.openrouter_chat_gemini_3_flash_model,
-                "description": "Manual model override for newer Gemini reasoning on multi-source SOP questions.",
+                "description": "Manual model override for low-cost multimodal Gemini parsing and grounded SOP questions.",
             },
             {
                 "route": "anthropic/claude-3.5-haiku",

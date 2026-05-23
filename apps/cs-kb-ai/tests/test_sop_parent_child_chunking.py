@@ -6,7 +6,7 @@ from io import BytesIO
 from docx import Document
 
 from app import ingestion
-from app.openrouter import normalize_source_evidence_formatter_payload, source_evidence_raw_fallback
+from app.openrouter import apply_reasoning_effort, normalize_source_evidence_formatter_payload, source_evidence_raw_fallback
 from app.retrieval import to_result
 from app.schemas import DisplayContext, DisplayHighlight, SourceAnchor
 from app.text_processing import DOCX_CONTENT_TYPE, classify_document, extract_docx_structure
@@ -126,6 +126,43 @@ def test_formatter_normalizes_array_and_preserves_raw_fallback() -> None:
     fallback = source_evidence_raw_fallback("source.docx", "raw source evidence", "invalid_json")
     assert fallback["markdown"] == "raw source evidence"
     assert "raw_source_evidence_preserved" in fallback["warnings"]
+
+
+def test_formatter_extracts_div_wrapped_layout_sections_and_google_bboxes() -> None:
+    parsed, warnings = normalize_source_evidence_formatter_payload(
+        {
+            "title": "Purchase order",
+            "markdown": (
+                '<div data-bbox="[100,50,180,950]" data-label="Title">Purchase order</div>\n'
+                '<div data-bbox="[200,40,500,960]" data-label="Table">'
+                '<table><tr><th rowspan="2">Item</th><th colspan="2">Qty</th></tr>'
+                "<tr><th>Ordered</th><th>Backorder</th></tr><tr><td>030</td><td>4</td><td>1</td></tr></table>"
+                "</div>"
+            ),
+            "sections": [],
+            "warnings": [],
+            "coverage_report": {},
+        },
+        document_title="Fallback",
+        raw_text="Purchase order raw",
+    )
+
+    assert "source_evidence_sections_extracted_from_div_wrappers" in warnings
+    assert parsed["format"] == "markdown_div_wrapped"
+    assert parsed["bbox_order"] == "google_yxyx"
+    assert parsed["sections"][0]["layout_label"] == "Title"
+    assert parsed["sections"][0]["bbox"] == [50.0, 100.0, 950.0, 180.0]
+    assert parsed["sections"][1]["layout_label"] == "Table"
+    assert 'colspan="2"' in parsed["sections"][1]["markdown"]
+    assert 'rowspan="2"' in parsed["sections"][1]["markdown"]
+
+
+def test_reasoning_effort_is_added_to_openrouter_payloads() -> None:
+    payload = {"model": "google/gemini-3.1-flash-lite-preview", "messages": []}
+
+    apply_reasoning_effort(payload, "low")
+
+    assert payload["reasoning"] == {"effort": "low"}
 
 
 def test_retrieval_result_contract_contains_matched_parent_and_scroll_target() -> None:
@@ -250,6 +287,12 @@ class SOPParentChildChunkingTest(unittest.TestCase):
 
     def test_formatter_normalizes_array_and_preserves_raw_fallback(self) -> None:
         test_formatter_normalizes_array_and_preserves_raw_fallback()
+
+    def test_formatter_extracts_div_wrapped_layout_sections_and_google_bboxes(self) -> None:
+        test_formatter_extracts_div_wrapped_layout_sections_and_google_bboxes()
+
+    def test_reasoning_effort_is_added_to_openrouter_payloads(self) -> None:
+        test_reasoning_effort_is_added_to_openrouter_payloads()
 
     def test_retrieval_result_contract_contains_matched_parent_and_scroll_target(self) -> None:
         test_retrieval_result_contract_contains_matched_parent_and_scroll_target()

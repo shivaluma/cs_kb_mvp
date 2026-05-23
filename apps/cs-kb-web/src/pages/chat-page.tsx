@@ -373,6 +373,7 @@ function isChatModelRoute(value: unknown): value is ChatModelRoute {
     value === "high_risk" ||
     value === "complex" ||
     value === "google/gemini-2.5-flash" ||
+    value === "google/gemini-3.1-flash-lite-preview" ||
     value === "google/gemini-3-flash-preview" ||
     value === "anthropic/claude-3.5-haiku"
   );

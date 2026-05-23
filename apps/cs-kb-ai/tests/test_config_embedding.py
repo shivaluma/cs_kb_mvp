@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from app.config import ADMIN_RESET_CONFIRMATION, DEFAULT_EMBEDDING_MODEL, Settings
+from app.config import ADMIN_RESET_CONFIRMATION, DEFAULT_DOCUMENT_PARSER_MODEL, DEFAULT_EMBEDDING_MODEL, Settings
 
 
 class EmbeddingConfigTest(unittest.TestCase):
@@ -36,6 +36,19 @@ class EmbeddingConfigTest(unittest.TestCase):
 
         self.assertEqual(settings.openrouter_api_key, "openrouter-key")
         self.assertEqual(settings.embedding_api_key, "openrouter-key")
+
+    def test_document_parser_defaults_use_gemini_flash_lite_preview_with_low_reasoning(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            settings = Settings()
+
+        self.assertEqual(DEFAULT_DOCUMENT_PARSER_MODEL, "google/gemini-3.1-flash-lite-preview")
+        self.assertEqual(settings.openrouter_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_extraction_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_refine_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_vision_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_metadata_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_chat_simple_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_reasoning_effort, "low")
 
     def test_magic_reset_is_disabled_by_default(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
