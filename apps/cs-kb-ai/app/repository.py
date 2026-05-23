@@ -54,6 +54,22 @@ RELATION_TYPES = (
 RELATION_STATUSES = ("suggested", "unresolved", "approved", "rejected", "archived")
 RELATION_TYPE_SQL = ", ".join(f"'{relation_type}'" for relation_type in RELATION_TYPES)
 BLOCKING_RELATION_TYPES = {"requires", "must_follow", "exception_of", "supersedes"}
+WORKFLOW_VISUAL_SOURCE_REF_UNIT_TYPES = {
+    "workflow_step",
+    "decision_node",
+    "decision_branch",
+    "workflow_path",
+    "script_block",
+    "annotation",
+    "relation_to_sop",
+    "visual_source_block",
+}
+WORKFLOW_SOURCE_TEXT_UNIT_TYPES = {
+    "workflow_step",
+    "decision_node",
+    "decision_branch",
+    "workflow_path",
+}
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
 RELATION_TITLE_STOP_RE = re.compile(
     r"\s+(?:trước khi|truoc khi|sau khi|nếu|neu|trong vòng|trong vong|sau đó|sau do|để|de)\b",
@@ -1970,25 +1986,95 @@ def workflow_graph_quality_failures(metadata: dict[str, Any]) -> list[str]:
         graph_confidence = float(metadata.get("graph_confidence") or metadata.get("confidence") or 1)
     except (TypeError, ValueError):
         graph_confidence = 0
-    has_quality_issue = (
-        (isinstance(graph_errors, list) and bool(graph_errors))
-        or (isinstance(uncertain_edges, list) and bool(uncertain_edges))
-        or uncertain_edges_count > 0
-        or graph_confidence < 0.7
-    )
-    if metadata.get("graph_validation_acknowledged") is True:
-        if has_quality_issue and not str(metadata.get("graph_validation_acknowledged_reason") or "").strip():
-            failures.append("workflow_graph_acknowledgement_reason_missing")
-        return failures
     if isinstance(graph_errors, list) and graph_errors:
         failures.append(f"workflow_graph_has_{len(graph_errors)}_validation_errors")
     if isinstance(uncertain_edges, list) and uncertain_edges:
         failures.append(f"workflow_graph_has_{len(uncertain_edges)}_uncertain_edges")
     if uncertain_edges_count > 0:
         failures.append(f"workflow_graph_has_{uncertain_edges_count}_uncertain_edges")
-    if graph_confidence < 0.7:
+    low_confidence_unacknowledged = graph_confidence < 0.7 and metadata.get("graph_validation_acknowledged") is not True
+    low_confidence_missing_reason = (
+        graph_confidence < 0.7
+        and metadata.get("graph_validation_acknowledged") is True
+        and not str(metadata.get("graph_validation_acknowledged_reason") or "").strip()
+    )
+    if low_confidence_unacknowledged:
         failures.append("workflow_graph_low_confidence")
+    if low_confidence_missing_reason:
+        failures.append("workflow_graph_acknowledgement_reason_missing")
     return list(dict.fromkeys(failures))
+
+
+def workflow_visual_source_refs_missing_bbox(unit_type: str, metadata: dict[str, Any]) -> bool:
+    if unit_type not in WORKFLOW_VISUAL_SOURCE_REF_UNIT_TYPES:
+        return False
+    refs = metadata.get("source_refs")
+    if not isinstance(refs, list):
+        refs = []
+    return not any(workflow_ref_has_page_bbox(ref) for ref in refs)
+
+
+def workflow_ref_has_page_bbox(ref: Any) -> bool:
+    if not isinstance(ref, dict):
+        return False
+    page = ref.get("page") or ref.get("page_number")
+    bbox = ref.get("bbox")
+    if not page or not isinstance(bbox, list) or len(bbox) < 4:
+        return False
+    values: list[float] = []
+    for item in bbox[:4]:
+        try:
+            values.append(float(item))
+        except (TypeError, ValueError):
+            return False
+    return max(values[2], values[0]) > min(values[2], values[0]) and max(values[3], values[1]) > min(values[3], values[1])
+
+
+def workflow_summary_only_source_text_failure(unit_type: str, content: str, metadata: dict[str, Any]) -> bool:
+    if unit_type not in WORKFLOW_SOURCE_TEXT_UNIT_TYPES:
+        return False
+    if metadata.get("source_text_is_summary") is True or metadata.get("source_text_quality") == "summary":
+        return True
+    source_text = str(metadata.get("source_text") or content or "").strip()
+    if not source_text:
+        return True
+    if unit_type == "workflow_path":
+        return len(source_text) < 80 or not workflow_source_text_has_step_evidence(source_text, metadata)
+    if unit_type == "decision_branch":
+        return len(source_text) < 80 or not (
+            str(metadata.get("from_step_code") or "").strip()
+            and str(metadata.get("to_step_code") or "").strip()
+            and str(metadata.get("condition") or "").strip()
+        )
+    return len(source_text) < 40 and not workflow_source_text_has_step_evidence(source_text, metadata)
+
+
+def workflow_source_text_has_step_evidence(source_text: str, metadata: dict[str, Any]) -> bool:
+    if str(metadata.get("step_code") or metadata.get("from_step_code") or metadata.get("to_step_code") or "").strip():
+        return True
+    return bool(re.search(r"(?<!\d)\d{1,3}(?:\.\d{1,3})?[.)]?\s", source_text))
+
+
+def production_indexable_chunk_row(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "").strip()
+    if not unit_type:
+        return False
+    if unit_type == "source_evidence_section" or unit_type == "visual_source_block" or unit_type.startswith("candidate_"):
+        return False
+    if str(metadata.get("review_status") or "") != "approved":
+        return False
+    if str(metadata.get("extraction_status") or "") not in {"structured", "manually_curated"}:
+        return False
+    if metadata.get("publish_blocked") is True or str(metadata.get("publish_blocked") or "").lower() == "true":
+        return False
+    if metadata.get("source_evidence_only") is True or str(metadata.get("source_evidence_only") or "").lower() == "true":
+        return False
+    if workflow_visual_source_refs_missing_bbox(unit_type, metadata):
+        return False
+    if workflow_summary_only_source_text_failure(unit_type, str(row.get("content") or ""), metadata):
+        return False
+    return True
 
 
 def workflow_edge_key(edge: dict[str, Any]) -> str:
@@ -2251,6 +2337,8 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
     workflow_graph_edges = 0
     workflow_graph_quality_errors: list[str] = []
     workflow_source_ack_missing = 0
+    workflow_visual_bbox_missing = 0
+    workflow_summary_only_units = 0
     workflow_unit_status_by_type: dict[str, bool] = {}
     required_unit_types: set[str] = set()
     missing_source_refs = 0
@@ -2298,6 +2386,11 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
             workflow_graph_quality_errors.extend(workflow_graph_decision_edge_failures(metadata))
         if version["document_type"] == "workflow_diagram" and workflow_source_ref_ack_missing(metadata):
             workflow_source_ack_missing += 1
+        if version["document_type"] == "workflow_diagram":
+            if workflow_visual_source_refs_missing_bbox(unit_type, metadata):
+                workflow_visual_bbox_missing += 1
+            if workflow_summary_only_source_text_failure(unit_type, str(row.get("content") or ""), metadata):
+                workflow_summary_only_units += 1
         if not source_evidence_only and not has_required_source_ref(version["document_type"], metadata):
             missing_source_refs += 1
 
@@ -2324,6 +2417,10 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         failures.extend(workflow_graph_quality_errors)
         if workflow_source_ack_missing:
             failures.append(f"{workflow_source_ack_missing}_page_only_source_refs_need_ack")
+        if workflow_visual_bbox_missing:
+            failures.append(f"{workflow_visual_bbox_missing}_workflow_units_missing_bbox_source_refs")
+        if workflow_summary_only_units:
+            failures.append(f"{workflow_summary_only_units}_workflow_units_summary_only_source_text")
         for required_unit_type in sorted(required_unit_types):
             accepted_types = {required_unit_type}
             if required_unit_type == "decision_rule":
@@ -5548,11 +5645,16 @@ def qdrant_index_rows_for_version(version_id: str) -> list[dict[str, Any]]:
             JOIN ai_document_versions v ON v.id = c.version_id
             WHERE c.version_id = %s
               AND c.embedding IS NOT NULL
+              AND COALESCE(c.metadata->>'review_status', '') = 'approved'
+              AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
+              AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_evidence_only', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'unit_type', '') NOT IN ('source_evidence_section', 'visual_source_block')
             ORDER BY c.chunk_index ASC
             """,
-            (version_id,),
+            (version_id, ["structured", "manually_curated"]),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [row for row in (dict(row) for row in rows) if production_indexable_chunk_row(row)]
 
 
 def sync_qdrant_version(version_id: str) -> dict[str, Any]:

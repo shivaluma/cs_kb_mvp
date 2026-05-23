@@ -241,6 +241,27 @@ class InboundCallWorkflowDiagramTest(unittest.TestCase):
         self.assertTrue(any("Quy định xác minh địa chỉ email.docx" in unit["metadata"].get("target_title", "") for unit in grouped["relation_to_sop"]))
         self.assertTrue(all(ref.get("page") == 1 and len(ref.get("bbox", [])) == 4 for unit in grouped["workflow_step"] for ref in unit["source_refs"]))
 
+        production_unit_types = {
+            "workflow_step",
+            "decision_node",
+            "decision_branch",
+            "workflow_path",
+            "script_block",
+            "annotation",
+            "relation_to_sop",
+        }
+        production_units = [unit for unit in units if unit["unit_type"] in production_unit_types]
+        self.assertTrue(production_units)
+        for unit in production_units:
+            metadata = unit["metadata"]
+            self.assertEqual(metadata.get("open_mode"), "workflow_diagram")
+            self.assertEqual(metadata.get("display_unit_type"), "workflow_diagram")
+            self.assertEqual(metadata.get("chunk_type"), unit["unit_type"])
+            self.assertTrue(str(metadata.get("source_text") or "").strip())
+            self.assertTrue(str(metadata.get("display_text") or "").strip())
+            self.assertTrue(str(metadata.get("retrieval_text") or "").strip())
+            self.assertTrue(any(ref.get("page") == 1 and len(ref.get("bbox", [])) == 4 for ref in unit["source_refs"]))
+
     def test_workflow_result_contract_opens_visual_diagram_with_bbox_highlight(self) -> None:
         payload, _report = compile_inbound_call_payload()
         units = workflow_payload_to_units(payload, INBOUND_CALL_FILENAME)

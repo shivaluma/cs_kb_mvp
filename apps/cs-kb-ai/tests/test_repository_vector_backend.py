@@ -1,4 +1,5 @@
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from app import repository
@@ -50,6 +51,58 @@ class RepositoryVectorBackendTest(unittest.TestCase):
         self.assertFalse(result["vector_index_verified"])
         self.assertEqual(result["vector_backend"], "qdrant")
         self.assertIn("qdrant down", result["vector_indexing_error"])
+
+    def test_qdrant_index_rows_apply_production_chunk_filters(self) -> None:
+        fake = RecordingConnection()
+
+        @contextmanager
+        def fake_connection():
+            yield fake
+
+        with patch("app.repository.connection", fake_connection):
+            rows = repository.qdrant_index_rows_for_version("ver-1")
+
+        self.assertEqual(rows, [])
+        self.assertIn("COALESCE(c.metadata->>'review_status', '') = 'approved'", fake.query)
+        self.assertIn("COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)", fake.query)
+        self.assertIn("COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'", fake.query)
+        self.assertIn("COALESCE(c.metadata->>'source_evidence_only', 'false') <> 'true'", fake.query)
+        self.assertIn("COALESCE(c.metadata->>'unit_type', '') NOT IN ('source_evidence_section', 'visual_source_block')", fake.query)
+        self.assertIn(["structured", "manually_curated"], fake.params)
+
+    def test_qdrant_post_filter_rejects_workflow_chunk_without_bbox(self) -> None:
+        self.assertFalse(
+            repository.production_indexable_chunk_row(
+                {
+                    "section": "decision_branch",
+                    "content": "Decision 8: Nếu No, chuyển đến 8.2: thông báo theo source.",
+                    "metadata": {
+                        "unit_type": "decision_branch",
+                        "review_status": "approved",
+                        "extraction_status": "structured",
+                        "source_refs": [{"page": 1}],
+                        "from_step_code": "8",
+                        "to_step_code": "8.2",
+                        "condition": "no",
+                    },
+                }
+            )
+        )
+
+
+class RecordingConnection:
+    def __init__(self) -> None:
+        self.query = ""
+        self.params: tuple[object, ...] = ()
+        self.row_factory = None
+
+    def execute(self, query: str, params: tuple[object, ...]) -> "RecordingConnection":
+        self.query = query
+        self.params = params
+        return self
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return []
 
 
 if __name__ == "__main__":

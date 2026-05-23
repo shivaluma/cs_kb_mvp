@@ -73,10 +73,16 @@ type aiChunkDocument struct {
 	Content             string         `json:"content"`
 	DisplayText         string         `json:"display_text"`
 	RetrievalText       string         `json:"retrieval_text"`
+	SourceText          string         `json:"source_text"`
 	TokenCount          int            `json:"token_count"`
 	Metadata            map[string]any `json:"metadata"`
 	UnitType            string         `json:"unit_type"`
 	ChunkType           string         `json:"chunk_type"`
+	StepCode            string         `json:"step_code"`
+	Phase               string         `json:"phase"`
+	Lane                string         `json:"lane"`
+	PathTitle           string         `json:"path_title"`
+	PathSteps           any            `json:"path_steps"`
 	RiskLevel           string         `json:"risk_level"`
 	RiskPriority        int            `json:"risk_priority"`
 	SourceRefQuality    string         `json:"source_ref_quality"`
@@ -98,6 +104,9 @@ type aiChunkDocument struct {
 	ForbiddenPhrases    any            `json:"forbidden_phrases"`
 	Keywords            any            `json:"keywords"`
 	EffectiveFrom       any            `json:"effective_from"`
+	RequiresReview      bool           `json:"requires_review"`
+	PublishBlocked      bool           `json:"publish_blocked"`
+	SourceEvidenceOnly  bool           `json:"source_evidence_only"`
 	UpdatedAt           any            `json:"updated_at"`
 	RankingScore        float64        `json:"_rankingScore,omitempty"`
 	RankingScoreDetails map[string]any `json:"_rankingScoreDetails,omitempty"`
@@ -770,56 +779,68 @@ func (s *Store) indexAIChunks(ctx context.Context, payload map[string]any, metad
 		if len(chunk.Metadata) > 0 {
 			chunkMetadata = chunk.Metadata
 		}
+		if !indexableAIChunk(chunkMetadata) {
+			continue
+		}
 		chunkType := stringFromAny(firstAny(chunkMetadata["chunk_type"], chunkMetadata["unit_type"], chunk.Section))
 		authorityLevel := stringFromAny(firstAny(chunkMetadata["authority_level"], "policy"))
 		riskLevel := stringFromAny(chunkMetadata["risk_level"])
 		docs = append(docs, aiChunkDocument{
-			ChunkID:           chunk.ChunkID,
-			ID:                chunk.ChunkID,
-			DocumentID:        documentID,
-			VersionID:         versionID,
-			DocumentVersionID: versionID,
-			Title:             fmt.Sprint(payload["title"]),
-			NormalizedTitle:   normalize(fmt.Sprint(firstAny(chunk.Heading, payload["title"]))),
-			VersionNumber:     intFromAny(payload["version_number"]),
-			Status:            fmt.Sprint(payload["status"]),
-			PublishState:      fmt.Sprint(payload["publish_state"]),
-			DocumentType:      fmt.Sprint(payload["document_type"]),
-			ReviewStatus:      fmt.Sprint(payload["review_status"]),
-			IsCurrentVersion:  true,
-			Metadata:          chunkMetadata,
-			ChunkIndex:        chunk.ChunkIndex,
-			Section:           chunk.Section,
-			SectionPath:       firstAny(chunkMetadata["section_path"], []string{}),
-			Heading:           chunk.Heading,
-			Content:           chunk.Content,
-			DisplayText:       stringFromAny(firstAny(chunkMetadata["display_text"], chunk.Content)),
-			RetrievalText:     stringFromAny(firstAny(chunkMetadata["retrieval_text"], chunk.Content)),
-			TokenCount:        chunk.TokenCount,
-			UnitType:          stringFromAny(firstAny(chunkMetadata["unit_type"], chunk.Section)),
-			ChunkType:         chunkType,
-			RiskLevel:         riskLevel,
-			RiskPriority:      riskPriority(riskLevel),
-			SourceRefQuality:  stringFromAny(chunkMetadata["source_ref_quality"]),
-			SourceRefs:        firstAny(chunkMetadata["source_refs"], []map[string]any{}),
-			ParentSectionID:   stringFromAny(chunkMetadata["parent_section_id"]),
-			ParentChunkID:     stringFromAny(chunkMetadata["parent_chunk_id"]),
-			Audience:          chunkMetadata["audience"],
-			Visibility:        stringFromAny(firstAny(chunkMetadata["visibility"], "internal_only")),
-			Scope:             stringFromAny(firstAny(chunkMetadata["scope"], chunkMetadata["retrieval_scope"], "generic")),
-			PolicyType:        stringFromAny(firstAny(chunkMetadata["policy_type"], chunkType)),
-			AuthorityLevel:    authorityLevel,
-			AuthorityPriority: authorityPriority(authorityLevel),
-			Vertical:          chunkMetadata["vertical"],
-			Category:          chunkMetadata["category"],
-			Collections:       firstAny(chunkMetadata["collections"], chunkMetadata["collection_slug"]),
-			Tags:              chunkMetadata["tags"],
-			CaseReasons:       chunkMetadata["case_reasons"],
-			MacroText:         stringFromAny(firstAny(chunkMetadata["macro_text"], conditionalText(chunkType, chunk.Content, "macro"))),
-			ForbiddenPhrases:  firstAny(chunkMetadata["forbidden_phrases"], []string{}),
-			Keywords:          firstAny(chunkMetadata["keywords"], chunkMetadata["aliases"], []string{}),
-			EffectiveFrom:     firstAny(chunkMetadata["effective_from"], metadata["effective_from"]),
-			UpdatedAt:         time.Now().UTC(),
+			ChunkID:            chunk.ChunkID,
+			ID:                 chunk.ChunkID,
+			DocumentID:         documentID,
+			VersionID:          versionID,
+			DocumentVersionID:  versionID,
+			Title:              fmt.Sprint(payload["title"]),
+			NormalizedTitle:    normalize(fmt.Sprint(firstAny(chunk.Heading, payload["title"]))),
+			VersionNumber:      intFromAny(payload["version_number"]),
+			Status:             fmt.Sprint(payload["status"]),
+			PublishState:       fmt.Sprint(payload["publish_state"]),
+			DocumentType:       fmt.Sprint(payload["document_type"]),
+			ReviewStatus:       fmt.Sprint(payload["review_status"]),
+			IsCurrentVersion:   true,
+			Metadata:           chunkMetadata,
+			ChunkIndex:         chunk.ChunkIndex,
+			Section:            chunk.Section,
+			SectionPath:        firstAny(chunkMetadata["section_path"], []string{}),
+			Heading:            chunk.Heading,
+			Content:            chunk.Content,
+			DisplayText:        stringFromAny(firstAny(chunkMetadata["display_text"], chunk.Content)),
+			RetrievalText:      stringFromAny(firstAny(chunkMetadata["retrieval_text"], chunk.Content)),
+			SourceText:         stringFromAny(firstAny(chunkMetadata["source_text"], chunk.Content)),
+			TokenCount:         chunk.TokenCount,
+			UnitType:           stringFromAny(firstAny(chunkMetadata["unit_type"], chunk.Section)),
+			ChunkType:          chunkType,
+			StepCode:           stringFromAny(chunkMetadata["step_code"]),
+			Phase:              stringFromAny(chunkMetadata["phase"]),
+			Lane:               stringFromAny(firstAny(chunkMetadata["lane"], chunkMetadata["actor"])),
+			PathTitle:          stringFromAny(firstAny(chunkMetadata["path_title"], chunkMetadata["section_title"])),
+			PathSteps:          firstAny(chunkMetadata["path_steps"], chunkMetadata["step_codes"], []string{}),
+			RiskLevel:          riskLevel,
+			RiskPriority:       riskPriority(riskLevel),
+			SourceRefQuality:   stringFromAny(chunkMetadata["source_ref_quality"]),
+			SourceRefs:         firstAny(chunkMetadata["source_refs"], []map[string]any{}),
+			ParentSectionID:    stringFromAny(chunkMetadata["parent_section_id"]),
+			ParentChunkID:      stringFromAny(chunkMetadata["parent_chunk_id"]),
+			Audience:           chunkMetadata["audience"],
+			Visibility:         stringFromAny(firstAny(chunkMetadata["visibility"], "internal_only")),
+			Scope:              stringFromAny(firstAny(chunkMetadata["scope"], chunkMetadata["retrieval_scope"], "generic")),
+			PolicyType:         stringFromAny(firstAny(chunkMetadata["policy_type"], chunkType)),
+			AuthorityLevel:     authorityLevel,
+			AuthorityPriority:  authorityPriority(authorityLevel),
+			Vertical:           chunkMetadata["vertical"],
+			Category:           chunkMetadata["category"],
+			Collections:        firstAny(chunkMetadata["collections"], chunkMetadata["collection_slug"]),
+			Tags:               chunkMetadata["tags"],
+			CaseReasons:        chunkMetadata["case_reasons"],
+			MacroText:          stringFromAny(firstAny(chunkMetadata["macro_text"], conditionalText(chunkType, chunk.Content, "macro"))),
+			ForbiddenPhrases:   firstAny(chunkMetadata["forbidden_phrases"], []string{}),
+			Keywords:           firstAny(chunkMetadata["keywords"], chunkMetadata["aliases"], []string{}),
+			EffectiveFrom:      firstAny(chunkMetadata["effective_from"], metadata["effective_from"]),
+			RequiresReview:     boolFromAny(chunkMetadata["requires_human_review"]) || stringFromAny(chunkMetadata["review_status"]) == "needs_review",
+			PublishBlocked:     boolFromAny(chunkMetadata["publish_blocked"]),
+			SourceEvidenceOnly: boolFromAny(chunkMetadata["source_evidence_only"]),
+			UpdatedAt:          time.Now().UTC(),
 		})
 	}
 	if len(docs) == 0 {
@@ -1438,15 +1459,120 @@ func firstAny(values ...any) any {
 	return ""
 }
 
+func indexableAIChunk(metadata map[string]any) bool {
+	unitType := strings.TrimSpace(stringFromAny(metadata["unit_type"]))
+	if unitType == "" {
+		return false
+	}
+	if unitType == "source_evidence_section" || unitType == "visual_source_block" || strings.HasPrefix(unitType, "candidate_") {
+		return false
+	}
+	if boolFromAny(metadata["publish_blocked"]) || boolFromAny(metadata["source_evidence_only"]) {
+		return false
+	}
+	if strings.TrimSpace(stringFromAny(metadata["review_status"])) != "approved" {
+		return false
+	}
+	extractionStatus := strings.TrimSpace(stringFromAny(metadata["extraction_status"]))
+	if extractionStatus != "structured" && extractionStatus != "manually_curated" {
+		return false
+	}
+	if workflowVisualChunkNeedsBBox(unitType) && !hasWorkflowPageBBoxSourceRef(metadata["source_refs"]) {
+		return false
+	}
+	return true
+}
+
+func workflowVisualChunkNeedsBBox(unitType string) bool {
+	switch unitType {
+	case "workflow_step", "decision_node", "decision_branch", "workflow_path", "script_block", "annotation", "relation_to_sop":
+		return true
+	default:
+		return false
+	}
+}
+
+func boolFromAny(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func hasWorkflowPageBBoxSourceRef(value any) bool {
+	switch refs := value.(type) {
+	case []any:
+		for _, ref := range refs {
+			if workflowRefHasPageBBox(ref) {
+				return true
+			}
+		}
+	case []map[string]any:
+		for _, ref := range refs {
+			if workflowRefHasPageBBox(ref) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func workflowRefHasPageBBox(value any) bool {
+	ref, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	if intFromAny(firstAny(ref["page"], ref["page_number"])) <= 0 {
+		return false
+	}
+	bbox, ok := ref["bbox"].([]any)
+	if !ok || len(bbox) < 4 {
+		return false
+	}
+	x1, y1, x2, y2 := floatFromAny(bbox[0]), floatFromAny(bbox[1]), floatFromAny(bbox[2]), floatFromAny(bbox[3])
+	return x2 > x1 && y2 > y1
+}
+
+func floatFromAny(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case json.Number:
+		output, _ := typed.Float64()
+		return output
+	default:
+		return 0
+	}
+}
+
 func aiChunkFilterableAttributes() []string {
 	return []string{
 		"document_id",
 		"version_id",
 		"document_version_id",
+		"document_type",
 		"status",
 		"publish_state",
 		"is_current_version",
 		"review_status",
+		"requires_review",
+		"publish_blocked",
+		"source_evidence_only",
 		"vertical",
 		"category",
 		"collections",
@@ -1457,6 +1583,8 @@ func aiChunkFilterableAttributes() []string {
 		"authority_level",
 		"tags",
 		"case_reasons",
+		"phase",
+		"lane",
 		"unit_type",
 		"chunk_type",
 		"risk_level",
@@ -1481,7 +1609,7 @@ func sopDocumentFilterableAttributes() []string {
 func searchableAttributesForIndex(index string) []string {
 	switch index {
 	case "ai_chunks", "sop_chunks":
-		return []string{"title", "normalized_title", "macro_text", "forbidden_phrases", "section_path", "heading", "content", "retrieval_text", "keywords"}
+		return []string{"title", "normalized_title", "macro_text", "forbidden_phrases", "section_path", "heading", "step_code", "source_text", "display_text", "content", "retrieval_text", "phase", "lane", "path_title", "path_steps", "keywords"}
 	case "ai_documents", "sop_documents":
 		return []string{"title", "summary", "section_titles", "category", "collections", "tags", "case_reasons"}
 	case "sops":
