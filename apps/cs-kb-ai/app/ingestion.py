@@ -6,7 +6,13 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from app.chunking.evidence_bound_chunker import (
+    attach_evidence_metadata_to_legacy_chunks,
+    legacy_chunks_from_evidence,
+)
 from app.embedding import embed_texts, embedding_runtime_metadata
+from app.extraction.router import extraction_profile_for_file
+from app.ir.document_evidence_graph import build_document_evidence_graph
 from app.openrouter import (
     extract_rule_table_units,
     extract_mixed_docx_policy_units,
@@ -19,6 +25,8 @@ from app.openrouter import (
     start_ai_breakdown_capture,
     suggest_document_metadata,
 )
+from app.reasoning import adjudicate_disagreements, extract_semantic_units, observe_document, verify_semantic_units
+from app.review.review_artifacts import evidence_graph_artifact, evidence_validation_artifact
 from app.schemas import DocumentMetadata
 from app.search_labels import embedding_text_for_unit, meaningful_search_label
 from app.text_processing import (
@@ -41,6 +49,8 @@ from app.text_processing import (
     tokenize,
     workflow_units_to_chunks,
 )
+from app.validators.chunk_support import validate_chunks_supported
+from app.validators.workflow_graph import validate_workflow_graph
 from app.visual_layout import (
     bbox_distance,
     compact_visual_context,
@@ -162,7 +172,28 @@ def prepare_document_version(
         if visual_layout:
             raw_context["visual_layout"] = visual_layout
             blocks.extend(visual_blocks_for_map(visual_layout))
+    extraction_profile = extraction_profile_for_file(filename, content_type)
+    evidence_graph = build_document_evidence_graph(
+        filename=filename,
+        content_type=content_type,
+        data=data,
+        raw_text=raw_text,
+        raw_context=raw_context,
+        blocks=blocks,
+        classification=classification,
+    )
+    evidence_profile = observe_document(evidence_graph)
+    evidence_units = extract_semantic_units(evidence_graph)
+    evidence_graph.semantic_units = evidence_units
+    semantic_validation = verify_semantic_units(evidence_units)
+    adjudication_report = adjudicate_disagreements(evidence_graph)
+    workflow_validation = (
+        validate_workflow_graph(evidence_graph)
+        if classification.document_type == "workflow_diagram"
+        else None
+    )
     pipeline_artifacts = [
+        stage_artifact("map", "extraction_profile", extraction_profile),
         stage_artifact(
             "map",
             "source_blocks",
@@ -173,7 +204,32 @@ def prepare_document_version(
             "classification_result",
             classification_payload(classification),
         ),
+        stage_artifact(
+            "map",
+            "document_evidence_graph",
+            evidence_graph_artifact(evidence_graph, evidence_profile),
+        ),
+        stage_artifact(
+            "observe",
+            "evidence_observation",
+            evidence_profile,
+        ),
+        stage_artifact(
+            "verify",
+            "semantic_evidence_validation",
+            evidence_validation_artifact(semantic_validation, {"adjudication": adjudication_report}),
+            status="failed" if semantic_validation.critical_warnings else "completed",
+        ),
     ]
+    if workflow_validation is not None:
+        pipeline_artifacts.append(
+            stage_artifact(
+                "verify",
+                "workflow_graph_evidence_validation",
+                evidence_validation_artifact(workflow_validation),
+                status="failed" if workflow_validation.critical_warnings else "completed",
+            )
+        )
     if visual_layout:
         pipeline_artifacts.append(stage_artifact("map", "visual_layout_blocks", visual_layout_payload(visual_layout)))
         pipeline_artifacts.append(stage_artifact("map", "visual_graph_candidates", visual_graph_payload(visual_layout)))
@@ -286,7 +342,13 @@ def prepare_document_version(
                     )
 
     if not source_chunks and classification.document_type not in AI_STRUCTURED_DOCUMENT_TYPES:
-        source_chunks = mark_structured_chunks(chunk_text(raw_text))
+        source_chunks = mark_structured_chunks(
+            legacy_chunks_from_evidence(
+                evidence_graph,
+                document_type=classification.document_type,
+                source_type=classification.source_type,
+            )
+        )
 
     if not source_chunks:
         if ai_error:
@@ -367,9 +429,27 @@ def prepare_document_version(
             warnings.append("document_overview_low_coverage")
         pipeline_artifacts.append(stage_artifact("map", "source_evidence_sections", source_evidence_report))
 
+    evidence_blockers = list(semantic_validation.critical_warnings)
+    if workflow_validation is not None:
+        evidence_blockers.extend(workflow_validation.critical_warnings)
+    if adjudication_report.get("unresolved_parser_disagreements"):
+        evidence_blockers.append("unresolved_parser_disagreement")
+    source_chunks = attach_evidence_metadata_to_legacy_chunks(source_chunks, evidence_graph)
+    if evidence_blockers:
+        source_chunks = block_chunks_for_evidence_validation(source_chunks, evidence_blockers)
+    chunk_support_validation = validate_chunks_supported(source_chunks)
+    pipeline_artifacts.append(
+        stage_artifact(
+            "verify",
+            "chunk_support_validation",
+            evidence_validation_artifact(chunk_support_validation, {"evidence_blockers": evidence_blockers}),
+            status="failed" if chunk_support_validation.critical_warnings or evidence_blockers else "completed",
+        )
+    )
+
     extraction_status = "degraded" if any(chunk.metadata.get("extraction_status") == "degraded" for chunk in source_chunks) else "structured"
     lifecycle_status = "degraded_structured_draft" if extraction_status == "degraded" else "structured_draft"
-    publish_blocked = extraction_status == "degraded"
+    publish_blocked = extraction_status == "degraded" or bool(evidence_blockers or chunk_support_validation.critical_warnings)
     publish_blocked_reason = ""
     if publish_blocked:
         publish_blocked_reason = next(
@@ -378,7 +458,7 @@ def prepare_document_version(
                 for chunk in source_chunks
                 if chunk.metadata.get("publish_blocked_reason")
             ),
-            "ai_structuring_failed_requires_manual_curation",
+            "evidence_validation_failed" if evidence_blockers or chunk_support_validation.critical_warnings else "ai_structuring_failed_requires_manual_curation",
         )
     phase_history = ["uploaded", "raw_extracted", "classified"]
     if classification.document_type in AI_STRUCTURED_DOCUMENT_TYPES:
@@ -406,6 +486,15 @@ def prepare_document_version(
         "publish_blocked_reason": publish_blocked_reason,
         "requires_human_review": True,
         "source_ref_quality": aggregate_source_ref_quality(source_chunks),
+        "evidence_graph_status": "blocked" if publish_blocked else "passed",
+        "evidence_graph_element_count": len(evidence_graph.source_elements),
+        "evidence_graph_relation_count": len(evidence_graph.relations),
+        "evidence_validation": {
+            "semantic": semantic_validation.to_dict(),
+            "chunk_support": chunk_support_validation.to_dict(),
+            "workflow": workflow_validation.to_dict() if workflow_validation is not None else None,
+            "adjudication": adjudication_report,
+        },
     }
 
     chunks = embed_chunks(source_chunks, metadata.model_dump(), enrichment, filename)
@@ -5678,6 +5767,34 @@ def replace_chunk_metadata(chunk: Any, metadata: dict[str, Any]) -> Any:
         token_count=chunk.token_count,
         metadata=metadata,
     )
+
+
+def block_chunks_for_evidence_validation(chunks: list[Any], blockers: list[str]) -> list[Any]:
+    unique_blockers = list(dict.fromkeys(str(blocker) for blocker in blockers if str(blocker).strip()))
+    output = []
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        if metadata.get("source_evidence_only") is True:
+            output.append(chunk)
+            continue
+        blocked_reasons = list(metadata.get("blocked_reasons") or [])
+        for blocker in unique_blockers:
+            if blocker not in blocked_reasons:
+                blocked_reasons.append(blocker)
+        output.append(
+            replace_chunk_metadata(
+                chunk,
+                {
+                    **metadata,
+                    "publish_eligible": False,
+                    "publish_blocked": True,
+                    "publish_blocked_reason": metadata.get("publish_blocked_reason") or "evidence_validation_failed",
+                    "blocked_reasons": blocked_reasons,
+                    "validation_status": "blocked",
+                },
+            )
+        )
+    return output
 
 
 def text_line_blocks(raw_text: str) -> list[dict[str, Any]]:
