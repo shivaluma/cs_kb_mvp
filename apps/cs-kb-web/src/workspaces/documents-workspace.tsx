@@ -40,6 +40,14 @@ import { workspacePaths } from "@/constants";
 import { nextReviewDueIso, withReviewFrequencyDates } from "@/lib/date";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import {
+  workflowDecisionBranchBadge,
+  workflowDecisionBranchInstruction,
+  workflowDecisionReviewProgressLabel,
+  workflowMissingConfirmedEdges,
+  workflowTopologyIssueCount,
+  workflowTopologyWarningsAcknowledged,
+} from "@/lib/workflow-graph-review";
 import type { DocumentChunk, DocumentMetadataPreview, DocumentSummary, ExtractionJobSummary, ExtractionPipelineInspection, ExtractionUnit, ExtractionUnitCreate, ExtractionUnitUpdate, KBCollectionSummary, PublishReadiness, UploadState, VersionRawText, VersionSummary } from "@/types";
 
 type WorkflowGraphMetadata = {
@@ -259,14 +267,25 @@ export function DocumentsWorkspace({
   const selectedExtractionIssue = extractionIssue(selectedDocument);
   const workflowGraphConfidence = Number(workflowGraphUnit?.metadata.graph_confidence ?? workflowGraph?.graph_confidence ?? workflowGraphUnit?.confidence ?? 0);
   const workflowGraphLowConfidence = workflowRequiresGraph && Boolean(workflowGraphUnit) && workflowGraphConfidence > 0 && workflowGraphConfidence < 0.7;
-  const workflowGraphWarningIssueCount =
-    (Array.isArray(workflowGraphValidationErrors) ? workflowGraphValidationErrors.length : 0) +
-    Math.max(Array.isArray(workflowGraphUncertainEdges) ? workflowGraphUncertainEdges.length : 0, Number(workflowGraphUnit?.metadata.uncertain_edges_count ?? 0)) +
-    (workflowGraphLowConfidence ? 1 : 0);
+  const workflowGraphConfirmedEdgeCount = workflowGraph?.edges?.length ?? 0;
+  const workflowGraphMissingConfirmedEdges = workflowMissingConfirmedEdges({
+    confirmedEdgeCount: workflowGraphConfirmedEdgeCount,
+    hasGraphUnit: workflowRequiresGraph && Boolean(workflowGraphUnit),
+  });
+  const workflowGraphWarningIssueCount = workflowTopologyIssueCount({
+    confirmedEdgeCount: workflowGraphConfirmedEdgeCount,
+    hasGraphUnit: workflowRequiresGraph && Boolean(workflowGraphUnit),
+    lowConfidence: workflowGraphLowConfidence,
+    uncertainEdgeCount: Math.max(Array.isArray(workflowGraphUncertainEdges) ? workflowGraphUncertainEdges.length : 0, Number(workflowGraphUnit?.metadata.uncertain_edges_count ?? 0)),
+    validationIssueCount: Array.isArray(workflowGraphValidationErrors) ? workflowGraphValidationErrors.length : 0,
+  });
   const workflowGraphAcknowledgementReason = String(workflowGraphUnit?.metadata.graph_validation_acknowledged_reason ?? "").trim();
-  const workflowGraphWarningsAcknowledged =
-    workflowGraphWarningIssueCount === 0 ||
-    (workflowGraphUnit?.metadata.graph_validation_acknowledged === true && workflowGraphAcknowledgementReason.length > 0);
+  const workflowGraphWarningsAcknowledged = workflowTopologyWarningsAcknowledged({
+    acknowledgementSaved: workflowGraphUnit?.metadata.graph_validation_acknowledged === true && workflowGraphAcknowledgementReason.length > 0,
+    confirmedEdgeCount: workflowGraphConfirmedEdgeCount,
+    hasGraphUnit: workflowRequiresGraph && Boolean(workflowGraphUnit),
+    issueCount: workflowGraphWarningIssueCount,
+  });
   const workflowGraphIssueCount = (workflowGraphWarningsAcknowledged ? 0 : workflowGraphWarningIssueCount) + workflowEdgeReviewSummary.blockingCount;
   const workflowGraphIssuesAcknowledged = workflowGraphIssueCount === 0;
   const pageOnlySourceRefUnacknowledged = activeExtractionUnits.filter(
@@ -2761,31 +2780,64 @@ function WorkflowGraphPanel({
   const selectedFlow = String(graph?.selected_flow ?? graphUnit?.metadata.selected_flow ?? "");
   const fidelityScore = Number(graph?.graph_fidelity_score ?? graph?.fidelity_score ?? graph?.graph_confidence ?? confidence ?? 0);
   const lowConfidenceTopologyIssue = confidence > 0 && confidence < 0.7;
+  const confirmedEdgeCount = graph?.edges?.length ?? 0;
+  const missingConfirmedEdges = workflowMissingConfirmedEdges({
+    confirmedEdgeCount,
+    hasGraphUnit: Boolean(graphUnit),
+  });
   const uncertainEdgeCount =
     Math.max(Array.isArray(uncertainEdges) ? uncertainEdges.length : 0, Number(graphUnit?.metadata.uncertain_edges_count ?? 0));
-  const issueCount = (Array.isArray(validationErrors) ? validationErrors.length : 0) + uncertainEdgeCount + (lowConfidenceTopologyIssue ? 1 : 0);
+  const issueCount = workflowTopologyIssueCount({
+    confirmedEdgeCount,
+    hasGraphUnit: Boolean(graphUnit),
+    lowConfidence: lowConfidenceTopologyIssue,
+    uncertainEdgeCount,
+    validationIssueCount: Array.isArray(validationErrors) ? validationErrors.length : 0,
+  });
   const savedAcknowledgementReason = String(graphUnit?.metadata.graph_validation_acknowledged_reason ?? "").trim();
-  const acknowledged = issueCount === 0 || (graphUnit?.metadata.graph_validation_acknowledged === true && savedAcknowledgementReason.length > 0);
+  const acknowledged = workflowTopologyWarningsAcknowledged({
+    acknowledgementSaved: graphUnit?.metadata.graph_validation_acknowledged === true && savedAcknowledgementReason.length > 0,
+    confirmedEdgeCount,
+    hasGraphUnit: Boolean(graphUnit),
+    issueCount,
+  });
   const acknowledgementInputValid = acknowledgementReason.trim().length >= 8;
   const acknowledgementDisabledReason = !canEdit
     ? "Inspect an editable draft version first."
     : saving
       ? "Saving acknowledgement..."
-      : !acknowledgementInputValid
-        ? "Enter at least 8 characters explaining why this warning is acceptable."
-        : "";
+      : missingConfirmedEdges
+        ? "Re-extract or manually curate graph edges; an acknowledgement cannot clear a zero-edge graph."
+        : !acknowledgementInputValid
+          ? "Enter at least 8 characters explaining why this warning is acceptable."
+          : "";
   const edgeReviewSummary = buildWorkflowEdgeReviewSummary(graph, graphUnit);
   const blockingDecisionEdges = workflowDecisionEdgesNeedingReview(graph, graphUnit);
+  const branchReviewBadge = workflowDecisionBranchBadge({
+    blockingCount: edgeReviewSummary.blockingCount,
+    confirmedEdgeCount,
+  });
+  const branchReviewInstruction = workflowDecisionBranchInstruction({
+    blockingCount: edgeReviewSummary.blockingCount,
+    confirmedEdgeCount,
+  });
+  const branchReviewProgressLabel = workflowDecisionReviewProgressLabel({
+    confirmedEdgeCount,
+    reviewed: edgeReviewSummary.reviewed,
+    total: edgeReviewSummary.total,
+  });
   const canUseSavedReasonForBranches = savedAcknowledgementReason.length >= 8;
   const bulkAcknowledgeDisabledReason = !canEdit
     ? "Inspect an editable draft version first."
     : saving
       ? "Saving branch reviews..."
-      : !canUseSavedReasonForBranches
-        ? "Acknowledge topology warnings with a reason first."
-        : !blockingDecisionEdges.length
-          ? "All decision branches are already reviewed."
-          : "";
+      : missingConfirmedEdges
+        ? "No confirmed graph edges exist to review."
+        : !canUseSavedReasonForBranches
+          ? "Acknowledge topology warnings with a reason first."
+          : !blockingDecisionEdges.length
+            ? "All decision branches are already reviewed."
+            : "";
   return (
     <Card className="rounded-xl">
       <CardHeader className="border-b pb-4">
@@ -2800,7 +2852,7 @@ function WorkflowGraphPanel({
             </Badge>
             <Badge variant="outline">{Math.round(confidence * 100)}% confidence</Badge>
             <Badge variant="outline">{graph?.nodes?.length ?? 0} nodes</Badge>
-            <Badge variant="outline">{graph?.edges?.length ?? 0} edges</Badge>
+            <Badge variant={missingConfirmedEdges ? "destructive" : "outline"}>{confirmedEdgeCount} confirmed edges</Badge>
           </div>
         </div>
       </CardHeader>
@@ -2870,7 +2922,7 @@ function WorkflowGraphPanel({
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {!acknowledged ? <Badge variant="destructive">{issueCount} topology warning(s)</Badge> : <Badge variant="secondary">topology acknowledged</Badge>}
-                    {edgeReviewSummary.blockingCount ? <Badge variant="destructive">{edgeReviewSummary.blockingCount} branch review(s)</Badge> : <Badge variant="secondary">branches reviewed</Badge>}
+                    <Badge variant={branchReviewBadge.variant}>{branchReviewBadge.label}</Badge>
                   </div>
                 </div>
                 <div className="mt-3 grid gap-2 text-xs leading-5 text-muted-foreground md:grid-cols-2">
@@ -2890,11 +2942,7 @@ function WorkflowGraphPanel({
                       2. Decision branches
                       <HelpTooltip text="Review từng cạnh đi ra từ decision node. Confirm nếu nhánh rõ ràng đúng theo diagram. Ack nếu nhánh còn mơ hồ nhưng chấp nhận được sau khi xem source. Reject nếu nhánh sai và cần sửa graph." />
                     </span>
-                    <p className="mt-1">
-                      {edgeReviewSummary.blockingCount
-                        ? "Confirm clear Yes/No edges, or acknowledge ambiguous edges using the saved topology reason."
-                        : "Done. Required decision edges are confirmed or acknowledged."}
-                    </p>
+                    <p className="mt-1">{branchReviewInstruction}</p>
                     {graphUnit && edgeReviewSummary.blockingCount ? (
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <Button
@@ -2983,6 +3031,11 @@ function WorkflowGraphPanel({
                     Graph confidence is {Math.round(confidence * 100)}%, below the 70% auto-pass threshold. A human reviewer can clear this by checking the source diagram and acknowledging the topology warning with a reason.
                   </p>
                 ) : null}
+                {missingConfirmedEdges ? (
+                  <p className="mt-3 rounded-lg border border-destructive/30 bg-background px-3 py-2 text-xs leading-5 text-destructive">
+                    This graph has no confirmed edges, so decision branches cannot be considered reviewed. Re-extract or manually curate topology edges before using this workflow graph for publish/retrieval.
+                  </p>
+                ) : null}
               </div>
             ) : null}
             <div className="grid gap-4 2xl:grid-cols-[minmax(22rem,0.85fr)_minmax(0,1.35fr)]">
@@ -3007,8 +3060,8 @@ function WorkflowGraphPanel({
                   <HelpTooltip text="Bảng này là publish gate riêng cho workflow diagram. Mỗi nhánh Yes/No từ decision node phải được Confirm hoặc Ack trước khi graph được xem là reviewed." />
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  <Badge variant={edgeReviewSummary.blockingCount ? "destructive" : "secondary"}>
-                    {edgeReviewSummary.reviewed}/{edgeReviewSummary.total} reviewed
+                  <Badge variant={missingConfirmedEdges || edgeReviewSummary.blockingCount ? "destructive" : "secondary"}>
+                    {branchReviewProgressLabel}
                   </Badge>
                   {edgeReviewSummary.rejected ? <Badge variant="destructive">{edgeReviewSummary.rejected} rejected</Badge> : null}
                   {edgeReviewSummary.missingReason ? <Badge variant="outline">{edgeReviewSummary.missingReason} missing reason</Badge> : null}
@@ -3331,6 +3384,7 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
   const [zoom, setZoom] = useState(1);
   const svgRef = useRef<HTMLDivElement>(null);
   const chart = useMemo(() => workflowGraphToMermaid(graph), [graph]);
+  const confirmedEdgeCount = graph.edges?.length ?? 0;
   const renderId = useMemo(() => `workflow-graph-${Math.random().toString(36).slice(2)}`, [chart]);
 
   useEffect(() => {
@@ -3339,7 +3393,11 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
       setError("");
       setSvg("");
       if (!chart) {
-        setError("No graph syntax available.");
+        setError(
+          confirmedEdgeCount === 0
+            ? "No confirmed graph edges are available. Re-extract or manually curate workflow topology before using this graph preview."
+            : "No renderable graph syntax is available. Use the readable branch table next to this panel to review the extraction.",
+        );
         return;
       }
       try {
@@ -3369,7 +3427,7 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
     return () => {
       cancelled = true;
     };
-  }, [chart, renderId]);
+  }, [chart, confirmedEdgeCount, renderId]);
 
   useEffect(() => {
     if (!svg) {
@@ -3434,7 +3492,7 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
               </Button>
             </div>
           ) : null}
-          <Badge variant="outline">{graph.edges?.length ?? 0} edges</Badge>
+          <Badge variant={confirmedEdgeCount === 0 ? "destructive" : "outline"}>{confirmedEdgeCount} confirmed edges</Badge>
         </div>
       </div>
       {svg ? (
@@ -3457,7 +3515,7 @@ function WorkflowMermaid({ graph }: { graph: WorkflowGraphMetadata }) {
         </div>
       ) : error ? (
         <div className="rounded-md border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
-          Mermaid could not render this graph. Use the readable branch table next to this panel to review the extraction.
+          {error}
         </div>
       ) : (
         <div className="flex items-center gap-2 rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
