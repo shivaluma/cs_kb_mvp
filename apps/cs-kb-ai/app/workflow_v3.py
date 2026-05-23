@@ -189,10 +189,10 @@ def compile_canvas_nodes(filename: str, canvas: dict[str, Any]) -> tuple[list[di
             text = node_text(item)
             if not text:
                 continue
-            if is_note_text(text):
+            step_code = normalize_step_code(item.get("step_code") or extract_step_code(text))
+            if is_note_text(text) and not step_code:
                 continue
             page_number = int_or_default(item.get("page"), page.get("page") or 1)
-            step_code = normalize_step_code(item.get("step_code") or extract_step_code(text))
             node_type = infer_node_type(item, text, step_code)
             node_id = node_identifier(item, node_type, step_code, text)
             node_source_ref = source_ref(filename, page_number, item.get("bbox"))
@@ -346,7 +346,7 @@ def compile_canvas_annotations(filename: str, canvas: dict[str, Any], node_looku
     for page in canvas.get("pages", []):
         candidates = [*page.get("annotations", [])]
         for node in page.get("nodes", []):
-            if isinstance(node, dict) and is_note_text(node_text(node)):
+            if isinstance(node, dict) and is_note_text(node_text(node)) and not canvas_item_step_code(node):
                 candidates.append(node)
         for index, item in enumerate(candidates, start=1):
             if not isinstance(item, dict):
@@ -465,6 +465,10 @@ def compile_canvas_relations(filename: str, canvas: dict[str, Any]) -> list[dict
                 }
             )
     return dedupe_relations(relations)
+
+
+def canvas_item_step_code(item: dict[str, Any]) -> str:
+    return normalize_step_code(item.get("step_code") or extract_step_code(node_text(item)))
 
 
 def compile_canvas_edges(
@@ -615,6 +619,12 @@ def ensure_boundary_and_terminal_edges(
             continue
         if has_resolved_outgoing_edge(node_id, edges, uncertain_edges):
             continue
+        handoff_target = handoff_follow_up_node(node, nodes)
+        if handoff_target and (node_id, str(handoff_target.get("id") or ""), "handoff") not in edge_keys:
+            edges.append(synthetic_edge(filename, node, handoff_target, "handoff", "synthesized_handoff_edge"))
+            edge_keys.add((node_id, str(handoff_target.get("id") or ""), "handoff"))
+            conflicts.append(f"workflow_v3_handoff_edge_synthesized:{node.get('step_code') or node_id}->{handoff_target.get('step_code') or handoff_target.get('id')}")
+            continue
         if is_external_continuation_node(node):
             continue
         if not terminal_action_evidence(node):
@@ -625,6 +635,33 @@ def ensure_boundary_and_terminal_edges(
         edge_keys.add((node_id, end_id, "next"))
         conflicts.append(f"workflow_v3_terminal_edge_synthesized:{node.get('step_code') or node_id}->{end_id}")
     return conflicts
+
+
+def handoff_follow_up_node(node: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    code = normalize_step_code(node.get("step_code"))
+    if not code or "." in code:
+        return None
+    text = normalized_text(" ".join(str(node.get(key) or "") for key in ("title", "content")))
+    handoff_signals = (
+        "agent layer 2",
+        "layer 2",
+        "teamlead",
+        "team lead",
+        "bo phan lien quan",
+        "hoi y kien",
+        "chuyen cho",
+        "chuyen agent",
+    )
+    if not any(signal in text for signal in handoff_signals):
+        return None
+    try:
+        next_code = str(int(code) + 1)
+    except ValueError:
+        return None
+    target = next((candidate for candidate in nodes if normalize_step_code(candidate.get("step_code")) == next_code), None)
+    if not target or target.get("type") in {"start", "end", "decision"}:
+        return None
+    return target
 
 
 def first_root_node_id(

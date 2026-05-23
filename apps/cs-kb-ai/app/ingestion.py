@@ -3640,6 +3640,7 @@ def build_degraded_spreadsheet_draft(filename: str, raw_text: str, blocks: list[
 GRAPH_SEMANTIC_NODE_TYPES = {"start", "end", "action", "decision", "queue_rule", "sla_rule"}
 ANNOTATION_SEMANTIC_NODE_TYPES = {"annotation", "warning", "audit_rule", "macro_script"}
 WORKFLOW_EDGE_CONDITIONS = {"yes", "no", "next", "timeout", "escalation", "fallback", "handoff", "return", "retry"}
+WORKFLOW_ANNOTATION_MARKER_ONLY = re.compile(r"^\s*\([a-z0-9*]{1,4}\)\s*$", re.IGNORECASE)
 SEMANTIC_CANDIDATE_UNIT_TYPES = {
     "start": "candidate_action",
     "end": "candidate_action",
@@ -3652,6 +3653,17 @@ SEMANTIC_CANDIDATE_UNIT_TYPES = {
     "queue_rule": "candidate_queue_rule",
     "macro_script": "macro_script",
 }
+
+
+def is_marker_only_workflow_annotation(text: str) -> bool:
+    return bool(WORKFLOW_ANNOTATION_MARKER_ONLY.match(text or ""))
+
+
+def workflow_candidate_display_text(unit_type: str, content: str) -> str:
+    text = str(content or "").strip()
+    if unit_type == "candidate_annotation":
+        return re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def build_workflow_semantic_refinement(
@@ -4691,6 +4703,12 @@ def semantic_workflow_candidate_chunks(filename: str, semantic_refinement: dict[
             content = str(node.get("content") or title).strip()
             if not content:
                 continue
+            if unit_type == "candidate_annotation" and is_marker_only_workflow_annotation(content):
+                continue
+            display_text = workflow_candidate_display_text(unit_type, content)
+            heading_text = workflow_candidate_display_text(unit_type, title)
+            if unit_type == "candidate_annotation" and is_marker_only_workflow_annotation(heading_text):
+                heading_text = display_text
             attached_uncertain_edges = [
                 edge for edge in uncertain_edges
                 if edge.get("from_node") == node.get("id") or edge.get("to_node") == node.get("id")
@@ -4699,11 +4717,13 @@ def semantic_workflow_candidate_chunks(filename: str, semantic_refinement: dict[
                 degraded_chunk(
                     start_index + len(output),
                     unit_type,
-                    candidate_heading(title, unit_type, len(output) + 1),
-                    content,
+                    candidate_heading(heading_text, unit_type, len(output) + 1),
+                    display_text,
                     {
                         "unit_type": unit_type,
                         "retrieval_scope": "unit",
+                        "source_text": content,
+                        "display_text": display_text,
                         "semantic_node_id": node.get("id"),
                         "semantic_node_type": semantic_type,
                         "dedupe_status": node.get("dedupe_status", "unique"),

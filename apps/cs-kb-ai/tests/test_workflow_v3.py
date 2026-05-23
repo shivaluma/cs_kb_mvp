@@ -383,6 +383,84 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         self.assertIn("1 kênh", nodes_by_code["8.2"]["content"])
         self.assertNotIn("1", report["covered_step_codes"])
 
+    def test_numbered_note_step_is_preserved_as_action_not_annotation(self) -> None:
+        transcription = {
+            "document_metadata": {"title": "Inbound call workflow"},
+            "canvas": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "nodes": [
+                            {"id": "step_8", "step_code": "8", "text": "KH/Partner/NH đồng ý cung cấp?", "node_type": "decision", "shape_kind": "diamond", "bbox": [700, 350, 900, 540]},
+                            {"id": "step_8_1", "step_code": "8.1", "text": "Note email KH/Partner/NH cung cấp vào ô \"Back up email\"", "node_type": "action", "shape_kind": "rectangle", "bbox": [1094, 645, 1253, 849]},
+                            {"id": "step_8_2", "step_code": "8.2", "text": "Thông báo KH/Partner/NH trường hợp không cung cấp địa chỉ Email", "node_type": "action", "shape_kind": "rectangle", "bbox": [1286, 631, 1515, 1096]},
+                            {"id": "end", "text": "End", "node_type": "end", "shape_kind": "oval", "bbox": [1700, 650, 1820, 760]},
+                        ],
+                        "edges": [
+                            {"from_step_code": "8", "to_step_code": "8.1", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "8", "to_step_code": "8.2", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "8.1", "to_node": "end", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "8.2", "to_node": "end", "condition": "next", "confidence": 0.9},
+                        ],
+                    }
+                ]
+            },
+        }
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="inbound_call.pdf",
+            raw_text="8. KH/Partner/NH đồng ý cung cấp?\n8.1. Note email KH/Partner/NH cung cấp vào ô Back up email\n8.2. Thông báo KH/Partner/NH trường hợp không cung cấp địa chỉ Email",
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        nodes_by_code = {node["step_code"]: node for node in graph["nodes"] if node.get("step_code")}
+        self.assertIn("8.1", nodes_by_code)
+        self.assertEqual(nodes_by_code["8.1"]["type"], "action")
+        self.assertIn("Note email", nodes_by_code["8.1"]["content"])
+        self.assertNotIn("8.1", report["missing_step_codes"])
+        edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        self.assertIn(("node_8", "yes", "node_8_1"), edge_keys)
+
+    def test_handoff_step_16_synthesizes_outgoing_to_step_17_when_missing(self) -> None:
+        transcription = {
+            "document_metadata": {"title": "Inbound call workflow"},
+            "canvas": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "nodes": [
+                            {"id": "step_15_1", "step_code": "15.1", "text": "Báo KH/Partner/NH Be ghi nhận thông tin kiểm tra và phản hồi kết quả sau", "node_type": "action", "shape_kind": "rectangle", "bbox": [2323, 1500, 2599, 1650]},
+                            {"id": "step_16", "step_code": "16", "text": "Dựa trên vấn đề Agent chuyển cho Agent Layer 2 / hỏi ý kiến Teamlead / Bộ phận liên quan theo quy định", "node_type": "action", "shape_kind": "rectangle", "bbox": [2323, 1703, 2599, 1902]},
+                            {"id": "step_17", "step_code": "17", "text": "Kiểm tra và cung cấp hướng xử lý / kết quả cho Agent", "node_type": "action", "shape_kind": "rectangle", "bbox": [2668, 1904, 3002, 2095]},
+                            {"id": "step_18", "step_code": "18", "text": "Phản hồi TX/KH dựa trên hướng dẫn / kết quả được cung cấp", "node_type": "action", "shape_kind": "rectangle", "bbox": [2882, 1714, 3119, 1832], "terminal_state": "resolved"},
+                        ],
+                        "edges": [
+                            {"from_step_code": "15.1", "to_step_code": "16", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "17", "to_step_code": "18", "condition": "return", "confidence": 0.9},
+                        ],
+                    }
+                ]
+            },
+        }
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="inbound_call.pdf",
+            raw_text="15.1. Báo KH/Partner/NH Be ghi nhận thông tin kiểm tra và phản hồi kết quả sau\n16. Dựa trên vấn đề Agent chuyển cho Agent Layer 2 / hỏi ý kiến Teamlead / Bộ phận liên quan theo quy định\n17. Kiểm tra và cung cấp hướng xử lý / kết quả cho Agent\n18. Phản hồi TX/KH dựa trên hướng dẫn / kết quả được cung cấp",
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        self.assertFalse(any("workflow_v3_action_missing_terminal_or_outgoing:16" == blocker for blocker in report["blockers"]))
+        edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        self.assertIn(("node_16", "handoff", "node_17"), edge_keys)
+
     def test_boundary_nodes_with_ambiguous_zero_ids_do_not_collide(self) -> None:
         transcription = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
         page = transcription["canvas"]["pages"][0]

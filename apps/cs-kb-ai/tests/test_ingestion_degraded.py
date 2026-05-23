@@ -809,6 +809,51 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(semantic_candidate.metadata["source_ref_quality"], "bbox")
         self.assertTrue(semantic_candidate.metadata["topology_review_required"])
 
+    def test_workflow_degraded_fallback_drops_marker_only_annotations_and_normalizes_display_text(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        raw_annotation = "(c) Nếu\nKH/Partner/NH\ncần hỗ trợ thêm\nvấn đề khác Agent hỗ trợ theo quy trình"
+        semantic_refinement = {
+            "workflow_graph_candidate": {"graph_confidence": 0.62, "uncertain_edges": [], "topology_review_required": True},
+            "pages": [
+                {
+                    "page": 1,
+                    "semantic_nodes": [],
+                    "annotations": [
+                        {
+                            "id": "ann_c_marker",
+                            "semantic_node_type": "annotation",
+                            "title": "(c)",
+                            "content": "(c)",
+                            "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [10, 20, 30, 40]}],
+                        },
+                        {
+                            "id": "ann_c_full",
+                            "semantic_node_type": "annotation",
+                            "title": "(c) Nếu",
+                            "content": raw_annotation,
+                            "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [40, 50, 120, 160]}],
+                        },
+                    ],
+                }
+            ],
+        }
+
+        chunks = ingestion.semantic_workflow_candidate_chunks(
+            "workflow.pdf",
+            semantic_refinement,
+            start_index=0,
+            classification=classification,
+            ai_error="workflow_graph_requires_review",
+        )
+
+        annotations = [chunk for chunk in chunks if chunk.section == "candidate_annotation"]
+        self.assertEqual(len(annotations), 1)
+        self.assertNotEqual(annotations[0].content, "(c)")
+        self.assertNotIn("\n", annotations[0].content)
+        self.assertIn("(c) Nếu KH/Partner/NH cần hỗ trợ thêm", annotations[0].content)
+        self.assertEqual(annotations[0].metadata["source_text"], raw_annotation)
+        self.assertEqual(annotations[0].metadata["display_text"], annotations[0].content)
+
     def test_workflow_semantic_refine_does_not_treat_numbered_oval_as_start(self) -> None:
         self.assertEqual(
             ingestion.classify_semantic_node_type("10. Tạo case lưu trữ trên hệ thống", "start"),
