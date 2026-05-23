@@ -619,40 +619,26 @@ def ensure_boundary_and_terminal_edges(
             continue
         if has_resolved_outgoing_edge(node_id, edges, uncertain_edges):
             continue
-        handoff_target = handoff_follow_up_node(node, nodes)
-        if handoff_target and (node_id, str(handoff_target.get("id") or ""), "handoff") not in edge_keys:
-            edges.append(synthetic_edge(filename, node, handoff_target, "handoff", "synthesized_handoff_edge"))
-            edge_keys.add((node_id, str(handoff_target.get("id") or ""), "handoff"))
-            conflicts.append(f"workflow_v3_handoff_edge_synthesized:{node.get('step_code') or node_id}->{handoff_target.get('step_code') or handoff_target.get('id')}")
-            continue
         if is_external_continuation_node(node):
             continue
-        if not terminal_action_evidence(node):
+        if terminal_action_evidence(node):
+            if (node_id, end_id, "next") in edge_keys:
+                continue
+            edges.append(synthetic_edge(filename, node, node_by_id[end_id], "next", "synthesized_terminal_edge"))
+            edge_keys.add((node_id, end_id, "next"))
+            conflicts.append(f"workflow_v3_terminal_edge_synthesized:{node.get('step_code') or node_id}->{end_id}")
             continue
-        if (node_id, end_id, "next") in edge_keys:
-            continue
-        edges.append(synthetic_edge(filename, node, node_by_id[end_id], "next", "synthesized_terminal_edge"))
-        edge_keys.add((node_id, end_id, "next"))
-        conflicts.append(f"workflow_v3_terminal_edge_synthesized:{node.get('step_code') or node_id}->{end_id}")
+        next_target = sequential_follow_up_node(node, nodes)
+        if next_target and (node_id, str(next_target.get("id") or ""), "next") not in edge_keys:
+            edges.append(synthetic_edge(filename, node, next_target, "next", "synthesized_sequential_step_edge"))
+            edge_keys.add((node_id, str(next_target.get("id") or ""), "next"))
+            conflicts.append(f"workflow_v3_sequential_edge_synthesized:{node.get('step_code') or node_id}->{next_target.get('step_code') or next_target.get('id')}")
     return conflicts
 
 
-def handoff_follow_up_node(node: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+def sequential_follow_up_node(node: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
     code = normalize_step_code(node.get("step_code"))
     if not code or "." in code:
-        return None
-    text = normalized_text(" ".join(str(node.get(key) or "") for key in ("title", "content")))
-    handoff_signals = (
-        "agent layer 2",
-        "layer 2",
-        "teamlead",
-        "team lead",
-        "bo phan lien quan",
-        "hoi y kien",
-        "chuyen cho",
-        "chuyen agent",
-    )
-    if not any(signal in text for signal in handoff_signals):
         return None
     try:
         next_code = str(int(code) + 1)

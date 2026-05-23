@@ -425,7 +425,7 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
         self.assertIn(("node_8", "yes", "node_8_1"), edge_keys)
 
-    def test_handoff_step_16_synthesizes_outgoing_to_step_17_when_missing(self) -> None:
+    def test_step_16_synthesizes_sequential_outgoing_to_step_17_when_missing(self) -> None:
         transcription = {
             "document_metadata": {"title": "Inbound call workflow"},
             "canvas": {
@@ -459,7 +459,41 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         graph = payload.workflow_graph.model_dump()
         self.assertFalse(any("workflow_v3_action_missing_terminal_or_outgoing:16" == blocker for blocker in report["blockers"]))
         edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
-        self.assertIn(("node_16", "handoff", "node_17"), edge_keys)
+        self.assertIn(("node_16", "next", "node_17"), edge_keys)
+
+    def test_missing_outgoing_action_uses_next_step_code_without_language_signals(self) -> None:
+        transcription = {
+            "document_metadata": {"title": "Generic workflow"},
+            "canvas": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "nodes": [
+                            {"id": "step_16", "step_code": "16", "text": "Review the account state with the escalation owner", "node_type": "action", "shape_kind": "rectangle", "bbox": [100, 100, 220, 180]},
+                            {"id": "step_17", "step_code": "17", "text": "Provide the handling result to the frontline agent", "node_type": "action", "shape_kind": "rectangle", "bbox": [260, 100, 420, 180]},
+                            {"id": "step_18", "step_code": "18", "text": "Reply based on the approved handling result", "node_type": "action", "shape_kind": "rectangle", "bbox": [460, 100, 620, 180], "terminal_state": "resolved"},
+                        ],
+                        "edges": [
+                            {"from_step_code": "17", "to_step_code": "18", "condition": "next", "confidence": 0.9},
+                        ],
+                    }
+                ]
+            },
+        }
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="generic_workflow.pdf",
+            raw_text="16. Review the account state with the escalation owner\n17. Provide the handling result to the frontline agent\n18. Reply based on the approved handling result",
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        self.assertFalse(any("workflow_v3_action_missing_terminal_or_outgoing:16" == blocker for blocker in report["blockers"]))
+        edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        self.assertIn(("node_16", "next", "node_17"), edge_keys)
 
     def test_boundary_nodes_with_ambiguous_zero_ids_do_not_collide(self) -> None:
         transcription = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
