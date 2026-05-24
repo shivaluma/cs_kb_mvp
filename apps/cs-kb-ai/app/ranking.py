@@ -223,7 +223,7 @@ def default_ranking_config() -> dict[str, Any]:
                 "content": 12,
                 "max_total": 36,
             },
-            "structured_field_value_match": {"table_row": 180, "default": 80},
+            "structured_field_value_match": {"table_row": 180, "structured": 180, "default": 80},
             "source_ref_quality": {"table_row": 8, "bbox": 8, "block_id": 6, "paragraph_only": 3, "none": -20},
             "status": {"published": 15, "approved": 5, "needs_review": -20, "draft": -40},
             "current_version": {"true": 8, "false": -25},
@@ -1137,7 +1137,8 @@ def structured_field_value_boost(query: str, candidate: SearchCandidate, stable_
             matches.append(value_text)
     if not matches:
         return 0.0, {"matched": []}
-    quality_key = "table_row" if candidate.source_ref_quality == "table_row" else "default"
+    normalized_quality = normalize_key(candidate.source_ref_quality)
+    quality_key = normalized_quality if normalized_quality in cfg else "default"
     weight = float(cfg.get(quality_key, cfg.get("default", 0)) or 0)
     return weight, {"matched": list(dict.fromkeys(matches)), "weight_key": quality_key}
 

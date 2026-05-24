@@ -160,7 +160,7 @@ class SOPRankingPipelineTest(unittest.TestCase):
                     "operational_note",
                     "Tên Hãng: Thành Lợi; SĐT: 0243551551",
                     score=2.33,
-                    source_ref_quality="table_row",
+                    source_ref_quality="structured",
                 ),
             ],
             RankingOptions(mode="portal_search", debug=True),
