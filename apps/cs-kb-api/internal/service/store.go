@@ -1028,24 +1028,46 @@ func (s *Store) searchMeili(ctx context.Context, req model.SearchRequest) ([]mod
 }
 
 func (s *Store) searchMeiliChunks(ctx context.Context, req model.SearchRequest) ([]model.SearchResult, error) {
-	payload := map[string]any{
-		"q":                req.Query,
-		"limit":            30,
-		"showRankingScore": true,
+	queries := portalChunkSearchQueries(req.Query)
+	mergedHits := make([]aiChunkDocument, 0, 30)
+	seen := map[string]int{}
+	var firstErr error
+	for _, query := range queries {
+		hits, err := s.searchMeiliChunkHits(ctx, req, query)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, hit := range hits {
+			key := hit.ChunkID
+			if key == "" {
+				key = hit.ID
+			}
+			if key == "" {
+				key = fmt.Sprintf("%s:%s:%d", hit.DocumentID, hit.VersionID, hit.ChunkIndex)
+			}
+			if existingIndex, ok := seen[key]; ok {
+				if hit.RankingScore > mergedHits[existingIndex].RankingScore {
+					mergedHits[existingIndex].RankingScore = hit.RankingScore
+					mergedHits[existingIndex].RankingScoreDetails = hit.RankingScoreDetails
+				}
+				continue
+			}
+			seen[key] = len(mergedHits)
+			mergedHits = append(mergedHits, hit)
+		}
 	}
-	if req.Debug {
-		payload["showRankingScoreDetails"] = true
+	if len(mergedHits) == 0 && firstErr != nil {
+		return nil, firstErr
 	}
-	filter := combineMeiliFilters("status = \"published\"", "is_current_version = true", meiliFilter(req.Filters))
-	if filter != "" {
-		payload["filter"] = filter
+	rankedHits := rerankPortalChunkHits(req.Query, mergedHits)
+	if len(rankedHits) > 30 {
+		rankedHits = rankedHits[:30]
 	}
-	var decoded meiliChunkSearchResponse
-	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/sop_chunks/search", payload, &decoded); err != nil {
-		return nil, err
-	}
-	results := make([]model.SearchResult, 0, len(decoded.Hits))
-	for index, hit := range decoded.Hits {
+	results := make([]model.SearchResult, 0, len(rankedHits))
+	for index, hit := range rankedHits {
 		confidence := hit.RankingScore
 		if confidence <= 0 {
 			confidence = 1 - float64(index)*0.06
@@ -1062,12 +1084,33 @@ func (s *Store) searchMeiliChunks(ctx context.Context, req model.SearchRequest) 
 					"rank":                  index + 1,
 					"mode":                  "portal_search",
 					"index":                 "sop_chunks",
+					"query_variants":        queries,
 				},
 			}
 		}
 		results = append(results, aiChunkToSearchResult(hit, confidence, debug))
 	}
 	return results, nil
+}
+
+func (s *Store) searchMeiliChunkHits(ctx context.Context, req model.SearchRequest, query string) ([]aiChunkDocument, error) {
+	payload := map[string]any{
+		"q":                query,
+		"limit":            30,
+		"showRankingScore": true,
+	}
+	if req.Debug {
+		payload["showRankingScoreDetails"] = true
+	}
+	filter := combineMeiliFilters("status = \"published\"", "is_current_version = true", meiliFilter(req.Filters))
+	if filter != "" {
+		payload["filter"] = filter
+	}
+	var decoded meiliChunkSearchResponse
+	if err := s.meiliRequest(ctx, http.MethodPost, "/indexes/sop_chunks/search", payload, &decoded); err != nil {
+		return nil, err
+	}
+	return decoded.Hits, nil
 }
 
 func (s *Store) searchMeiliSOPs(ctx context.Context, req model.SearchRequest) ([]model.SearchResult, error) {
@@ -1309,6 +1352,147 @@ func normalize(value string) string {
 		builder.WriteRune(' ')
 	}
 	return strings.Join(strings.Fields(builder.String()), " ")
+}
+
+func portalChunkSearchQueries(query string) []string {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return nil
+	}
+	queries := []string{trimmed}
+	core, ok := phoneLookupCoreQuery(trimmed)
+	if ok && core != "" {
+		queries = append(queries, "sdt "+core, "sđt "+core, core)
+	}
+	return uniqueNonEmptyStrings(queries)
+}
+
+func phoneLookupCoreQuery(query string) (string, bool) {
+	normalized := normalize(query)
+	tokens := strings.Fields(normalized)
+	if len(tokens) == 0 {
+		return "", false
+	}
+	output := make([]string, 0, len(tokens))
+	foundPhoneIntent := false
+	for index := 0; index < len(tokens); index++ {
+		token := tokens[index]
+		if token == "sdt" || token == "sđt" {
+			foundPhoneIntent = true
+			continue
+		}
+		if token == "phone" && index+1 < len(tokens) && tokens[index+1] == "number" {
+			foundPhoneIntent = true
+			index++
+			continue
+		}
+		if (token == "so" || token == "số") && index+2 < len(tokens) {
+			next := tokens[index+1]
+			afterNext := tokens[index+2]
+			if (next == "dien" || next == "điện") && (afterNext == "thoai" || afterNext == "thoại") {
+				foundPhoneIntent = true
+				index += 2
+				continue
+			}
+		}
+		output = append(output, token)
+	}
+	core := strings.Join(output, " ")
+	return core, foundPhoneIntent && core != ""
+}
+
+func rerankPortalChunkHits(query string, hits []aiChunkDocument) []aiChunkDocument {
+	type scoredHit struct {
+		hit   aiChunkDocument
+		score float64
+	}
+	coreQuery, hasPhoneIntent := phoneLookupCoreQuery(query)
+	coreTokens := importantPortalQueryTokens(coreQuery)
+	scored := make([]scoredHit, 0, len(hits))
+	for _, hit := range hits {
+		text := normalize(strings.Join([]string{
+			hit.Title,
+			hit.NormalizedTitle,
+			hit.Heading,
+			hit.Section,
+			hit.DisplayText,
+			hit.Content,
+			hit.RetrievalText,
+			hit.SourceText,
+			stringFromAny(hit.Keywords),
+			stringFromAny(hit.MacroText),
+		}, " "))
+		score := hit.RankingScore * 100
+		matchedImportant := 0
+		for _, token := range coreTokens {
+			if strings.Contains(text, token) {
+				score += 10
+				matchedImportant++
+			}
+		}
+		if len(coreTokens) > 0 && matchedImportant == len(coreTokens) {
+			score += 35
+		}
+		if coreQuery != "" && strings.Contains(text, normalize(coreQuery)) {
+			score += 25
+		}
+		if hasPhoneIntent && containsPhoneEvidence(text) {
+			score += 8
+		}
+		scored = append(scored, scoredHit{hit: hit, score: score})
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].hit.RankingScore > scored[j].hit.RankingScore
+		}
+		return scored[i].score > scored[j].score
+	})
+	output := make([]aiChunkDocument, 0, len(scored))
+	for _, item := range scored {
+		output = append(output, item.hit)
+	}
+	return output
+}
+
+func importantPortalQueryTokens(query string) []string {
+	stop := map[string]bool{
+		"": true, "so": true, "số": true, "dien": true, "điện": true, "thoai": true, "thoại": true,
+		"sdt": true, "sđt": true, "phone": true, "number": true, "cua": true, "của": true,
+	}
+	tokens := []string{}
+	for _, token := range strings.Fields(normalize(query)) {
+		if len([]rune(token)) < 2 || stop[token] {
+			continue
+		}
+		tokens = append(tokens, token)
+	}
+	return uniqueNonEmptyStrings(tokens)
+}
+
+func containsPhoneEvidence(text string) bool {
+	return strings.Contains(text, "sdt") ||
+		strings.Contains(text, "sđt") ||
+		strings.Contains(text, "so dien thoai") ||
+		strings.Contains(text, "số điện thoại") ||
+		strings.Contains(text, "phone number")
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	output := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		clean := strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+		if clean == "" {
+			continue
+		}
+		key := strings.ToLower(clean)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		output = append(output, clean)
+	}
+	return output
 }
 
 func containsAnyOrEmpty(values []string, filters []string) bool {

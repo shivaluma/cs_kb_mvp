@@ -85,3 +85,48 @@ func TestIndexableAIChunkAllowsApprovedStructuredWorkflowChunkWithBBox(t *testin
 		t.Fatal("expected approved structured workflow chunk with bbox to be indexable")
 	}
 }
+
+func TestPortalChunkSearchQueriesRewritePhoneLookupToAbbreviationAndEntity(t *testing.T) {
+	got := portalChunkSearchQueries("số điện thoại taxi thành lợi")
+	want := []string{
+		"số điện thoại taxi thành lợi",
+		"sdt taxi thành lợi",
+		"sđt taxi thành lợi",
+		"taxi thành lợi",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("expected %v, got %v", want, got)
+		}
+	}
+}
+
+func TestRerankPortalChunkHitsPromotesExactPhoneRowOverBroadPhonePolicy(t *testing.T) {
+	hits := []aiChunkDocument{
+		{
+			ChunkID:      "broad-policy",
+			Title:        "Quy định xác minh tài khoản TX, KH",
+			Heading:      "Liên hệ qua số điện thoại khác",
+			Content:      "CS xử lý yêu cầu liên hệ qua số điện thoại khác của tài xế.",
+			RankingScore: 0.61,
+		},
+		{
+			ChunkID:         "taxi-row",
+			Title:           "Quy định xác minh tài khoản TX, KH",
+			NormalizedTitle: "sdt hang taxi thanh loi",
+			Heading:         "SĐT hãng Taxi Thành Lợi",
+			DisplayText:     "Tên Hãng: Thành Lợi; SĐT: 0243551551",
+			Content:         "Tên Hãng: Thành Lợi; SĐT: 0243551551",
+			RankingScore:    0.49,
+		},
+	}
+
+	ranked := rerankPortalChunkHits("số điện thoại taxi thành lợi", hits)
+
+	if ranked[0].ChunkID != "taxi-row" {
+		t.Fatalf("expected taxi row first, got %#v", ranked)
+	}
+}
