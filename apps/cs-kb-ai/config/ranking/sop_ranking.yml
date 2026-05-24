@@ -38,6 +38,10 @@
       "content": 12,
       "max_total": 36
     },
+    "structured_field_value_match": {
+      "table_row": 180,
+      "default": 80
+    },
     "source_ref_quality": {
       "table_row": 8,
       "bbox": 8,

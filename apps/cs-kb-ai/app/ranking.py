@@ -223,6 +223,7 @@ def default_ranking_config() -> dict[str, Any]:
                 "content": 12,
                 "max_total": 36,
             },
+            "structured_field_value_match": {"table_row": 180, "default": 80},
             "source_ref_quality": {"table_row": 8, "bbox": 8, "block_id": 6, "paragraph_only": 3, "none": -20},
             "status": {"published": 15, "approved": 5, "needs_review": -20, "draft": -40},
             "current_version": {"true": 8, "false": -25},
@@ -526,6 +527,11 @@ def score_candidate(
     if exact_boost:
         boosts["exact_phrase"] = round(exact_boost, 4)
 
+    structured_boost, structured_debug = structured_field_value_boost(query, candidate, stable)
+    score += structured_boost
+    if structured_boost:
+        boosts["structured_field_value_match"] = round(structured_boost, 4)
+
     chunk_priority = chunk_type_priority(candidate, query_understanding.intent, config)
     if candidate.chunk_type.endswith("_group") and query_understanding.intent in {"wording", "handling", "compliance", "forbidden_wording"}:
         group_boost = float(stable.get("grouped_context_for_intent") or 0)
@@ -615,6 +621,7 @@ def score_candidate(
         "boosts": boosts,
         "penalties": penalties,
         "exact_phrase": exact_debug,
+        "structured_field_value": structured_debug,
         "source_ref_quality": candidate.source_ref_quality,
     }
     return replace(candidate, business_score=score, final_score=score, score_debug=debug if options.debug else {})
@@ -1111,6 +1118,49 @@ def exact_phrases(query: str, extra_phrases: tuple[str, ...] = ()) -> list[str]:
     if normalized_query and len(normalized_query) >= 3:
         phrases.append(normalized_query)
     return list(dict.fromkeys(phrases))
+
+
+def structured_field_value_boost(query: str, candidate: SearchCandidate, stable_boosts: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    cfg = stable_boosts.get("structured_field_value_match") if isinstance(stable_boosts.get("structured_field_value_match"), dict) else {}
+    if not cfg:
+        return 0.0, {"matched": []}
+    query_text = normalize_text(query)
+    if not query_text:
+        return 0.0, {"matched": []}
+    matches = []
+    for value in structured_field_values(candidate.content):
+        value_text = normalize_text(value)
+        if not is_specific_field_value(value_text):
+            continue
+        value_tokens = meaningful_tokens(value_text)
+        if value_text in query_text or (value_tokens and all(token in query_text for token in value_tokens)):
+            matches.append(value_text)
+    if not matches:
+        return 0.0, {"matched": []}
+    quality_key = "table_row" if candidate.source_ref_quality == "table_row" else "default"
+    weight = float(cfg.get(quality_key, cfg.get("default", 0)) or 0)
+    return weight, {"matched": list(dict.fromkeys(matches)), "weight_key": quality_key}
+
+
+def structured_field_values(text: str) -> list[str]:
+    values = []
+    for part in re.split(r"[;\n|]+", str(text or "")):
+        if ":" not in part:
+            continue
+        _, value = part.split(":", 1)
+        cleaned = value.strip(" \t\r\n.,;")
+        if cleaned:
+            values.append(cleaned)
+    return values
+
+
+def is_specific_field_value(value: str) -> bool:
+    tokens = meaningful_tokens(value)
+    return len(tokens) >= 2 or any(any(char.isdigit() for char in token) and len(token) >= 3 for token in tokens)
+
+
+def meaningful_tokens(text: str) -> list[str]:
+    return [token for token in re.findall(r"[a-z0-9]+", normalize_text(text)) if len(token) >= 2]
 
 
 def chunk_type_priority(candidate: SearchCandidate, intent: str, config: dict[str, Any]) -> float:

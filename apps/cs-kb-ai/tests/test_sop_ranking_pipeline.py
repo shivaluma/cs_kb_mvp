@@ -144,6 +144,31 @@ class SOPRankingPipelineTest(unittest.TestCase):
         self.assertIn("duplicate_parent", duplicate.score_debug["penalties"])
         self.assertIn("example_when_policy_exists", example.score_debug["penalties"])
 
+    def test_structured_table_row_value_can_beat_broad_group_for_lookup_query(self) -> None:
+        ranked = business_rerank(
+            "số điện thoại taxi thành lợi",
+            [
+                candidate(
+                    "group",
+                    "operational_note",
+                    "CS hướng dẫn tài xế beTaxi liên hệ tổng đài hãng. Danh sách taxi có Thanh Nga, Thành Lợi, Vina Taxi.",
+                    score=3.82,
+                    source_ref_quality="block_id",
+                ),
+                candidate(
+                    "row",
+                    "operational_note",
+                    "Tên Hãng: Thành Lợi; SĐT: 0243551551",
+                    score=2.33,
+                    source_ref_quality="table_row",
+                ),
+            ],
+            RankingOptions(mode="portal_search", debug=True),
+        )
+
+        self.assertEqual(ranked[0].chunk_id, "row")
+        self.assertGreater(ranked[0].score_debug["boosts"]["structured_field_value_match"], 0)
+
     def test_config_change_affects_ranking_without_code_change(self) -> None:
         config = copy.deepcopy(load_ranking_config())
         config["chunk_type_priorities"]["generic"]["full_sop"] = 200
