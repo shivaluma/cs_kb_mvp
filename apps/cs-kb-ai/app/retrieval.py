@@ -90,6 +90,8 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
     ranking_debug: dict[str, Any] = {}
     lexical_rows: list[dict[str, Any]] = []
     vector_rows: list[dict[str, Any]] = []
+    effective_candidate_mode = request.mode
+    vector_failure = ""
     if ranking_mode == "ai_chat":
         keyword_limit = int(ranking_mode_config.get("keyword_candidate_limit") or max(request.limit * 4, 20))
         vector_limit = int(ranking_mode_config.get("vector_candidate_limit") or max(request.limit * 4, 20))
@@ -106,6 +108,48 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
     warnings.extend(query_understanding.warnings)
     candidate_filters, applied_query_filters = filters_with_query_understanding(request.filters, query_understanding, ranking_mode)
 
+    def empty_no_reliable_response() -> RetrievalResponse:
+        trace_warnings = [*warnings, "no_reliable_source"]
+        trace = retrieval_trace_payload(
+            query_expansion=query_expansion,
+            ranking_debug={
+                "ranking_mode": ranking_mode,
+                "keyword_candidate_count": len(lexical_rows),
+                "vector_candidate_count": 0,
+                "vector_failure": vector_failure,
+            },
+            warnings=trace_warnings,
+            selected_rows=[],
+        )
+        latency_ms = repository.log_retrieval(
+            request.query,
+            retrieval_log_filters(request.filters, candidate_filters, applied_query_filters),
+            request.mode,
+            0,
+            started_at,
+            trace=trace,
+        )
+        return RetrievalResponse(
+            query=request.query,
+            normalized_query=normalized_query,
+            query_expansion=query_expansion,
+            mode=request.mode,
+            results=[],
+            citations=[],
+            warnings=trace_warnings,
+            latency_ms=latency_ms,
+        )
+
+    def populate_lexical_fallback() -> bool:
+        nonlocal lexical_rows
+        lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, candidate_filters, keyword_limit, request.debug)
+        if not lexical_rows and applied_query_filters:
+            lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, request.filters, keyword_limit, request.debug)
+            warnings.append("query_understanding_filters_relaxed:no_keyword_candidates")
+        if keyword_warning:
+            warnings.append(keyword_warning)
+        return bool(lexical_rows)
+
     if request.mode in {"lexical", "hybrid"}:
         lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, candidate_filters, keyword_limit, request.debug)
         if not lexical_rows and applied_query_filters:
@@ -121,71 +165,23 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
                 vector_rows = repository.vector_search(vector, request.filters, vector_limit)
                 warnings.append("query_understanding_filters_relaxed:no_vector_candidates")
         except EmbeddingProviderError:
+            vector_failure = "embedding_unavailable"
             warnings.append("embedding_unavailable")
             if request.mode == "vector":
-                trace_warnings = [*warnings, "no_reliable_source"]
-                trace = retrieval_trace_payload(
-                    query_expansion=query_expansion,
-                    ranking_debug={
-                        "ranking_mode": ranking_mode,
-                        "keyword_candidate_count": len(lexical_rows),
-                        "vector_candidate_count": 0,
-                        "vector_failure": "embedding_unavailable",
-                    },
-                    warnings=trace_warnings,
-                    selected_rows=[],
-                )
-                latency_ms = repository.log_retrieval(
-                    request.query,
-                    retrieval_log_filters(request.filters, candidate_filters, applied_query_filters),
-                    request.mode,
-                    0,
-                    started_at,
-                    trace=trace,
-                )
-                return RetrievalResponse(
-                    query=request.query,
-                    normalized_query=normalized_query,
-                    query_expansion=query_expansion,
-                    mode=request.mode,
-                    results=[],
-                    citations=[],
-                    warnings=[*warnings, "no_reliable_source"],
-                    latency_ms=latency_ms,
-                )
+                if populate_lexical_fallback():
+                    warnings.append("vector_mode_lexical_fallback")
+                    effective_candidate_mode = "lexical"
+                else:
+                    return empty_no_reliable_response()
         except Exception as exc:
+            vector_failure = exc.__class__.__name__
             warnings.append(f"vector_search_failed:{exc.__class__.__name__}")
             if request.mode == "vector":
-                trace_warnings = [*warnings, "no_reliable_source"]
-                trace = retrieval_trace_payload(
-                    query_expansion=query_expansion,
-                    ranking_debug={
-                        "ranking_mode": ranking_mode,
-                        "keyword_candidate_count": len(lexical_rows),
-                        "vector_candidate_count": 0,
-                        "vector_failure": exc.__class__.__name__,
-                    },
-                    warnings=trace_warnings,
-                    selected_rows=[],
-                )
-                latency_ms = repository.log_retrieval(
-                    request.query,
-                    retrieval_log_filters(request.filters, candidate_filters, applied_query_filters),
-                    request.mode,
-                    0,
-                    started_at,
-                    trace=trace,
-                )
-                return RetrievalResponse(
-                    query=request.query,
-                    normalized_query=normalized_query,
-                    query_expansion=query_expansion,
-                    mode=request.mode,
-                    results=[],
-                    citations=[],
-                    warnings=[*warnings, "no_reliable_source"],
-                    latency_ms=latency_ms,
-                )
+                if populate_lexical_fallback():
+                    warnings.append("vector_mode_lexical_fallback")
+                    effective_candidate_mode = "lexical"
+                else:
+                    return empty_no_reliable_response()
 
     ranking_options = RankingOptions(
         mode=ranking_mode,
@@ -193,9 +189,9 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         query_understanding=query_understanding,
         force_model_rerank=request.use_model_rerank,
     )
-    if request.mode == "lexical":
+    if effective_candidate_mode == "lexical":
         candidates = candidates_from_rows(lexical_rows, "meilisearch" if any(row.get("from_meilisearch") for row in lexical_rows) else "lexical")
-    elif request.mode == "vector":
+    elif effective_candidate_mode == "vector":
         candidates = candidates_from_rows(vector_rows, "vector")
     else:
         keyword_source = "meilisearch" if any(row.get("from_meilisearch") for row in lexical_rows) else "lexical"
@@ -215,6 +211,8 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         "query_understanding_used": query_understanding.source == "model",
         "keyword_candidate_count": len(lexical_rows),
         "vector_candidate_count": len(vector_rows),
+        "vector_failure": vector_failure,
+        "effective_candidate_mode": effective_candidate_mode,
         "merged_candidate_count": len(candidates),
         "business_candidate_count": len(business_ranked),
         "model_rerank": rerank_decision,

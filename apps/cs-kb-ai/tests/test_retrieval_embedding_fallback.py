@@ -57,26 +57,36 @@ class RetrievalEmbeddingFallbackTest(unittest.TestCase):
         self.assertEqual(len(response.results), 1)
         self.assertEqual(response.results[0].rank_source, ["lexical"])
 
-    def test_vector_only_returns_warning_when_embedding_is_unavailable(self) -> None:
+    def test_vector_only_falls_back_to_lexical_when_embedding_is_unavailable(self) -> None:
         with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \
+            patch("app.retrieval.repository.lexical_search", return_value=[retrieval_row()]), \
+            patch("app.retrieval.repository.approved_relation_target_rows", return_value=[]), \
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}), \
             patch("app.retrieval.repository.log_retrieval", return_value=9), \
             patch("app.retrieval.embed_text", side_effect=EmbeddingProviderError("down")):
             response = retrieve(RetrievalRequest(query="refund pending", mode="vector", limit=3))
 
-        self.assertEqual(response.results, [])
+        self.assertEqual(len(response.results), 1)
+        self.assertEqual(response.results[0].rank_source, ["lexical"])
         self.assertIn("embedding_unavailable", response.warnings)
-        self.assertIn("no_reliable_source", response.warnings)
+        self.assertIn("vector_mode_lexical_fallback", response.warnings)
+        self.assertNotIn("no_reliable_source", response.warnings)
 
-    def test_vector_only_returns_warning_when_vector_search_fails(self) -> None:
+    def test_vector_only_falls_back_to_lexical_when_vector_search_fails(self) -> None:
         with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \
+            patch("app.retrieval.repository.lexical_search", return_value=[retrieval_row()]), \
             patch("app.retrieval.repository.vector_search", side_effect=TypeError("bad vector dimension")), \
+            patch("app.retrieval.repository.approved_relation_target_rows", return_value=[]), \
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}), \
             patch("app.retrieval.repository.log_retrieval", return_value=9), \
             patch("app.retrieval.embed_text", return_value=[0.1, 0.2]):
             response = retrieve(RetrievalRequest(query="refund pending", mode="vector", limit=3))
 
-        self.assertEqual(response.results, [])
+        self.assertEqual(len(response.results), 1)
+        self.assertEqual(response.results[0].rank_source, ["lexical"])
         self.assertIn("vector_search_failed:TypeError", response.warnings)
-        self.assertIn("no_reliable_source", response.warnings)
+        self.assertIn("vector_mode_lexical_fallback", response.warnings)
+        self.assertNotIn("no_reliable_source", response.warnings)
 
     def test_debug_retrieval_persists_candidate_trace(self) -> None:
         with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \
