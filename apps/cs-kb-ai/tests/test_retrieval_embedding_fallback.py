@@ -6,7 +6,14 @@ from app.retrieval import retrieve
 from app.schemas import RetrievalRequest
 
 
-def retrieval_row(chunk_id: str = "chunk-1") -> dict[str, object]:
+def retrieval_row(
+    chunk_id: str = "chunk-1",
+    *,
+    heading: str = "Refund pending",
+    content: str = "Handle refund pending requests.",
+    score: float = 1.2,
+    source_ref_quality: str = "structured",
+) -> dict[str, object]:
     return {
         "chunk_id": chunk_id,
         "document_id": "doc-1",
@@ -16,14 +23,15 @@ def retrieval_row(chunk_id: str = "chunk-1") -> dict[str, object]:
         "version_number": 1,
         "chunk_index": 0,
         "section": "policy_rule",
-        "heading": "Refund pending",
-        "content": "Handle refund pending requests.",
+        "heading": heading,
+        "content": content,
         "metadata": {
             "unit_type": "policy_rule",
             "review_status": "approved",
             "extraction_status": "structured",
+            "source_ref_quality": source_ref_quality,
         },
-        "score": 1.2,
+        "score": score,
     }
 
 
@@ -87,6 +95,37 @@ class RetrievalEmbeddingFallbackTest(unittest.TestCase):
         self.assertIn("vector_search_failed:TypeError", response.warnings)
         self.assertIn("vector_mode_lexical_fallback", response.warnings)
         self.assertNotIn("no_reliable_source", response.warnings)
+
+    def test_vector_fallback_backfills_postgres_when_meili_misses_structured_row(self) -> None:
+        meili_row = retrieval_row(
+            "broad",
+            heading="TX bị khóa bởi SI, yêu cầu gọi số khác",
+            content="Trường hợp tài xế yêu cầu gọi qua số điện thoại khác.",
+            score=0.5,
+        )
+        meili_row["from_meilisearch"] = True
+        meili_row["rank_source"] = ["meilisearch"]
+        postgres_row = retrieval_row(
+            "taxi-row",
+            heading="SĐT hãng Taxi Thành Lợi",
+            content="Tên Hãng: Thành Lợi; SĐT: 0243551551",
+            score=0.2,
+        )
+        with patch("app.retrieval.settings.meili_host", "http://meili.local"), \
+            patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \
+            patch("app.retrieval.meili_ai_chunk_search", return_value=[meili_row]), \
+            patch("app.retrieval.repository.lexical_search", return_value=[postgres_row]), \
+            patch("app.retrieval.repository.approved_relation_target_rows", return_value=[]), \
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}), \
+            patch("app.retrieval.repository.log_retrieval", return_value=9), \
+            patch("app.retrieval.embed_text", side_effect=EmbeddingProviderError("down")):
+            response = retrieve(RetrievalRequest(query="số điện thoại taxi thành lợi", mode="vector", limit=3, debug=True))
+
+        self.assertEqual(response.results[0].chunk_id, "taxi-row")
+        self.assertEqual(response.results[0].rank_source, ["lexical"])
+        self.assertIn("embedding_unavailable", response.warnings)
+        self.assertIn("meili_keyword_postgres_backfill", response.warnings)
+        self.assertIn("vector_mode_lexical_fallback", response.warnings)
 
     def test_debug_retrieval_persists_candidate_trace(self) -> None:
         with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \

@@ -14,6 +14,7 @@ from app import repository
 from app.ranking import (
     RankingOptions,
     business_rerank,
+    candidate_from_row,
     candidates_from_rows,
     load_ranking_config,
     maybe_model_rerank,
@@ -190,13 +191,12 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         force_model_rerank=request.use_model_rerank,
     )
     if effective_candidate_mode == "lexical":
-        candidates = candidates_from_rows(lexical_rows, "meilisearch" if any(row.get("from_meilisearch") for row in lexical_rows) else "lexical")
+        candidates = keyword_candidates_from_rows(lexical_rows)
     elif effective_candidate_mode == "vector":
         candidates = candidates_from_rows(vector_rows, "vector")
     else:
-        keyword_source = "meilisearch" if any(row.get("from_meilisearch") for row in lexical_rows) else "lexical"
         candidates = merge_candidates(
-            candidates_from_rows(lexical_rows, keyword_source),
+            keyword_candidates_from_rows(lexical_rows),
             candidates_from_rows(vector_rows, "vector"),
             merged_limit,
             ranking_config,
@@ -373,14 +373,54 @@ def keyword_candidate_rows(
 ) -> tuple[list[dict[str, Any]], str]:
     if settings.meili_host:
         try:
-            return meili_ai_chunk_search(query, filters, limit, debug), ""
+            meili_rows = meili_ai_chunk_search(query, filters, limit, debug)
         except Exception as exc:
             logger.warning(
                 "meili_ai_chunk_search_failed",
                 extra={"event": "meili_ai_chunk_search_failed", "error": exc.__class__.__name__},
             )
             return repository.lexical_search(query, filters, limit), f"meili_keyword_fallback:{exc.__class__.__name__}"
+        if len(meili_rows) >= limit:
+            return meili_rows, ""
+        try:
+            postgres_rows = repository.lexical_search(query, filters, limit)
+        except Exception as exc:
+            logger.warning(
+                "meili_keyword_postgres_backfill_failed",
+                extra={"event": "meili_keyword_postgres_backfill_failed", "error": exc.__class__.__name__},
+            )
+            return meili_rows, f"meili_keyword_postgres_backfill_failed:{exc.__class__.__name__}"
+        merged_rows, added_count = merge_keyword_backfill_rows(meili_rows, postgres_rows, limit)
+        if added_count:
+            return merged_rows, "meili_keyword_postgres_backfill"
+        return meili_rows, ""
     return repository.lexical_search(query, filters, limit), "meili_keyword_unconfigured_postgres_fallback"
+
+
+def keyword_candidates_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
+    return [
+        candidate_from_row(row, source="meilisearch" if row.get("from_meilisearch") else "lexical", rank=rank)
+        for rank, row in enumerate(rows, start=1)
+    ]
+
+
+def merge_keyword_backfill_rows(primary_rows: list[dict[str, Any]], backfill_rows: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], int]:
+    output = [dict(row) for row in primary_rows]
+    seen = {str(row.get("chunk_id") or row.get("id") or "") for row in output}
+    added = 0
+    for row in backfill_rows:
+        chunk_id = str(row.get("chunk_id") or row.get("id") or "")
+        if not chunk_id or chunk_id in seen:
+            continue
+        item = dict(row)
+        item.setdefault("rank_source", ["lexical"])
+        item["from_meilisearch"] = False
+        output.append(item)
+        seen.add(chunk_id)
+        added += 1
+        if len(output) >= limit:
+            break
+    return output[:limit], added
 
 
 def meili_ai_chunk_search(query: str, filters: RetrievalFilters, limit: int, debug: bool = False) -> list[dict[str, Any]]:
