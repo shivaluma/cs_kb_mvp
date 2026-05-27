@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import unittest
 
+from app import ingestion
 from app.openrouter import workflow_payload_to_units
 from app.retrieval import build_display_context, retrieval_display_contract, source_anchor_for_row
-from app.text_processing import classify_document
+from app.text_processing import classify_document, workflow_units_to_chunks
 from app.workflow_v3 import compile_workflow_v3_payload, workflow_v3_quality_error_from_report
 
 
@@ -163,12 +164,109 @@ RAW_INBOUND_CALL_TEXT = "\n".join(
     ]
 )
 
+CHAT_ACCOUNT_FILENAME = "All_CHAT, CIA, NON-VOICE IN APP, CHAT SOCIAL_Quy trình xác minh tài khoản KH, TX-Từ 03.12.2024.pdf"
+
+CHAT_ACCOUNT_CANVAS = {
+    "document_metadata": {
+        "title": "All_Chat, CIA, Non-voice in app, Chat Social_Quy trình xác minh tài khoản KH,TX_từ 03/12/2024",
+        "effective_from": "2024-12-03",
+        "document_type": "workflow_diagram",
+        "actors": ["KH/TX", "CS"],
+        "audience": ["customer_service"],
+        "risk_level": "high",
+    },
+    "canvas": {
+        "pages": [
+            {
+                "page": 1,
+                "image_size": [3508, 2480],
+                "lanes": [
+                    {"id": "lane_kh_tx", "title": "KH/TX", "bbox": [55, 430, 210, 760]},
+                    {"id": "lane_cs", "title": "CS", "bbox": [55, 760, 210, 2140]},
+                ],
+                "nodes": [
+                    {"id": "start", "text": "KH/TX liên hệ Be qua CIA, Non-voice in app, Chat in app, chat social yêu cầu hỗ trợ/phản ánh vấn đề", "node_type": "start", "shape_kind": "oval", "lane": "KH/TX", "phase": "Workflow", "bbox": [500, 500, 910, 650]},
+                    node("1", "1. Vấn đề thuộc dịch vụ Be?", "decision", x=520, y=850),
+                    node("2", "2. Thông báo KH/TX liên hệ đúng đơn vị đang cung cấp dịch vụ để được hỗ trợ", x=930, y=830),
+                    node("3", "3. KH/TX liên hệ từ chính tài khoản cần hỗ trợ?", "decision", x=520, y=1180),
+                    node("4", "4. Người liên hệ có thuộc trường hợp được tiếp nhận hỗ trợ thay?", "decision", x=890, y=1180),
+                    node("5", "5. Thực hiện hỗ trợ KH/TX theo quy trình/quy định tương ứng", x=1240, y=1170),
+                    node("8.1", "8.1. Tiếp nhận hỗ trợ tài khoản KH/TX theo quy trình/quy định tương ứng", x=1260, y=840),
+                    node("8.2", "8.2. CS thông báo KH/TX cần sử dụng chính tài khoản cần hỗ trợ để liên hệ Be để được hỗ trợ (*)", x=1260, y=1460),
+                    node("9", "9. KH/TX cung cấp được không?", "decision", x=1640, y=850),
+                    node("9.1", "9.1. Hỗ trợ theo quy trình/quy định tương ứng", x=1970, y=820),
+                    node("9.2", "9.2. Hướng dẫn KH/TX kiểm tra thông tin tài khoản/SĐT/email liên quan", x=1970, y=1170),
+                    node("10", "10. KH/TX cung cấp được không?", "decision", x=2290, y=1170),
+                    node("11", "11. CS thông báo KH/TX chưa đủ thông tin để hỗ trợ và hướng dẫn KH/TX liên hệ lại khi có thông tin", x=2620, y=1170),
+                    {"id": "end", "text": "End", "node_type": "end", "shape_kind": "oval", "lane": "KH/TX", "phase": "Workflow", "bbox": [2920, 520, 3080, 640]},
+                ],
+                "edges": [
+                    {"from_node": "start", "to_step_code": "1", "condition": "next", "confidence": 0.95},
+                    {"from_step_code": "1", "to_step_code": "2", "condition": "yes", "confidence": 0.92},
+                    {"from_step_code": "1", "to_step_code": "3", "condition": "no", "label_text": "No, vấn đề thuộc dịch vụ Be", "confidence": 0.92},
+                    {"from_step_code": "3", "to_step_code": "8.1", "condition": "yes", "confidence": 0.92},
+                    {"from_step_code": "3", "to_step_code": "4", "condition": "no", "confidence": 0.92},
+                    {"from_step_code": "4", "to_step_code": "5", "condition": "yes", "confidence": 0.92},
+                    {"from_step_code": "4", "to_step_code": "8.2", "condition": "no", "confidence": 0.92},
+                    {"from_step_code": "8.1", "to_step_code": "9", "condition": "next", "confidence": 0.9},
+                    {"from_step_code": "9", "to_step_code": "9.1", "condition": "yes", "confidence": 0.9},
+                    {"from_step_code": "9", "to_step_code": "9.2", "condition": "no", "confidence": 0.9},
+                    {"from_step_code": "9.2", "to_step_code": "10", "condition": "next", "confidence": 0.9},
+                    {"from_step_code": "10", "to_step_code": "9.1", "condition": "yes", "confidence": 0.9},
+                    {"from_step_code": "10", "to_step_code": "11", "condition": "no", "confidence": 0.9},
+                    {"from_step_code": "11", "to_node": "end", "condition": "next", "confidence": 0.9},
+                    {"from_step_code": "2", "to_node": "end", "condition": "next", "confidence": 0.9},
+                ],
+                "annotations": [
+                    {
+                        "id": "ann_proxy_support",
+                        "text": "(*) Nếu tài khoản của người cần hỗ trợ không truy cập được, CS hướng dẫn người cần hỗ trợ liên hệ Be qua hotline 1900232345 hoặc hotro@be.com.vn tùy đối tượng.",
+                        "annotation_type": "annotation",
+                        "attached_to_step_codes": ["8.2"],
+                        "bbox": [240, 1860, 3200, 2180],
+                    }
+                ],
+            }
+        ]
+    },
+}
+
+RAW_CHAT_ACCOUNT_TEXT = "\n".join(
+    [
+        "All_Chat, CIA, Non-voice in app, Chat Social_Quy trình xác minh tài khoản KH,TX_từ 03/12/2024",
+        "1. Vấn đề thuộc dịch vụ Be?",
+        "2. Thông báo KH/TX liên hệ đúng đơn vị đang cung cấp dịch vụ để được hỗ trợ",
+        "3. KH/TX liên hệ từ chính tài khoản cần hỗ trợ?",
+        "4. Người liên hệ có thuộc trường hợp được tiếp nhận hỗ trợ thay?",
+        "5. Thực hiện hỗ trợ KH/TX theo quy trình/quy định tương ứng",
+        "8.1. Tiếp nhận hỗ trợ tài khoản KH/TX theo quy trình/quy định tương ứng",
+        "8.2. CS thông báo KH/TX cần sử dụng chính tài khoản cần hỗ trợ để liên hệ Be để được hỗ trợ",
+        "9. KH/TX cung cấp được không?",
+        "9.1. Hỗ trợ theo quy trình/quy định tương ứng",
+        "9.2. Hướng dẫn KH/TX kiểm tra thông tin tài khoản/SĐT/email liên quan",
+        "10. KH/TX cung cấp được không?",
+        "11. CS thông báo KH/TX chưa đủ thông tin để hỗ trợ",
+    ]
+)
+
 
 def compile_inbound_call_payload():
     payload, report, _canvas = compile_workflow_v3_payload(
         filename=INBOUND_CALL_FILENAME,
         raw_text=RAW_INBOUND_CALL_TEXT,
         transcription=INBOUND_CALL_CANVAS,
+        visual_context={},
+    )
+    assert payload is not None
+    assert workflow_v3_quality_error_from_report(report) == ""
+    return payload, report
+
+
+def compile_chat_account_payload():
+    payload, report, _canvas = compile_workflow_v3_payload(
+        filename=CHAT_ACCOUNT_FILENAME,
+        raw_text=RAW_CHAT_ACCOUNT_TEXT,
+        transcription=CHAT_ACCOUNT_CANVAS,
         visual_context={},
     )
     assert payload is not None
@@ -288,6 +386,39 @@ class InboundCallWorkflowDiagramTest(unittest.TestCase):
         self.assertEqual(display_context.highlights[0].match_strategy, "visual_bbox")
         self.assertEqual(contract.open_mode, "workflow_diagram")
         self.assertTrue(contract.highlight_source_refs[0]["bbox"])
+
+    def test_chat_account_workflow_keeps_duplicate_decision_text_as_separate_steps_after_refine(self) -> None:
+        payload, _report = compile_chat_account_payload()
+        units = workflow_payload_to_units(payload, CHAT_ACCOUNT_FILENAME)
+        chunks = workflow_units_to_chunks(units, RAW_CHAT_ACCOUNT_TEXT, CHAT_ACCOUNT_FILENAME)
+        normalized = ingestion.normalize_units(chunks)
+        refined, refine_report = ingestion.deterministic_refine_chunks(normalized, "workflow_diagram")
+
+        decision_steps = [
+            chunk.metadata.get("step_code")
+            for chunk in refined
+            if chunk.metadata.get("unit_type") == "decision_node"
+        ]
+
+        self.assertIn("9", decision_steps)
+        self.assertIn("10", decision_steps)
+        self.assertEqual(decision_steps.count("9"), 1)
+        self.assertEqual(decision_steps.count("10"), 1)
+        self.assertNotIn("workflow_node_node_10", str(next(chunk.metadata for chunk in refined if chunk.metadata.get("step_code") == "9")))
+        self.assertEqual(refine_report["deduped_count"], 0)
+
+    def test_chat_account_workflow_paths_are_root_to_terminal_when_start_node_exists(self) -> None:
+        payload, _report = compile_chat_account_payload()
+        units = workflow_payload_to_units(payload, CHAT_ACCOUNT_FILENAME)
+        grouped = units_by_type(units)
+        path_steps = [
+            unit["metadata"].get("step_codes") or []
+            for unit in grouped["workflow_path"]
+        ]
+
+        self.assertTrue(path_steps)
+        self.assertTrue(all(steps and steps[0] == "1" for steps in path_steps))
+        self.assertTrue(any({"1", "3", "8.1", "9", "9.2", "10", "11"}.issubset(set(steps)) for steps in path_steps))
 
 
 if __name__ == "__main__":

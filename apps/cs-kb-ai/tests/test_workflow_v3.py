@@ -495,6 +495,77 @@ class WorkflowV3CompilerTest(unittest.TestCase):
         edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
         self.assertIn(("node_16", "next", "node_17"), edge_keys)
 
+    def test_chat_account_terminal_actions_are_synthesized_from_operational_completion_wording(self) -> None:
+        transcription = {
+            "document_metadata": {"title": "Chat account verification workflow"},
+            "canvas": {
+                "pages": [
+                    {
+                        "page": 1,
+                        "nodes": [
+                            {"id": "start", "text": "KH/TX liên hệ Be yêu cầu hỗ trợ", "node_type": "start", "shape_kind": "oval", "bbox": [100, 100, 220, 180]},
+                            {"id": "step_1", "step_code": "1", "text": "1. Vấn đề thuộc dịch vụ Be?", "node_type": "decision", "shape_kind": "diamond", "bbox": [260, 100, 420, 220]},
+                            {"id": "step_3", "step_code": "3", "text": "3. KH/TX liên hệ từ chính tài khoản cần hỗ trợ?", "node_type": "decision", "shape_kind": "diamond", "bbox": [460, 100, 620, 220]},
+                            {"id": "step_4", "step_code": "4", "text": "4. Người liên hệ có thuộc trường hợp được tiếp nhận hỗ trợ thay?", "node_type": "decision", "shape_kind": "diamond", "bbox": [660, 100, 820, 220]},
+                            {"id": "step_5", "step_code": "5", "text": "5. Thực hiện hỗ trợ KH/TX theo quy trình/quy định tương ứng", "node_type": "action", "shape_kind": "rectangle", "bbox": [860, 100, 1040, 190]},
+                            {"id": "step_8_1", "step_code": "8.1", "text": "8.1. Tiếp nhận hỗ trợ tài khoản KH/TX theo quy trình/quy định tương ứng", "node_type": "action", "shape_kind": "rectangle", "bbox": [860, 240, 1040, 330]},
+                            {"id": "step_8_2", "step_code": "8.2", "text": "8.2. CS thông báo KH/TX cần sử dụng chính tài khoản cần hỗ trợ để liên hệ Be để được hỗ trợ (*)", "node_type": "action", "shape_kind": "rectangle", "bbox": [860, 380, 1040, 470]},
+                            {"id": "step_9", "step_code": "9", "text": "9. KH/TX cung cấp được không?", "node_type": "decision", "shape_kind": "diamond", "bbox": [1080, 240, 1240, 360]},
+                            {"id": "step_9_1", "step_code": "9.1", "text": "9.1. Hỗ trợ theo quy trình/quy định tương ứng", "node_type": "action", "shape_kind": "rectangle", "bbox": [1280, 240, 1460, 330]},
+                            {"id": "step_9_2", "step_code": "9.2", "text": "9.2. Hướng dẫn KH/TX kiểm tra thông tin tài khoản/SĐT/email liên quan", "node_type": "action", "shape_kind": "rectangle", "bbox": [1280, 380, 1460, 470]},
+                            {"id": "step_10", "step_code": "10", "text": "10. KH/TX cung cấp được không?", "node_type": "decision", "shape_kind": "diamond", "bbox": [1500, 380, 1660, 500]},
+                            {"id": "step_11", "step_code": "11", "text": "11. CS thông báo KH/TX chưa đủ thông tin để hỗ trợ và hướng dẫn liên hệ lại khi có thông tin", "node_type": "action", "shape_kind": "rectangle", "bbox": [1700, 380, 1880, 470]},
+                            {"id": "end", "text": "End", "node_type": "end", "shape_kind": "oval", "bbox": [1920, 100, 2040, 180]},
+                        ],
+                        "edges": [
+                            {"from_node": "start", "to_step_code": "1", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "1", "to_step_code": "3", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "1", "to_step_code": "8.1", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "3", "to_step_code": "8.1", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "3", "to_step_code": "4", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "4", "to_step_code": "5", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "4", "to_step_code": "8.2", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "8.1", "to_step_code": "9", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "9", "to_step_code": "9.1", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "9", "to_step_code": "9.2", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "9.2", "to_step_code": "10", "condition": "next", "confidence": 0.9},
+                            {"from_step_code": "10", "to_step_code": "9.1", "condition": "yes", "confidence": 0.9},
+                            {"from_step_code": "10", "to_step_code": "11", "condition": "no", "confidence": 0.9},
+                            {"from_step_code": "11", "to_node": "end", "condition": "next", "confidence": 0.9},
+                        ],
+                    }
+                ]
+            },
+        }
+
+        payload, report, _canvas = compile_workflow_v3_payload(
+            filename="chat_account_workflow.pdf",
+            raw_text=(
+                "1. Vấn đề thuộc dịch vụ Be?\n"
+                "3. KH/TX liên hệ từ chính tài khoản cần hỗ trợ?\n"
+                "4. Người liên hệ có thuộc trường hợp được tiếp nhận hỗ trợ thay?\n"
+                "5. Thực hiện hỗ trợ KH/TX theo quy trình/quy định tương ứng\n"
+                "8.1. Tiếp nhận hỗ trợ tài khoản KH/TX theo quy trình/quy định tương ứng\n"
+                "8.2. CS thông báo KH/TX cần sử dụng chính tài khoản cần hỗ trợ để liên hệ Be để được hỗ trợ\n"
+                "9. KH/TX cung cấp được không?\n"
+                "9.1. Hỗ trợ theo quy trình/quy định tương ứng\n"
+                "9.2. Hướng dẫn KH/TX kiểm tra thông tin tài khoản/SĐT/email liên quan\n"
+                "10. KH/TX cung cấp được không?\n"
+                "11. CS thông báo KH/TX chưa đủ thông tin để hỗ trợ"
+            ),
+            transcription=transcription,
+            visual_context={},
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        graph = payload.workflow_graph.model_dump()
+        edge_keys = {(edge["from_node"], edge["condition"], edge["to_node"]) for edge in graph["edges"]}
+        for step_code in {"5", "8.2", "9.1"}:
+            self.assertNotIn(f"workflow_v3_action_missing_terminal_or_outgoing:{step_code}", report["blockers"])
+            self.assertIn((f"node_{step_code.replace('.', '_')}", "next", "end"), edge_keys)
+        self.assertEqual(graph["missing_terminal_edges"], [])
+
     def test_boundary_nodes_with_ambiguous_zero_ids_do_not_collide(self) -> None:
         transcription = copy.deepcopy(EMAIL_WORKFLOW_CANVAS)
         page = transcription["canvas"]["pages"][0]

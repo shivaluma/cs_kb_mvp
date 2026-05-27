@@ -3222,8 +3222,19 @@ def workflow_branch_source_text(from_node: dict[str, Any], edge: dict[str, Any],
     condition = normalize_workflow_condition(edge.get("condition"))
     question = strip_step_prefix(workflow_node_source_text(from_node))
     target_text = workflow_node_source_text(to_node)
-    condition_label = "Yes" if condition == "yes" else "No" if condition == "no" else condition
-    return normalize_display_text(f"Decision {from_step}: Nếu {condition_label} - {question}, chuyển đến {to_step}: {target_text}")
+    condition_label = workflow_branch_condition_label(edge, condition)
+    return normalize_display_text(f"Decision {from_step}: Nếu {condition_label}: {question}, chuyển đến {to_step}: {target_text}")
+
+
+def workflow_branch_condition_label(edge: dict[str, Any], condition: str) -> str:
+    label = normalize_display_text(edge.get("label_text") or edge.get("label") or edge.get("condition_label") or "")
+    if label:
+        return label
+    if condition == "yes":
+        return "Có"
+    if condition == "no":
+        return "Không"
+    return condition
 
 
 def workflow_branch_retrieval_text(from_node: dict[str, Any], edge: dict[str, Any], to_node: dict[str, Any]) -> str:
@@ -3313,8 +3324,9 @@ def derive_workflow_paths(graph: dict[str, Any], edges: list[dict[str, Any]], no
 
     for root in roots:
         walk(root, [], 0)
-    for root in decision_branch_roots:
-        walk(root, [], 0)
+    if not paths:
+        for root in decision_branch_roots:
+            walk(root, [], 0)
     paths.sort(key=workflow_path_sort_key)
     return paths
 

@@ -5414,7 +5414,8 @@ def deterministic_refine_chunks(chunks: list[Any], document_type: str) -> tuple[
             report["repaired_orphan_examples"] += 1
             continue
 
-        content_key = content_fingerprint(chunk.content)
+        allow_content_dedupe = should_content_dedupe_chunk(unit_type, metadata)
+        content_key = content_fingerprint(chunk.content) if allow_content_dedupe else ""
         if unit_type != "full_sop" and content_key and content_key in seen_content:
             existing_index = seen_content[content_key]
             output[existing_index] = merge_duplicate_chunks(output[existing_index], chunk)
@@ -5443,6 +5444,35 @@ def deterministic_refine_chunks(chunks: list[Any], document_type: str) -> tuple[
     report.update({"groups": groups, "conflicts": conflicts, "coverage": coverage})
     output = attach_refinement_summary_to_document_layer(output, report)
     return reindex_local_chunks(output), report
+
+
+def should_content_dedupe_chunk(unit_type: str, metadata: dict[str, Any]) -> bool:
+    workflow_structural_types = {
+        "full_workflow_diagram",
+        "workflow_graph",
+        "workflow_phase",
+        "workflow_step",
+        "decision_node",
+        "decision_branch",
+        "workflow_path",
+        "script_block",
+        "annotation",
+        "relation_to_sop",
+        "visual_source_block",
+    }
+    if unit_type not in workflow_structural_types and not metadata.get("workflow_v3"):
+        return True
+    structural_keys = {
+        "workflow_node_id",
+        "from_node_id",
+        "to_node_id",
+        "workflow_path_id",
+        "step_code",
+        "annotation_id",
+        "target_title",
+        "block_id",
+    }
+    return not any(metadata.get(key) for key in structural_keys)
 
 
 def refine_unit_metadata(chunk: Any, metadata: dict[str, Any]) -> dict[str, Any]:

@@ -1195,7 +1195,13 @@ def terminal_state_for_text(text: str) -> str:
         return "resolved"
     if "chua the ho tro" in normalized or "khong thanh cong" in normalized:
         return "closed_with_response"
-    if "xu ly theo quy trinh" in normalized or "tiep tuc ho tro" in normalized:
+    if (
+        "xu ly theo quy trinh" in normalized
+        or "xu ly theo quy dinh" in normalized
+        or "ho tro theo quy trinh" in normalized
+        or "ho tro theo quy dinh" in normalized
+        or "tiep tuc ho tro" in normalized
+    ):
         return "continue_to_related_process"
     return ""
 
@@ -1224,9 +1230,15 @@ def terminal_action_evidence(node: dict[str, Any]) -> bool:
         "chua the ho tro",
         "khong thanh cong",
         "cung cap thong tin theo quy dinh",
+        "thuc hien ho tro",
+        "ho tro kh tx theo quy trinh",
+        "ho tro kh tx theo quy dinh",
+        "ho tro theo quy trinh",
+        "ho tro theo quy dinh",
         "xu ly theo quy trinh",
         "xu ly theo quy dinh",
         "tiep tuc ho tro",
+        "lien he be de duoc ho tro",
         "lien he khai thac them thong tin",
     ]
     return any(phrase in text for phrase in terminal_phrases)
