@@ -6,7 +6,13 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from app.chunking.evidence_bound_chunker import (
+    attach_evidence_metadata_to_legacy_chunks,
+    legacy_chunks_from_evidence,
+)
 from app.embedding import embed_texts, embedding_runtime_metadata
+from app.extraction.router import extraction_profile_for_file
+from app.ir.document_evidence_graph import build_document_evidence_graph
 from app.openrouter import (
     extract_rule_table_units,
     extract_mixed_docx_policy_units,
@@ -19,6 +25,8 @@ from app.openrouter import (
     start_ai_breakdown_capture,
     suggest_document_metadata,
 )
+from app.reasoning import adjudicate_disagreements, extract_semantic_units, observe_document, verify_semantic_units
+from app.review.review_artifacts import evidence_graph_artifact, evidence_validation_artifact
 from app.schemas import DocumentMetadata
 from app.search_labels import embedding_text_for_unit, meaningful_search_label
 from app.text_processing import (
@@ -41,6 +49,8 @@ from app.text_processing import (
     tokenize,
     workflow_units_to_chunks,
 )
+from app.validators.chunk_support import validate_chunks_supported
+from app.validators.workflow_graph import validate_workflow_graph
 from app.visual_layout import (
     bbox_distance,
     compact_visual_context,
@@ -162,7 +172,28 @@ def prepare_document_version(
         if visual_layout:
             raw_context["visual_layout"] = visual_layout
             blocks.extend(visual_blocks_for_map(visual_layout))
+    extraction_profile = extraction_profile_for_file(filename, content_type)
+    evidence_graph = build_document_evidence_graph(
+        filename=filename,
+        content_type=content_type,
+        data=data,
+        raw_text=raw_text,
+        raw_context=raw_context,
+        blocks=blocks,
+        classification=classification,
+    )
+    evidence_profile = observe_document(evidence_graph)
+    evidence_units = extract_semantic_units(evidence_graph)
+    evidence_graph.semantic_units = evidence_units
+    semantic_validation = verify_semantic_units(evidence_units)
+    adjudication_report = adjudicate_disagreements(evidence_graph)
+    workflow_validation = (
+        validate_workflow_graph(evidence_graph)
+        if classification.document_type == "workflow_diagram"
+        else None
+    )
     pipeline_artifacts = [
+        stage_artifact("map", "extraction_profile", extraction_profile),
         stage_artifact(
             "map",
             "source_blocks",
@@ -173,7 +204,32 @@ def prepare_document_version(
             "classification_result",
             classification_payload(classification),
         ),
+        stage_artifact(
+            "map",
+            "document_evidence_graph",
+            evidence_graph_artifact(evidence_graph, evidence_profile),
+        ),
+        stage_artifact(
+            "observe",
+            "evidence_observation",
+            evidence_profile,
+        ),
+        stage_artifact(
+            "verify",
+            "semantic_evidence_validation",
+            evidence_validation_artifact(semantic_validation, {"adjudication": adjudication_report}),
+            status="failed" if semantic_validation.critical_warnings else "completed",
+        ),
     ]
+    if workflow_validation is not None:
+        pipeline_artifacts.append(
+            stage_artifact(
+                "verify",
+                "workflow_graph_evidence_validation",
+                evidence_validation_artifact(workflow_validation),
+                status="failed" if workflow_validation.critical_warnings else "completed",
+            )
+        )
     if visual_layout:
         pipeline_artifacts.append(stage_artifact("map", "visual_layout_blocks", visual_layout_payload(visual_layout)))
         pipeline_artifacts.append(stage_artifact("map", "visual_graph_candidates", visual_graph_payload(visual_layout)))
@@ -286,7 +342,13 @@ def prepare_document_version(
                     )
 
     if not source_chunks and classification.document_type not in AI_STRUCTURED_DOCUMENT_TYPES:
-        source_chunks = mark_structured_chunks(chunk_text(raw_text))
+        source_chunks = mark_structured_chunks(
+            legacy_chunks_from_evidence(
+                evidence_graph,
+                document_type=classification.document_type,
+                source_type=classification.source_type,
+            )
+        )
 
     if not source_chunks:
         if ai_error:
@@ -367,9 +429,27 @@ def prepare_document_version(
             warnings.append("document_overview_low_coverage")
         pipeline_artifacts.append(stage_artifact("map", "source_evidence_sections", source_evidence_report))
 
+    evidence_blockers = list(semantic_validation.critical_warnings)
+    if workflow_validation is not None:
+        evidence_blockers.extend(workflow_validation.critical_warnings)
+    if adjudication_report.get("unresolved_parser_disagreements"):
+        evidence_blockers.append("unresolved_parser_disagreement")
+    source_chunks = attach_evidence_metadata_to_legacy_chunks(source_chunks, evidence_graph)
+    if evidence_blockers:
+        source_chunks = block_chunks_for_evidence_validation(source_chunks, evidence_blockers)
+    chunk_support_validation = validate_chunks_supported(source_chunks)
+    pipeline_artifacts.append(
+        stage_artifact(
+            "verify",
+            "chunk_support_validation",
+            evidence_validation_artifact(chunk_support_validation, {"evidence_blockers": evidence_blockers}),
+            status="failed" if chunk_support_validation.critical_warnings or evidence_blockers else "completed",
+        )
+    )
+
     extraction_status = "degraded" if any(chunk.metadata.get("extraction_status") == "degraded" for chunk in source_chunks) else "structured"
     lifecycle_status = "degraded_structured_draft" if extraction_status == "degraded" else "structured_draft"
-    publish_blocked = extraction_status == "degraded"
+    publish_blocked = extraction_status == "degraded" or bool(evidence_blockers or chunk_support_validation.critical_warnings)
     publish_blocked_reason = ""
     if publish_blocked:
         publish_blocked_reason = next(
@@ -378,7 +458,7 @@ def prepare_document_version(
                 for chunk in source_chunks
                 if chunk.metadata.get("publish_blocked_reason")
             ),
-            "ai_structuring_failed_requires_manual_curation",
+            "evidence_validation_failed" if evidence_blockers or chunk_support_validation.critical_warnings else "ai_structuring_failed_requires_manual_curation",
         )
     phase_history = ["uploaded", "raw_extracted", "classified"]
     if classification.document_type in AI_STRUCTURED_DOCUMENT_TYPES:
@@ -406,6 +486,15 @@ def prepare_document_version(
         "publish_blocked_reason": publish_blocked_reason,
         "requires_human_review": True,
         "source_ref_quality": aggregate_source_ref_quality(source_chunks),
+        "evidence_graph_status": "blocked" if publish_blocked else "passed",
+        "evidence_graph_element_count": len(evidence_graph.source_elements),
+        "evidence_graph_relation_count": len(evidence_graph.relations),
+        "evidence_validation": {
+            "semantic": semantic_validation.to_dict(),
+            "chunk_support": chunk_support_validation.to_dict(),
+            "workflow": workflow_validation.to_dict() if workflow_validation is not None else None,
+            "adjudication": adjudication_report,
+        },
     }
 
     chunks = embed_chunks(source_chunks, metadata.model_dump(), enrichment, filename)
@@ -558,7 +647,14 @@ def try_ai_structuring(
                     warnings.append("semantic_workflow_structuring_used_after_ai_failure")
                     if llm_warnings:
                         warnings.append(f"ai_workflow_structuring_rejected:{','.join(llm_warnings[:3])}")
-                    return mark_structured_chunks(semantic_chunks), warnings, ""
+                    review_error = workflow_graph_review_required_error(flow_candidates, "ai_failure")
+                    return mark_degraded_chunks(
+                        semantic_chunks,
+                        classification,
+                        review_error,
+                        "workflow_graph_requires_review",
+                        "degraded_structured_draft",
+                    ), warnings, review_error
                 return [], warnings, f"ai_workflow_structuring_failed:{','.join(llm_warnings)}"
             flow_candidates.append(workflow_flow_candidate("workflow_legacy", chunks, llm_warnings, raw_text, visual_context))
             selected = select_workflow_flow_candidate(flow_candidates)
@@ -583,7 +679,14 @@ def try_ai_structuring(
                         return mark_structured_chunks(selected_chunks), warnings, ""
                     warnings.append("semantic_workflow_structuring_used_after_ai_quality_reject")
                     warnings.append(f"ai_workflow_structuring_rejected:{quality_error or fidelity_error}")
-                    return mark_structured_chunks(semantic_chunks), warnings, ""
+                    review_error = workflow_graph_review_required_error(flow_candidates, quality_error or fidelity_error)
+                    return mark_degraded_chunks(
+                        semantic_chunks,
+                        classification,
+                        review_error,
+                        "workflow_graph_requires_review",
+                        "degraded_structured_draft",
+                    ), warnings, review_error
                 return [], warnings, f"ai_workflow_structuring_failed:{quality_error or fidelity_error}"
             return mark_structured_chunks(chunks), warnings, ""
     except Exception as exc:
@@ -1076,7 +1179,9 @@ def extract_mixed_docx_policy_chunks(
             )
         )
 
-    chunks = mixed_docx_add_group_parent_chunks(chunks, classification, document_audience, document_channels)
+    chunks = mixed_docx_order_parent_sections_after_searchable_units(
+        mixed_docx_add_group_parent_chunks(chunks, classification, document_audience, document_channels)
+    )
     return chunks if len(chunks) > 1 else []
 
 
@@ -1358,6 +1463,18 @@ def mixed_docx_add_group_parent_chunks(
             }
             output[index] = replace_chunk_metadata(child, metadata)
     return output
+
+
+def mixed_docx_order_parent_sections_after_searchable_units(chunks: list[Chunk]) -> list[Chunk]:
+    full_sop = [chunk for chunk in chunks if (chunk.metadata or {}).get("unit_type") == "full_sop"]
+    parent_sections = [chunk for chunk in chunks if (chunk.metadata or {}).get("chunk_type") == "parent_section"]
+    searchable = [
+        chunk
+        for chunk in chunks
+        if (chunk.metadata or {}).get("unit_type") != "full_sop"
+        and (chunk.metadata or {}).get("chunk_type") != "parent_section"
+    ]
+    return reindex_local_chunks([*full_sop, *searchable, *parent_sections])
 
 
 def mixed_docx_wording_group_specs(chunks: list[Chunk]) -> list[tuple[str, str, str, list[int]]]:
@@ -2863,6 +2980,9 @@ def workflow_flow_candidate(
     quality_error = workflow_structuring_quality_error(chunks, flow_warnings)
     fidelity_error = workflow_graph_fidelity_quality_error(chunks, raw_text, visual_context)
     graph = workflow_graph_from_chunks(chunks)
+    flow_quality_error = workflow_flow_specific_quality_error(flow, graph)
+    if flow_quality_error:
+        quality_error = ",".join(part for part in [quality_error, flow_quality_error] if part)
     visible_codes = workflow_candidate_visible_codes(graph, raw_text, visual_context)
     covered_codes = sorted(workflow_graph_covered_step_codes(graph))
     source_step_coverage = ratio(len([code for code in visible_codes if code in set(covered_codes)]), len(visible_codes)) if visible_codes else 1.0
@@ -2915,6 +3035,23 @@ def workflow_flow_candidate(
     }
 
 
+def workflow_flow_specific_quality_error(flow: str, graph: dict[str, Any]) -> str:
+    if flow != "semantic_workflow_structuring":
+        return ""
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    uncertain_edges = graph.get("uncertain_edges") if isinstance(graph.get("uncertain_edges"), list) else []
+    validation_errors = graph.get("validation_errors") if isinstance(graph.get("validation_errors"), list) else []
+    if not edges:
+        return "semantic_workflow_graph_no_confirmed_edges"
+    if uncertain_edges:
+        return "semantic_workflow_graph_has_uncertain_edges"
+    if validation_errors:
+        return "semantic_workflow_graph_has_validation_errors"
+    if graph.get("topology_review_required"):
+        return "semantic_workflow_graph_requires_topology_review"
+    return ""
+
+
 def workflow_candidate_can_short_circuit(candidate: dict[str, Any]) -> bool:
     return bool(candidate.get("selectable")) and float(candidate.get("overall_fidelity_score") or 0) >= 0.82
 
@@ -2962,6 +3099,19 @@ def workflow_selection_warnings(candidates: list[dict[str, Any]], selected: dict
         f"workflow_flow_selection:{selected.get('flow')}:score={selected.get('overall_fidelity_score')}",
         "workflow_flow_selection_matrix:" + json.dumps(compact_scores, ensure_ascii=False, separators=(",", ":"))[:1600],
     ]
+
+
+def workflow_graph_review_required_error(candidates: list[dict[str, Any]], reason: str) -> str:
+    semantic = next((candidate for candidate in reversed(candidates) if candidate.get("flow") == "semantic_workflow_structuring"), None)
+    if semantic:
+        detail = (
+            semantic.get("quality_error")
+            or semantic.get("fidelity_error")
+            or reason
+            or "semantic_workflow_graph_candidate_needs_review"
+        )
+        return f"workflow_graph_requires_review:{detail}"
+    return f"workflow_graph_requires_review:{reason or 'topology_review_required'}"
 
 
 def apply_workflow_selection_metadata(chunks: list[Any], selected: dict[str, Any]) -> list[Any]:
@@ -3579,6 +3729,7 @@ def build_degraded_spreadsheet_draft(filename: str, raw_text: str, blocks: list[
 GRAPH_SEMANTIC_NODE_TYPES = {"start", "end", "action", "decision", "queue_rule", "sla_rule"}
 ANNOTATION_SEMANTIC_NODE_TYPES = {"annotation", "warning", "audit_rule", "macro_script"}
 WORKFLOW_EDGE_CONDITIONS = {"yes", "no", "next", "timeout", "escalation", "fallback", "handoff", "return", "retry"}
+WORKFLOW_ANNOTATION_MARKER_ONLY = re.compile(r"^\s*\([a-z0-9*]{1,4}\)\s*$", re.IGNORECASE)
 SEMANTIC_CANDIDATE_UNIT_TYPES = {
     "start": "candidate_action",
     "end": "candidate_action",
@@ -3591,6 +3742,15 @@ SEMANTIC_CANDIDATE_UNIT_TYPES = {
     "queue_rule": "candidate_queue_rule",
     "macro_script": "macro_script",
 }
+
+
+def is_marker_only_workflow_annotation(text: str) -> bool:
+    return bool(WORKFLOW_ANNOTATION_MARKER_ONLY.match(text or ""))
+
+
+def workflow_candidate_display_text(unit_type: str, content: str) -> str:
+    text = str(content or "").strip()
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def build_workflow_semantic_refinement(
@@ -4630,6 +4790,12 @@ def semantic_workflow_candidate_chunks(filename: str, semantic_refinement: dict[
             content = str(node.get("content") or title).strip()
             if not content:
                 continue
+            if unit_type == "candidate_annotation" and is_marker_only_workflow_annotation(content):
+                continue
+            display_text = workflow_candidate_display_text(unit_type, content)
+            heading_text = workflow_candidate_display_text(unit_type, title)
+            if unit_type == "candidate_annotation" and is_marker_only_workflow_annotation(heading_text):
+                heading_text = display_text
             attached_uncertain_edges = [
                 edge for edge in uncertain_edges
                 if edge.get("from_node") == node.get("id") or edge.get("to_node") == node.get("id")
@@ -4638,11 +4804,13 @@ def semantic_workflow_candidate_chunks(filename: str, semantic_refinement: dict[
                 degraded_chunk(
                     start_index + len(output),
                     unit_type,
-                    candidate_heading(title, unit_type, len(output) + 1),
-                    content,
+                    candidate_heading(heading_text, unit_type, len(output) + 1),
+                    display_text,
                     {
                         "unit_type": unit_type,
                         "retrieval_scope": "unit",
+                        "source_text": content,
+                        "display_text": display_text,
                         "semantic_node_id": node.get("id"),
                         "semantic_node_type": semantic_type,
                         "dedupe_status": node.get("dedupe_status", "unique"),
@@ -5601,6 +5769,34 @@ def replace_chunk_metadata(chunk: Any, metadata: dict[str, Any]) -> Any:
     )
 
 
+def block_chunks_for_evidence_validation(chunks: list[Any], blockers: list[str]) -> list[Any]:
+    unique_blockers = list(dict.fromkeys(str(blocker) for blocker in blockers if str(blocker).strip()))
+    output = []
+    for chunk in chunks:
+        metadata = dict(chunk.metadata or {})
+        if metadata.get("source_evidence_only") is True:
+            output.append(chunk)
+            continue
+        blocked_reasons = list(metadata.get("blocked_reasons") or [])
+        for blocker in unique_blockers:
+            if blocker not in blocked_reasons:
+                blocked_reasons.append(blocker)
+        output.append(
+            replace_chunk_metadata(
+                chunk,
+                {
+                    **metadata,
+                    "publish_eligible": False,
+                    "publish_blocked": True,
+                    "publish_blocked_reason": metadata.get("publish_blocked_reason") or "evidence_validation_failed",
+                    "blocked_reasons": blocked_reasons,
+                    "validation_status": "blocked",
+                },
+            )
+        )
+    return output
+
+
 def text_line_blocks(raw_text: str) -> list[dict[str, Any]]:
     return [
         {"type": "line", "line_start": index, "line_end": index, "index": index - 1, "text": line.strip()}
@@ -6098,6 +6294,28 @@ def build_source_evidence_section_chunks(
             "coverage_report": payload.get("coverage_report") if isinstance(payload.get("coverage_report"), dict) else {},
         }
 
+    layout_sections = payload.get("sections") if isinstance(payload.get("sections"), list) else []
+    layout_chunks = build_layout_source_evidence_chunks(
+        filename=filename,
+        classification=classification,
+        sections=layout_sections,
+        existing_count=len(existing_chunks),
+        formatter=str(payload.get("formatter") or "unknown_formatter"),
+        model=str(payload.get("model") or ""),
+    )
+    if layout_chunks:
+        return layout_chunks[:80], {
+            "status": "completed",
+            "reason": "",
+            "raw_text_chars": len(raw_text or ""),
+            "formatted_chars": len(source_text),
+            "source_text_kind": "layout_sections",
+            "formatter": str(payload.get("formatter") or "unknown_formatter"),
+            "section_count": len(layout_chunks[:80]),
+            "source_sections_truncated": len(layout_chunks) > 80,
+            "coverage_report": payload.get("coverage_report") if isinstance(payload.get("coverage_report"), dict) else {},
+        }
+
     base_chunks = chunk_text(source_text, target_tokens=360, overlap_tokens=0)
     max_sections = 80
     source_chunks: list[Chunk] = []
@@ -6177,6 +6395,77 @@ def build_source_evidence_section_chunks(
         "coverage_report": coverage_report,
     }
     return source_chunks, report
+
+
+def build_layout_source_evidence_chunks(
+    *,
+    filename: str,
+    classification: Any,
+    sections: list[Any],
+    existing_count: int,
+    formatter: str,
+    model: str,
+) -> list[Chunk]:
+    chunks: list[Chunk] = []
+    for offset, section in enumerate(sections[:80]):
+        if not isinstance(section, dict):
+            continue
+        content = str(section.get("markdown") or section.get("content") or section.get("text") or "").strip()
+        if not content:
+            continue
+        title = str(section.get("title") or section.get("layout_label") or f"Source evidence {offset + 1}").strip()
+        bbox = section.get("bbox") if isinstance(section.get("bbox"), list) and len(section.get("bbox")) >= 4 else []
+        source_ref: dict[str, Any] = {
+            "source_type": "source_evidence",
+            "source_file": filename,
+            "section_index": offset + 1,
+            "line_start": offset + 1,
+            "line_end": offset + 1,
+            "derived_from": "layout_sections",
+            "layout_label": str(section.get("layout_label") or ""),
+        }
+        if filename.lower().endswith(".pdf"):
+            source_ref["page"] = int(section.get("page") or 1)
+        if bbox:
+            source_ref["bbox"] = [float(value) for value in bbox[:4]]
+            source_ref["bbox_order"] = "xyxy"
+        chunks.append(
+            Chunk(
+                chunk_index=existing_count + len(chunks),
+                section="source_evidence",
+                heading=title[:240] or f"Source evidence {offset + 1}",
+                content=content,
+                token_count=len(tokenize(content)),
+                metadata={
+                    "unit_type": "source_evidence_section",
+                    "retrieval_scope": "source_evidence",
+                    "answer_role": "evidence_context",
+                    "source_evidence_only": True,
+                    "document_layer_role": "source_evidence",
+                    "document_type": classification.document_type,
+                    "source_type": classification.source_type,
+                    "structure_type": "layout_section",
+                    "source_filename": filename,
+                    "source_text_kind": "layout_sections",
+                    "source_view_formatter": formatter,
+                    **({"source_view_model": model} if model else {}),
+                    "layout_label": str(section.get("layout_label") or ""),
+                    "review_status": "approved",
+                    "confidence": float(section.get("confidence") or 0.8),
+                    "requires_human_review": False,
+                    "extraction_status": "structured",
+                    "extraction_lifecycle_status": "source_evidence_indexed",
+                    "publish_blocked": False,
+                    "publish_blocked_reason": "",
+                    "source_refs": [source_ref],
+                    "source_ref_quality": "bbox" if bbox else "structured",
+                    "source_ref_acknowledged": True,
+                    "production_ready_source_refs": True,
+                    "section_path": [title[:240] or f"Source evidence {offset + 1}"],
+                },
+            )
+        )
+    return chunks
 
 
 def build_structural_source_evidence_chunks(

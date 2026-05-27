@@ -5,7 +5,7 @@ import { RouteLoading } from "@/components/route-loading";
 import { workspacePaths } from "@/constants";
 import { useHomepage } from "@/hooks/api/homepage";
 import { useRecordKBEvent, useOpsAnalytics } from "@/hooks/api/kb-index";
-import { useSOPList } from "@/hooks/api/search";
+import { useSearchAutocomplete, useSOPList } from "@/hooks/api/search";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import type { Homepage, SOP } from "@/types";
 
@@ -19,6 +19,7 @@ export function PortalPage() {
   const query = getParam("q", "");
   const homepageQuery = useHomepage();
   const sopsQuery = useSOPList();
+  const autocompleteQuery = useSearchAutocomplete(query);
   const analyticsQuery = useOpsAnalytics(14);
   const eventMutation = useRecordKBEvent();
   const homepage = homepageQuery.data ?? emptyHomepage();
@@ -83,6 +84,7 @@ export function PortalPage() {
         onOpenSOP={openSOP}
         onSearch={runSearch}
         query={query}
+        suggestions={autocompleteQuery.data?.suggestions ?? []}
         setQuery={setQuery}
         sops={sops}
       />

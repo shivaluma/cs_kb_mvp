@@ -14,6 +14,7 @@ from app import repository
 from app.ranking import (
     RankingOptions,
     business_rerank,
+    candidate_from_row,
     candidates_from_rows,
     load_ranking_config,
     maybe_model_rerank,
@@ -59,12 +60,19 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
     warnings: list[str] = []
 
     if not normalized_query:
+        trace = retrieval_trace_payload(
+            query_expansion=query_expansion,
+            ranking_debug={"ranking_mode": request.ranking_mode, "input_guard": "empty_query"},
+            warnings=["empty_query"],
+            selected_rows=[],
+        )
         latency_ms = repository.log_retrieval(
             request.query,
             request.filters.model_dump(),
             request.mode,
             0,
             started_at,
+            trace=trace,
         )
         return RetrievalResponse(
             query=request.query,
@@ -83,6 +91,8 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
     ranking_debug: dict[str, Any] = {}
     lexical_rows: list[dict[str, Any]] = []
     vector_rows: list[dict[str, Any]] = []
+    effective_candidate_mode = request.mode
+    vector_failure = ""
     if ranking_mode == "ai_chat":
         keyword_limit = int(ranking_mode_config.get("keyword_candidate_limit") or max(request.limit * 4, 20))
         vector_limit = int(ranking_mode_config.get("vector_candidate_limit") or max(request.limit * 4, 20))
@@ -95,70 +105,98 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         merged_limit = candidate_limit
         business_limit = max(request.limit, int(ranking_mode_config.get("output_limit") or request.limit))
 
+    query_understanding = understand_query(normalized_query, ranking_mode, ranking_config)
+    warnings.extend(query_understanding.warnings)
+    candidate_filters, applied_query_filters = filters_with_query_understanding(request.filters, query_understanding, ranking_mode)
+
+    def empty_no_reliable_response() -> RetrievalResponse:
+        trace_warnings = [*warnings, "no_reliable_source"]
+        trace = retrieval_trace_payload(
+            query_expansion=query_expansion,
+            ranking_debug={
+                "ranking_mode": ranking_mode,
+                "keyword_candidate_count": len(lexical_rows),
+                "vector_candidate_count": 0,
+                "vector_failure": vector_failure,
+            },
+            warnings=trace_warnings,
+            selected_rows=[],
+        )
+        latency_ms = repository.log_retrieval(
+            request.query,
+            retrieval_log_filters(request.filters, candidate_filters, applied_query_filters),
+            request.mode,
+            0,
+            started_at,
+            trace=trace,
+        )
+        return RetrievalResponse(
+            query=request.query,
+            normalized_query=normalized_query,
+            query_expansion=query_expansion,
+            mode=request.mode,
+            results=[],
+            citations=[],
+            warnings=trace_warnings,
+            latency_ms=latency_ms,
+        )
+
+    def populate_lexical_fallback() -> bool:
+        nonlocal lexical_rows
+        lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, candidate_filters, keyword_limit, request.debug)
+        if not lexical_rows and applied_query_filters:
+            lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, request.filters, keyword_limit, request.debug)
+            warnings.append("query_understanding_filters_relaxed:no_keyword_candidates")
+        if keyword_warning:
+            warnings.append(keyword_warning)
+        return bool(lexical_rows)
+
     if request.mode in {"lexical", "hybrid"}:
-        lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, request.filters, keyword_limit, request.debug)
+        lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, candidate_filters, keyword_limit, request.debug)
+        if not lexical_rows and applied_query_filters:
+            lexical_rows, keyword_warning = keyword_candidate_rows(normalized_query, request.filters, keyword_limit, request.debug)
+            warnings.append("query_understanding_filters_relaxed:no_keyword_candidates")
         if keyword_warning:
             warnings.append(keyword_warning)
     if request.mode in {"vector", "hybrid"}:
         try:
-            vector_rows = repository.vector_search(embed_text(normalized_query), request.filters, vector_limit)
+            vector = embed_text(normalized_query)
+            vector_rows = repository.vector_search(vector, candidate_filters, vector_limit)
+            if not vector_rows and applied_query_filters:
+                vector_rows = repository.vector_search(vector, request.filters, vector_limit)
+                warnings.append("query_understanding_filters_relaxed:no_vector_candidates")
         except EmbeddingProviderError:
+            vector_failure = "embedding_unavailable"
             warnings.append("embedding_unavailable")
             if request.mode == "vector":
-                latency_ms = repository.log_retrieval(
-                    request.query,
-                    request.filters.model_dump(),
-                    request.mode,
-                    0,
-                    started_at,
-                )
-                return RetrievalResponse(
-                    query=request.query,
-                    normalized_query=normalized_query,
-                    query_expansion=query_expansion,
-                    mode=request.mode,
-                    results=[],
-                    citations=[],
-                    warnings=[*warnings, "no_reliable_source"],
-                    latency_ms=latency_ms,
-                )
+                if populate_lexical_fallback():
+                    warnings.append("vector_mode_lexical_fallback")
+                    effective_candidate_mode = "lexical"
+                else:
+                    return empty_no_reliable_response()
         except Exception as exc:
+            vector_failure = exc.__class__.__name__
             warnings.append(f"vector_search_failed:{exc.__class__.__name__}")
             if request.mode == "vector":
-                latency_ms = repository.log_retrieval(
-                    request.query,
-                    request.filters.model_dump(),
-                    request.mode,
-                    0,
-                    started_at,
-                )
-                return RetrievalResponse(
-                    query=request.query,
-                    normalized_query=normalized_query,
-                    query_expansion=query_expansion,
-                    mode=request.mode,
-                    results=[],
-                    citations=[],
-                    warnings=[*warnings, "no_reliable_source"],
-                    latency_ms=latency_ms,
-                )
+                if populate_lexical_fallback():
+                    warnings.append("vector_mode_lexical_fallback")
+                    effective_candidate_mode = "lexical"
+                else:
+                    return empty_no_reliable_response()
 
-    query_understanding = understand_query(normalized_query, ranking_mode, ranking_config)
-    warnings.extend(query_understanding.warnings)
     ranking_options = RankingOptions(
         mode=ranking_mode,
         debug=request.debug,
         query_understanding=query_understanding,
         force_model_rerank=request.use_model_rerank,
     )
-    if request.mode == "lexical":
-        candidates = candidates_from_rows(lexical_rows, "meilisearch" if any(row.get("from_meilisearch") for row in lexical_rows) else "lexical")
-    elif request.mode == "vector":
+    if effective_candidate_mode == "lexical":
+        candidates = keyword_candidates_from_rows(lexical_rows)
+    elif effective_candidate_mode == "vector":
         candidates = candidates_from_rows(vector_rows, "vector")
     else:
-        keyword_source = "meilisearch" if any(row.get("from_meilisearch") for row in lexical_rows) else "lexical"
         candidates = merge_candidates(
-            candidates_from_rows(lexical_rows, keyword_source),
+            keyword_candidates_from_rows(lexical_rows),
             candidates_from_rows(vector_rows, "vector"),
             merged_limit,
             ranking_config,
@@ -173,9 +211,12 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         "query_understanding_used": query_understanding.source == "model",
         "keyword_candidate_count": len(lexical_rows),
         "vector_candidate_count": len(vector_rows),
+        "vector_failure": vector_failure,
+        "effective_candidate_mode": effective_candidate_mode,
         "merged_candidate_count": len(candidates),
         "business_candidate_count": len(business_ranked),
         "model_rerank": rerank_decision,
+        "query_understanding_filters": applied_query_filters,
         "top_before_business_rerank": candidates[0].chunk_id if candidates else "",
         "top_after_business_rerank": business_ranked[0].chunk_id if business_ranked else "",
         "final_selected_context_ids": [str(row.get("chunk_id") or "") for row in fused_rows],
@@ -194,13 +235,6 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
     if not fused_rows:
         warnings.append("no_reliable_source")
 
-    latency_ms = repository.log_retrieval(
-        request.query,
-        request.filters.model_dump(),
-        request.mode,
-        len(fused_rows),
-        started_at,
-    )
     try:
         display_context_rows = repository.display_context_rows_for_results(fused_rows)
     except Exception as exc:
@@ -216,6 +250,23 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
     results = [to_result(row) for row in enriched_rows]
     ranking_debug["final_result_count"] = len(results)
     ranking_debug["final_selected_context_ids"] = [result.chunk_id for result in results]
+    trace = retrieval_trace_payload(
+        query_expansion=query_expansion,
+        ranking_debug={
+            **ranking_debug,
+            "query_understanding": query_understanding.as_debug(),
+        },
+        warnings=warnings,
+        selected_rows=enriched_rows,
+    )
+    latency_ms = repository.log_retrieval(
+        request.query,
+        retrieval_log_filters(request.filters, candidate_filters, applied_query_filters),
+        request.mode,
+        len(results),
+        started_at,
+        trace=trace,
+    )
     return RetrievalResponse(
         query=request.query,
         normalized_query=normalized_query,
@@ -227,6 +278,78 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         latency_ms=latency_ms,
         ranking_debug=ranking_debug if request.debug else {},
     )
+
+
+def retrieval_trace_payload(
+    *,
+    query_expansion: dict[str, Any],
+    ranking_debug: dict[str, Any],
+    warnings: list[str],
+    selected_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "query_expansion": query_expansion,
+        "ranking_debug": ranking_debug,
+        "warnings": list(warnings),
+        "selected_context": [selected_context_trace(row) for row in selected_rows],
+    }
+
+
+def filters_with_query_understanding(
+    filters: RetrievalFilters,
+    query_understanding: Any,
+    ranking_mode: str,
+) -> tuple[RetrievalFilters, list[str]]:
+    if ranking_mode != "ai_chat" or float(getattr(query_understanding, "confidence", 0.0) or 0.0) < 0.65:
+        return filters, []
+    updates: dict[str, list[str]] = {}
+    applied: list[str] = []
+    required_scope = str(getattr(query_understanding, "required_scope", "") or "")
+    if not filters.scope and required_scope not in {"", "unknown", "generic"}:
+        updates["scope"] = [required_scope]
+        applied.append("scope")
+    required_visibility = str(getattr(query_understanding, "required_visibility", "") or "")
+    if not filters.visibility and required_visibility in {"customer_facing", "internal_only"}:
+        updates["visibility"] = [required_visibility]
+        applied.append("visibility")
+    if not updates:
+        return filters, []
+    return filters.model_copy(update=updates), applied
+
+
+def retrieval_log_filters(input_filters: RetrievalFilters, applied_filters: RetrievalFilters, applied_query_filters: list[str]) -> dict[str, Any]:
+    payload = applied_filters.model_dump()
+    if applied_query_filters:
+        payload["_input_filters"] = input_filters.model_dump()
+        payload["_query_understanding_applied_filters"] = applied_query_filters
+    return payload
+
+
+def selected_context_trace(row: dict[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source_refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    return {
+        "chunk_id": str(row.get("chunk_id") or ""),
+        "document_id": str(row.get("document_id") or ""),
+        "version_id": str(row.get("version_id") or row.get("document_version_id") or ""),
+        "title": str(row.get("title") or ""),
+        "heading": str(row.get("heading") or ""),
+        "chunk_type": str(metadata.get("chunk_type") or metadata.get("unit_type") or row.get("section") or ""),
+        "score": float(row.get("score") or 0),
+        "business_score": float(row.get("business_score") or 0),
+        "final_score": float(row.get("final_score") or row.get("score") or 0),
+        "rank_source": list(row.get("rank_source") or []),
+        "source_ref_quality": str(metadata.get("source_ref_quality") or ""),
+        "source_ref_count": len(source_refs),
+        "status": str(row.get("status") or metadata.get("status") or ""),
+        "publish_state": str(row.get("publish_state") or metadata.get("publish_state") or ""),
+        "review_status": str(row.get("review_status") or metadata.get("review_status") or ""),
+        "visibility": str(row.get("visibility") or metadata.get("visibility") or ""),
+        "scope": str(row.get("scope") or metadata.get("scope") or metadata.get("retrieval_scope") or ""),
+        "policy_type": str(row.get("policy_type") or metadata.get("policy_type") or ""),
+        "authority_level": str(row.get("authority_level") or metadata.get("authority_level") or ""),
+        "score_debug": row.get("score_debug") or metadata.get("score_debug") or {},
+    }
 
 
 def rows_from_single_mode(rows: list[dict[str, Any]], mode: str, limit: int) -> list[dict[str, Any]]:
@@ -250,14 +373,54 @@ def keyword_candidate_rows(
 ) -> tuple[list[dict[str, Any]], str]:
     if settings.meili_host:
         try:
-            return meili_ai_chunk_search(query, filters, limit, debug), ""
+            meili_rows = meili_ai_chunk_search(query, filters, limit, debug)
         except Exception as exc:
             logger.warning(
                 "meili_ai_chunk_search_failed",
                 extra={"event": "meili_ai_chunk_search_failed", "error": exc.__class__.__name__},
             )
             return repository.lexical_search(query, filters, limit), f"meili_keyword_fallback:{exc.__class__.__name__}"
+        if len(meili_rows) >= limit:
+            return meili_rows, ""
+        try:
+            postgres_rows = repository.lexical_search(query, filters, limit)
+        except Exception as exc:
+            logger.warning(
+                "meili_keyword_postgres_backfill_failed",
+                extra={"event": "meili_keyword_postgres_backfill_failed", "error": exc.__class__.__name__},
+            )
+            return meili_rows, f"meili_keyword_postgres_backfill_failed:{exc.__class__.__name__}"
+        merged_rows, added_count = merge_keyword_backfill_rows(meili_rows, postgres_rows, limit)
+        if added_count:
+            return merged_rows, "meili_keyword_postgres_backfill"
+        return meili_rows, ""
     return repository.lexical_search(query, filters, limit), "meili_keyword_unconfigured_postgres_fallback"
+
+
+def keyword_candidates_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
+    return [
+        candidate_from_row(row, source="meilisearch" if row.get("from_meilisearch") else "lexical", rank=rank)
+        for rank, row in enumerate(rows, start=1)
+    ]
+
+
+def merge_keyword_backfill_rows(primary_rows: list[dict[str, Any]], backfill_rows: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], int]:
+    output = [dict(row) for row in primary_rows]
+    seen = {str(row.get("chunk_id") or row.get("id") or "") for row in output}
+    added = 0
+    for row in backfill_rows:
+        chunk_id = str(row.get("chunk_id") or row.get("id") or "")
+        if not chunk_id or chunk_id in seen:
+            continue
+        item = dict(row)
+        item.setdefault("rank_source", ["lexical"])
+        item["from_meilisearch"] = False
+        output.append(item)
+        seen.add(chunk_id)
+        added += 1
+        if len(output) >= limit:
+            break
+    return output[:limit], added
 
 
 def meili_ai_chunk_search(query: str, filters: RetrievalFilters, limit: int, debug: bool = False) -> list[dict[str, Any]]:
@@ -285,6 +448,11 @@ def meili_ai_chunk_search(query: str, filters: RetrievalFilters, limit: int, deb
             "category",
             "tags",
             "case_reasons",
+            "visibility",
+            "scope",
+            "policy_type",
+            "authority_level",
+            "is_current_version",
         ],
     }
     if debug:
@@ -296,7 +464,9 @@ def meili_ai_chunk_search(query: str, filters: RetrievalFilters, limit: int, deb
     if settings.meili_master_key:
         headers["Authorization"] = f"Bearer {settings.meili_master_key}"
     with httpx.Client(timeout=2.0) as client:
-        response = client.post(f"{settings.meili_host.rstrip('/')}/indexes/ai_chunks/search", json=payload, headers=headers)
+        response = client.post(f"{settings.meili_host.rstrip('/')}/indexes/sop_chunks/search", json=payload, headers=headers)
+        if response.status_code == 404:
+            response = client.post(f"{settings.meili_host.rstrip('/')}/indexes/ai_chunks/search", json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
     rows = []
@@ -330,7 +500,11 @@ def meili_ai_chunk_search(query: str, filters: RetrievalFilters, limit: int, deb
             "category": hit.get("category") or metadata.get("category") or "",
             "vertical": hit.get("vertical") or metadata.get("vertical") or "",
             "audience": hit.get("audience") or metadata.get("audience") or [],
-            "is_current_version": True,
+            "visibility": hit.get("visibility") or metadata.get("visibility") or "internal_only",
+            "scope": hit.get("scope") or metadata.get("scope") or metadata.get("retrieval_scope") or "generic",
+            "policy_type": hit.get("policy_type") or metadata.get("policy_type") or metadata.get("unit_type") or "",
+            "authority_level": hit.get("authority_level") or metadata.get("authority_level") or "policy",
+            "is_current_version": bool(hit.get("is_current_version", True)),
         }
         if debug and hit.get("_rankingScoreDetails") is not None:
             row["meili_ranking_score_details"] = hit.get("_rankingScoreDetails")
@@ -346,6 +520,10 @@ def meili_ai_chunk_filter(filters: RetrievalFilters) -> str:
         clauses.append('publish_state = "published_ready"')
     for field, values in [
         ("audience", filters.audience),
+        ("visibility", filters.visibility),
+        ("scope", filters.scope),
+        ("policy_type", filters.policy_type),
+        ("authority_level", filters.authority_level),
         ("vertical", filters.vertical),
         ("category", filters.category),
         ("tags", filters.tags),
@@ -662,8 +840,9 @@ def retrieval_display_contract(
 ) -> RetrievalDisplayContract:
     refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
     first_ref = next((ref for ref in refs if isinstance(ref, dict)), {})
+    open_mode = "workflow_diagram" if is_workflow_diagram_result(row, metadata) else "full_document"
     return RetrievalDisplayContract(
-        open_mode="full_document",
+        open_mode=open_mode,
         highlight_source_refs=[ref for ref in refs if isinstance(ref, dict)],
         scroll_target=ScrollTarget(
             block_id=source_anchor.block_id,
@@ -685,6 +864,9 @@ def build_display_context(row: dict[str, Any], context: dict[str, Any] | None) -
     document_title = str((context or {}).get("document_title") or row.get("title") or "")
     version_number = int((context or {}).get("version_number") or row.get("version_number") or 0)
     source_anchor = source_anchor_for_row(row, metadata)
+
+    if is_workflow_diagram_result(row, metadata, document_metadata):
+        return workflow_diagram_display_context(row, metadata, context, document_metadata, source_anchor)
 
     if not context:
         log_source_resolution("source_parent_missing", row, source_anchor, "display_context_not_loaded")
@@ -767,6 +949,98 @@ def build_display_context(row: dict[str, Any], context: dict[str, Any] | None) -
         highlights=[highlight],
         fallback_excerpt=source_text if highlight_failed else "",
         highlight_failed=highlight_failed,
+        source_anchor=source_anchor,
+        source_resolution_status="resolved",
+    )
+
+
+def is_workflow_diagram_result(
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    document_metadata: dict[str, Any] | None = None,
+) -> bool:
+    document_metadata = document_metadata if isinstance(document_metadata, dict) else {}
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "")
+    workflow_types = {
+        "full_workflow_diagram",
+        "workflow_phase",
+        "workflow_step",
+        "decision_node",
+        "decision_branch",
+        "workflow_path",
+        "script_block",
+        "annotation",
+        "relation_to_sop",
+        "visual_source_block",
+    }
+    return (
+        metadata.get("open_mode") == "workflow_diagram"
+        or metadata.get("display_unit_type") == "workflow_diagram"
+        or metadata.get("document_type") == "workflow_diagram"
+        or document_metadata.get("document_type") == "workflow_diagram"
+        or unit_type in workflow_types
+    )
+
+
+def workflow_diagram_display_context(
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    context: dict[str, Any] | None,
+    document_metadata: dict[str, Any],
+    source_anchor: SourceAnchor,
+) -> DisplayContext:
+    source_text = str(metadata.get("display_text") or metadata.get("source_text") or row.get("content") or "")
+    source_chunk_id = str(row.get("chunk_id") or "")
+    refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+    has_bbox = any(isinstance(ref, dict) and isinstance(ref.get("bbox"), list) and len(ref.get("bbox") or []) >= 4 for ref in refs)
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "")
+    phase = first_text(metadata.get("phase"))
+    lane = first_text(metadata.get("lane"), metadata.get("actor"))
+    step_code = first_text(metadata.get("step_code"), metadata.get("from_step_code"))
+    section_title = first_text(
+        metadata.get("section_title"),
+        " / ".join(part for part in [phase, lane, f"Step {step_code}" if step_code else ""] if part),
+        row.get("heading"),
+        row.get("section"),
+    )
+    document_title = str((context or {}).get("document_title") or metadata.get("document_title") or row.get("title") or "")
+    document_id = str(row.get("document_id") or "")
+    version_number = int((context or {}).get("version_number") or row.get("version_number") or 0) or None
+    collections = collection_refs(metadata, document_metadata)
+    category = first_text(metadata.get("category"), document_metadata.get("category"))
+    highlight = DisplayHighlight(
+        chunk_id=source_chunk_id,
+        text=source_text,
+        match_strategy="visual_bbox" if has_bbox else "workflow_source_ref",
+        source_anchor=source_anchor,
+    )
+    block = DisplayBlock(
+        id=source_anchor.block_id or source_chunk_id,
+        title=str(row.get("heading") or section_title or unit_type),
+        content=source_text,
+        unit_type=unit_type,
+        chunk_id=source_chunk_id,
+        block_type="workflow_diagram",
+        source_anchor=source_anchor,
+    )
+    log_source_resolution("source_highlight_success", row, source_anchor, highlight.match_strategy)
+    return DisplayContext(
+        display_unit_type="workflow_diagram",
+        document_id=document_id,
+        document_title=document_title,
+        section_id=source_anchor.section_id,
+        section_title=section_title,
+        category=category,
+        collections=collections,
+        version_number=version_number,
+        last_updated=(context or {}).get("updated_at"),
+        published_at=(context or {}).get("published_at"),
+        effective_date=first_text(metadata.get("effective_from"), metadata.get("effective_date"), document_metadata.get("effective_from")),
+        content=source_text,
+        blocks=[block],
+        highlights=[highlight],
+        fallback_excerpt="",
+        highlight_failed=False,
         source_anchor=source_anchor,
         source_resolution_status="resolved",
     )

@@ -69,6 +69,7 @@ class DocumentClassification:
 def classify_document(filename: str, content_type: str, raw_text: str = "") -> DocumentClassification:
     lower_name = filename.lower()
     normalized = normalize_phrase(raw_text[:5000])
+    normalized_name = normalize_phrase(strip_accents(unicodedata.normalize("NFC", lower_name)))
 
     if is_spreadsheet_file(lower_name, content_type):
         if looks_like_kb_index_workbook(raw_text):
@@ -82,7 +83,7 @@ def classify_document(filename: str, content_type: str, raw_text: str = "") -> D
             True,
             ["image_ocr_or_vision_extraction_required"],
         )
-    if lower_name.endswith(".pdf") and looks_like_workflow(normalized):
+    if lower_name.endswith(".pdf") and looks_like_workflow_source(normalized_name, normalized):
         return DocumentClassification("workflow_diagram", "diagram_pdf", 0.78, True)
     if lower_name.endswith(".docx") and looks_like_communication_guideline_docx(lower_name, normalized):
         return DocumentClassification(
@@ -169,6 +170,22 @@ def looks_like_workflow(normalized_text: str) -> bool:
     ]
     hits = sum(1 for term in workflow_terms if phrase_in_query(term, normalized_text))
     return hits >= 4
+
+
+def looks_like_workflow_source(normalized_name: str, normalized_text: str) -> bool:
+    source = f"{normalized_name} {normalized_text}".strip()
+    if looks_like_workflow(source):
+        return True
+    filename_workflow = phrase_in_query("quy trinh", normalized_name) and any(
+        phrase_in_query(term, normalized_name)
+        for term in ["cuoc goi", "goi vao", "xu ly", "call", "workflow", "flow"]
+    )
+    text_has_visual_flow_signal = any(
+        phrase_in_query(term, source)
+        for term in ["workflow", "diagram", "open", "body", "close", "agent", "huong dan", "teamlead", "l2", "yes", "no"]
+    )
+    short_or_noisy_text = len(normalized_text.split()) < 20
+    return filename_workflow and (text_has_visual_flow_signal or short_or_noisy_text)
 
 
 def looks_like_policy_rule(lower_name: str, normalized_text: str) -> bool:
@@ -1246,6 +1263,15 @@ def vietnamese_unit_title(unit_type: str) -> str:
     titles = {
         "workflow_overview": "Tổng quan quy trình",
         "workflow_graph": "Workflow graph",
+        "full_workflow_diagram": "Sơ đồ workflow",
+        "workflow_phase": "Giai đoạn workflow",
+        "decision_node": "Điều kiện workflow",
+        "decision_branch": "Nhánh điều kiện workflow",
+        "workflow_path": "Luồng xử lý workflow",
+        "script_block": "Kịch bản workflow",
+        "annotation": "Ghi chú workflow",
+        "relation_to_sop": "SOP liên quan",
+        "visual_source_block": "Visual source",
         "candidate_action": "Candidate action",
         "candidate_decision": "Candidate decision",
         "candidate_annotation": "Candidate annotation",

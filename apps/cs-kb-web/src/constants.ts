@@ -219,19 +219,19 @@ export const documentWorkflowItems = documentWorkflowStepIds.map((id) => navItem
 
 export const navGroups = [
   {
-    label: "Agent",
+    label: "CS workspace",
     items: navItems.filter((item) => item.section === "agent"),
   },
   {
-    label: "Library",
+    label: "Knowledge library",
     items: navItems.filter((item) => item.section === "library"),
   },
   {
-    label: "Operations",
+    label: "Review and governance",
     items: navItems.filter((item) => item.section === "ops" && !documentWorkflowStepIds.includes(item.id as never)),
   },
   {
-    label: "AI admin",
+    label: "Admin debug",
     items: navItems.filter((item) => item.section === "ai"),
   },
 ] as const;

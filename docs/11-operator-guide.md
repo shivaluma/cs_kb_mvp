@@ -36,12 +36,13 @@ Set these values in `.env`:
 
 ```env
 OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=google/gemini-2.5-flash-lite
-OPENROUTER_EXTRACTION_MODEL=google/gemini-2.5-flash-lite
-OPENROUTER_REFINE_MODEL=google/gemini-3-flash-preview
-OPENROUTER_VISION_MODEL=google/gemini-2.5-flash-lite
-OPENROUTER_METADATA_MODEL=google/gemini-2.5-flash-lite
-OPENROUTER_CHAT_SIMPLE_MODEL=google/gemini-2.5-flash-lite
+OPENROUTER_MODEL=google/gemini-3.1-flash-lite-preview
+OPENROUTER_EXTRACTION_MODEL=google/gemini-3.1-flash-lite-preview
+OPENROUTER_REFINE_MODEL=google/gemini-3.1-flash-lite-preview
+OPENROUTER_VISION_MODEL=google/gemini-3.1-flash-lite-preview
+OPENROUTER_METADATA_MODEL=google/gemini-3.1-flash-lite-preview
+OPENROUTER_REASONING_EFFORT=low
+OPENROUTER_CHAT_SIMPLE_MODEL=google/gemini-3.1-flash-lite-preview
 OPENROUTER_CHAT_POLICY_MODEL=moonshotai/kimi-k2.5
 OPENROUTER_CHAT_HIGH_RISK_MODEL=moonshotai/kimi-k2.5
 OPENROUTER_CHAT_COMPLEX_MODEL=moonshotai/kimi-k2.6

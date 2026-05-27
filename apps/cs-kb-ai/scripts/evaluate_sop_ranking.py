@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.chat import analyze_context_authority
 from app.ranking import QueryUnderstanding, RankingOptions, SearchCandidate, business_rerank, maybe_model_rerank, normalize_text
+from app.schemas import Citation, RetrievalResult
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ def eval_queries() -> list[EvalQuery]:
 
 def score_run(mode: str, use_model_rerank: bool) -> list[dict[str, object]]:
     output = []
+    conflict_rate = eval_conflict_detection_rate()
     for item in eval_queries():
         baseline = sorted(fixture_candidates(), key=lambda candidate: candidate.meili_score, reverse=True)
         options = RankingOptions(
@@ -87,6 +90,8 @@ def score_run(mode: str, use_model_rerank: bool) -> list[dict[str, object]]:
         if use_model_rerank:
             ranked, _decision = maybe_model_rerank(item.query, ranked, options)
         expected = set(item.expected)
+        top5 = ranked[:5]
+        top3 = ranked[:3]
         output.append(
             {
                 "key": item.key,
@@ -94,13 +99,63 @@ def score_run(mode: str, use_model_rerank: bool) -> list[dict[str, object]]:
                 "before_top1": baseline[0].chunk_id,
                 "after_top1": ranked[0].chunk_id if ranked else "",
                 "top1_correct": bool(ranked and ranked[0].chunk_id in expected),
-                "top3_contains_expected": bool(expected & {candidate.chunk_id for candidate in ranked[:3]}),
-                "top5_contains_expected": bool(expected & {candidate.chunk_id for candidate in ranked[:5]}),
-                "precision_at_3": round(sum(1 for candidate in ranked[:3] if candidate.chunk_id in expected) / 3, 2),
-                "recall_at_5": round(sum(1 for expected_id in expected if expected_id in {candidate.chunk_id for candidate in ranked[:5]}) / len(expected), 2),
+                "top3_contains_expected": bool(expected & {candidate.chunk_id for candidate in top3}),
+                "top5_contains_expected": bool(expected & {candidate.chunk_id for candidate in top5}),
+                "precision_at_3": round(sum(1 for candidate in top3 if candidate.chunk_id in expected) / 3, 2),
+                "recall_at_5": round(sum(1 for expected_id in expected if expected_id in {candidate.chunk_id for candidate in top5}) / len(expected), 2),
+                "source_ref_presence_rate": round(sum(1 for candidate in top5 if candidate.source_refs) / max(1, len(top5)), 2),
+                "citation_coverage": round(sum(1 for candidate in top3 if candidate.source_refs) / max(1, len(top3)), 2),
+                "conflict_detection_rate": conflict_rate,
+                "answer_groundedness": round(1.0 if ranked and ranked[0].source_refs else 0.0, 2),
             }
         )
     return output
+
+
+def eval_conflict_detection_rate() -> float:
+    first = retrieval_result_for_conflict("conflict-a", "policy")
+    second = retrieval_result_for_conflict("conflict-b", "source_of_truth")
+    analysis = analyze_context_authority("CS phản hồi khách về chính sách này thế nào?", [first, second])
+    return 1.0 if analysis["requires_review"] and not analysis["answer_allowed"] else 0.0
+
+
+def retrieval_result_for_conflict(chunk_id: str, authority_level: str) -> RetrievalResult:
+    citation = Citation(
+        document_id=f"doc-{chunk_id}",
+        version_id=f"version-{chunk_id}",
+        chunk_id=chunk_id,
+        chunk_index=0,
+        section="policy_rule",
+        title=f"Policy {chunk_id}",
+        version_number=1,
+        source_filename=f"{chunk_id}.md",
+    )
+    return RetrievalResult(
+        document_id=citation.document_id,
+        version_id=citation.version_id,
+        chunk_id=chunk_id,
+        title=citation.title,
+        source_filename=citation.source_filename,
+        version_number=1,
+        chunk_index=0,
+        section="policy_rule",
+        heading=citation.title,
+        content="Published policy content.",
+        score=0.9,
+        lexical_score=0.9,
+        vector_score=0.0,
+        rank_source=["fixture"],
+        metadata={
+            "unit_type": "policy_rule",
+            "chat_source_role": "direct_sop",
+            "authority_level": authority_level,
+            "visibility": "customer_facing",
+            "scope": "cs_response",
+            "conflict_group": "fixture-conflict",
+            "source_refs": [{"block_id": chunk_id}],
+        },
+        citation=citation,
+    )
 
 
 def print_table(rows: list[dict[str, object]]) -> None:
@@ -129,6 +184,12 @@ def print_table(rows: list[dict[str, object]]) -> None:
             "top1_correct": sum(1 for row in rows if row["top1_correct"]),
             "top3_contains_expected": sum(1 for row in rows if row["top3_contains_expected"]),
             "top5_contains_expected": sum(1 for row in rows if row["top5_contains_expected"]),
+            "avg_precision_at_3": round(sum(float(row["precision_at_3"]) for row in rows) / len(rows), 3),
+            "avg_recall_at_5": round(sum(float(row["recall_at_5"]) for row in rows) / len(rows), 3),
+            "source_ref_presence_rate": round(sum(float(row["source_ref_presence_rate"]) for row in rows) / len(rows), 3),
+            "citation_coverage": round(sum(float(row["citation_coverage"]) for row in rows) / len(rows), 3),
+            "conflict_detection_rate": round(sum(float(row["conflict_detection_rate"]) for row in rows) / len(rows), 3),
+            "answer_groundedness": round(sum(float(row["answer_groundedness"]) for row in rows) / len(rows), 3),
         },
     )
 

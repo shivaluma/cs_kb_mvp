@@ -8,6 +8,7 @@ from unittest.mock import patch
 from app.answer_scope import AnswerScope, PolicyFacets, policy_applicability_debug
 from app.chat import (
     ChatRetrievalBundle,
+    analyze_context_authority,
     assistant_context_briefs,
     assistant_context_chunk_ids,
     contextual_retrieval_query,
@@ -706,6 +707,17 @@ class ChatRetrievalTest(unittest.TestCase):
         self.assertIn("Follow-up context for retrieval only", expanded)
         self.assertEqual(plain, "Quy định hoàn tiền đơn food")
 
+    def test_follow_up_marker_does_not_match_inside_words(self) -> None:
+        recent = ["khách hàng không cung cấp được số điện thoại và email đăng ký be qua email thì sao"]
+        standalone_question = "tao có thể nói cho tài xế là bị khoá vì vi phạm 3 lần không"
+
+        self.assertFalse(should_use_recent_context(standalone_question, recent))
+        self.assertTrue(should_use_recent_context("nó áp dụng cho tài xế không?", recent))
+        self.assertEqual(
+            contextual_retrieval_query(standalone_question, recent, "Scope: account verification"),
+            standalone_question,
+        )
+
     def test_follow_up_query_uses_previous_assistant_brief(self) -> None:
         expanded = contextual_retrieval_query(
             "rồi làm gì tiếp",
@@ -784,6 +796,111 @@ class ChatRetrievalTest(unittest.TestCase):
         self.assertEqual(ChatSessionMessageRequest(question="hello", model_route="").model_route, "simple")
         self.assertEqual(GroundedChatRequest(question="hello", model_route="").model_route, "simple")
         self.assertIsNone(ChatSessionUpdateRequest(model_route="").model_route)
+
+    def test_authority_analysis_blocks_conflicting_primary_policies(self) -> None:
+        left = retrieval_result("policy-a", "policy_rule", score=0.9).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "policy_rule",
+                    "chat_source_role": "direct_sop",
+                    "authority_level": "policy",
+                    "visibility": "customer_facing",
+                    "scope": "cs_response",
+                    "conflict_group": "refund-window",
+                }
+            }
+        )
+        right = retrieval_result("policy-b", "policy_rule", score=0.88).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "policy_rule",
+                    "chat_source_role": "direct_sop",
+                    "authority_level": "source_of_truth",
+                    "visibility": "customer_facing",
+                    "scope": "cs_response",
+                    "conflict_group": "refund-window",
+                }
+            }
+        )
+
+        analysis = analyze_context_authority("CS phản hồi khách về refund window thế nào?", [left, right])
+
+        self.assertFalse(analysis["answer_allowed"])
+        self.assertTrue(analysis["requires_review"])
+        self.assertIn("conflict_detected:primary_policy_conflict", analysis["warnings"])
+
+    def test_authority_analysis_keeps_internal_only_as_secondary_when_customer_source_exists(self) -> None:
+        customer = retrieval_result("customer", "wording_rule", score=0.8).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "wording_rule",
+                    "chat_source_role": "direct_sop",
+                    "authority_level": "policy",
+                    "visibility": "customer_facing",
+                    "scope": "cs_response",
+                }
+            }
+        )
+        internal = retrieval_result("internal", "compliance_rule", score=0.82).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "compliance_rule",
+                    "chat_source_role": "direct_sop",
+                    "authority_level": "policy",
+                    "visibility": "internal_only",
+                    "scope": "internal_handling",
+                }
+            }
+        )
+
+        analysis = analyze_context_authority("CS nói cho khách như thế nào?", [internal, customer])
+
+        self.assertTrue(analysis["answer_allowed"])
+        self.assertEqual([result.chunk_id for result in analysis["primary_context"]], ["customer"])
+        self.assertEqual([result.chunk_id for result in analysis["secondary_context"]], ["internal"])
+        self.assertIn("secondary_context_available_not_primary", analysis["warnings"])
+
+    def test_authority_analysis_blocks_direct_text_contradiction_between_primary_policies(self) -> None:
+        allowed = retrieval_result(
+            "allowed",
+            "compliance_rule",
+            score=0.8,
+            content="CS được nói cho khách rằng tài xế bị khóa do vi phạm 3 lần.",
+        ).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "compliance_rule",
+                    "chat_source_role": "direct_sop",
+                    "authority_level": "policy",
+                    "visibility": "customer_facing",
+                    "scope": "sanction_policy",
+                    "is_current_version": True,
+                }
+            }
+        )
+        forbidden = retrieval_result(
+            "forbidden",
+            "compliance_rule",
+            score=0.79,
+            content="CS không được nói cho khách rằng tài xế bị khóa do vi phạm 3 lần.",
+        ).model_copy(
+            update={
+                "metadata": {
+                    "unit_type": "compliance_rule",
+                    "chat_source_role": "direct_sop",
+                    "authority_level": "policy",
+                    "visibility": "customer_facing",
+                    "scope": "sanction_policy",
+                    "is_current_version": True,
+                }
+            }
+        )
+
+        analysis = analyze_context_authority("CS có được nói cho khách tài xế bị khóa vì vi phạm 3 lần không?", [allowed, forbidden])
+
+        self.assertFalse(analysis["answer_allowed"])
+        self.assertTrue(analysis["requires_review"])
+        self.assertTrue(any(conflict["type"] == "primary_policy_conflict" for conflict in analysis["conflicts"]))
 
 
 def retrieval_response(results: list[RetrievalResult]) -> RetrievalResponse:

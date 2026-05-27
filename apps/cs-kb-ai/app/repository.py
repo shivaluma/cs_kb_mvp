@@ -13,6 +13,7 @@ from psycopg import Connection, sql
 from psycopg.rows import dict_row, tuple_row
 from psycopg_pool import ConnectionPool
 
+from app import qdrant_store
 from app.config import settings
 from app.embedding import vector_literal
 from app.search_labels import is_bad_search_label, meaningful_search_label
@@ -53,6 +54,22 @@ RELATION_TYPES = (
 RELATION_STATUSES = ("suggested", "unresolved", "approved", "rejected", "archived")
 RELATION_TYPE_SQL = ", ".join(f"'{relation_type}'" for relation_type in RELATION_TYPES)
 BLOCKING_RELATION_TYPES = {"requires", "must_follow", "exception_of", "supersedes"}
+WORKFLOW_VISUAL_SOURCE_REF_UNIT_TYPES = {
+    "workflow_step",
+    "decision_node",
+    "decision_branch",
+    "workflow_path",
+    "script_block",
+    "annotation",
+    "relation_to_sop",
+    "visual_source_block",
+}
+WORKFLOW_SOURCE_TEXT_UNIT_TYPES = {
+    "workflow_step",
+    "decision_node",
+    "decision_branch",
+    "workflow_path",
+}
 URL_RE = re.compile(r"(?:https?://|www\.)[^\s)]+", re.IGNORECASE)
 RELATION_TITLE_STOP_RE = re.compile(
     r"\s+(?:trước khi|truoc khi|sau khi|nếu|neu|trong vòng|trong vong|sau đó|sau do|để|de)\b",
@@ -430,11 +447,13 @@ def ensure_schema() -> None:
               filters jsonb NOT NULL DEFAULT '{}'::jsonb,
               mode text NOT NULL,
               result_count integer NOT NULL,
+              trace jsonb NOT NULL DEFAULT '{}'::jsonb,
               latency_ms integer NOT NULL,
               created_at timestamptz NOT NULL DEFAULT now()
             )
             """
         )
+        conn.execute("ALTER TABLE ai_retrieval_events ADD COLUMN IF NOT EXISTS trace jsonb NOT NULL DEFAULT '{}'::jsonb")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_chat_events (
@@ -445,11 +464,19 @@ def ensure_schema() -> None:
               confidence numeric NOT NULL DEFAULT 0,
               warnings jsonb NOT NULL DEFAULT '[]'::jsonb,
               source_chunk_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+              retrieval_trace jsonb NOT NULL DEFAULT '{}'::jsonb,
+              model_route text NOT NULL DEFAULT '',
+              model_used text NOT NULL DEFAULT '',
+              model_reason text NOT NULL DEFAULT '',
               latency_ms integer NOT NULL DEFAULT 0,
               created_at timestamptz NOT NULL DEFAULT now()
             )
             """
         )
+        conn.execute("ALTER TABLE ai_chat_events ADD COLUMN IF NOT EXISTS retrieval_trace jsonb NOT NULL DEFAULT '{}'::jsonb")
+        conn.execute("ALTER TABLE ai_chat_events ADD COLUMN IF NOT EXISTS model_route text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE ai_chat_events ADD COLUMN IF NOT EXISTS model_used text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE ai_chat_events ADD COLUMN IF NOT EXISTS model_reason text NOT NULL DEFAULT ''")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_chat_sessions (
@@ -1959,25 +1986,95 @@ def workflow_graph_quality_failures(metadata: dict[str, Any]) -> list[str]:
         graph_confidence = float(metadata.get("graph_confidence") or metadata.get("confidence") or 1)
     except (TypeError, ValueError):
         graph_confidence = 0
-    has_quality_issue = (
-        (isinstance(graph_errors, list) and bool(graph_errors))
-        or (isinstance(uncertain_edges, list) and bool(uncertain_edges))
-        or uncertain_edges_count > 0
-        or graph_confidence < 0.7
-    )
-    if metadata.get("graph_validation_acknowledged") is True:
-        if has_quality_issue and not str(metadata.get("graph_validation_acknowledged_reason") or "").strip():
-            failures.append("workflow_graph_acknowledgement_reason_missing")
-        return failures
     if isinstance(graph_errors, list) and graph_errors:
         failures.append(f"workflow_graph_has_{len(graph_errors)}_validation_errors")
     if isinstance(uncertain_edges, list) and uncertain_edges:
         failures.append(f"workflow_graph_has_{len(uncertain_edges)}_uncertain_edges")
     if uncertain_edges_count > 0:
         failures.append(f"workflow_graph_has_{uncertain_edges_count}_uncertain_edges")
-    if graph_confidence < 0.7:
+    low_confidence_unacknowledged = graph_confidence < 0.7 and metadata.get("graph_validation_acknowledged") is not True
+    low_confidence_missing_reason = (
+        graph_confidence < 0.7
+        and metadata.get("graph_validation_acknowledged") is True
+        and not str(metadata.get("graph_validation_acknowledged_reason") or "").strip()
+    )
+    if low_confidence_unacknowledged:
         failures.append("workflow_graph_low_confidence")
+    if low_confidence_missing_reason:
+        failures.append("workflow_graph_acknowledgement_reason_missing")
     return list(dict.fromkeys(failures))
+
+
+def workflow_visual_source_refs_missing_bbox(unit_type: str, metadata: dict[str, Any]) -> bool:
+    if unit_type not in WORKFLOW_VISUAL_SOURCE_REF_UNIT_TYPES:
+        return False
+    refs = metadata.get("source_refs")
+    if not isinstance(refs, list):
+        refs = []
+    return not any(workflow_ref_has_page_bbox(ref) for ref in refs)
+
+
+def workflow_ref_has_page_bbox(ref: Any) -> bool:
+    if not isinstance(ref, dict):
+        return False
+    page = ref.get("page") or ref.get("page_number")
+    bbox = ref.get("bbox")
+    if not page or not isinstance(bbox, list) or len(bbox) < 4:
+        return False
+    values: list[float] = []
+    for item in bbox[:4]:
+        try:
+            values.append(float(item))
+        except (TypeError, ValueError):
+            return False
+    return max(values[2], values[0]) > min(values[2], values[0]) and max(values[3], values[1]) > min(values[3], values[1])
+
+
+def workflow_summary_only_source_text_failure(unit_type: str, content: str, metadata: dict[str, Any]) -> bool:
+    if unit_type not in WORKFLOW_SOURCE_TEXT_UNIT_TYPES:
+        return False
+    if metadata.get("source_text_is_summary") is True or metadata.get("source_text_quality") == "summary":
+        return True
+    source_text = str(metadata.get("source_text") or content or "").strip()
+    if not source_text:
+        return True
+    if unit_type == "workflow_path":
+        return len(source_text) < 80 or not workflow_source_text_has_step_evidence(source_text, metadata)
+    if unit_type == "decision_branch":
+        return len(source_text) < 80 or not (
+            str(metadata.get("from_step_code") or "").strip()
+            and str(metadata.get("to_step_code") or "").strip()
+            and str(metadata.get("condition") or "").strip()
+        )
+    return len(source_text) < 40 and not workflow_source_text_has_step_evidence(source_text, metadata)
+
+
+def workflow_source_text_has_step_evidence(source_text: str, metadata: dict[str, Any]) -> bool:
+    if str(metadata.get("step_code") or metadata.get("from_step_code") or metadata.get("to_step_code") or "").strip():
+        return True
+    return bool(re.search(r"(?<!\d)\d{1,3}(?:\.\d{1,3})?[.)]?\s", source_text))
+
+
+def production_indexable_chunk_row(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "").strip()
+    if not unit_type:
+        return False
+    if unit_type == "source_evidence_section" or unit_type == "visual_source_block" or unit_type.startswith("candidate_"):
+        return False
+    if str(metadata.get("review_status") or "") != "approved":
+        return False
+    if str(metadata.get("extraction_status") or "") not in {"structured", "manually_curated"}:
+        return False
+    if metadata.get("publish_blocked") is True or str(metadata.get("publish_blocked") or "").lower() == "true":
+        return False
+    if metadata.get("source_evidence_only") is True or str(metadata.get("source_evidence_only") or "").lower() == "true":
+        return False
+    if workflow_visual_source_refs_missing_bbox(unit_type, metadata):
+        return False
+    if workflow_summary_only_source_text_failure(unit_type, str(row.get("content") or ""), metadata):
+        return False
+    return True
 
 
 def workflow_edge_key(edge: dict[str, Any]) -> str:
@@ -2240,6 +2337,8 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
     workflow_graph_edges = 0
     workflow_graph_quality_errors: list[str] = []
     workflow_source_ack_missing = 0
+    workflow_visual_bbox_missing = 0
+    workflow_summary_only_units = 0
     workflow_unit_status_by_type: dict[str, bool] = {}
     required_unit_types: set[str] = set()
     missing_source_refs = 0
@@ -2287,6 +2386,11 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
             workflow_graph_quality_errors.extend(workflow_graph_decision_edge_failures(metadata))
         if version["document_type"] == "workflow_diagram" and workflow_source_ref_ack_missing(metadata):
             workflow_source_ack_missing += 1
+        if version["document_type"] == "workflow_diagram":
+            if workflow_visual_source_refs_missing_bbox(unit_type, metadata):
+                workflow_visual_bbox_missing += 1
+            if workflow_summary_only_source_text_failure(unit_type, str(row.get("content") or ""), metadata):
+                workflow_summary_only_units += 1
         if not source_evidence_only and not has_required_source_ref(version["document_type"], metadata):
             missing_source_refs += 1
 
@@ -2313,6 +2417,10 @@ def validate_publish_readiness_tx(conn: Connection[Any], version_id: str) -> Non
         failures.extend(workflow_graph_quality_errors)
         if workflow_source_ack_missing:
             failures.append(f"{workflow_source_ack_missing}_page_only_source_refs_need_ack")
+        if workflow_visual_bbox_missing:
+            failures.append(f"{workflow_visual_bbox_missing}_workflow_units_missing_bbox_source_refs")
+        if workflow_summary_only_units:
+            failures.append(f"{workflow_summary_only_units}_workflow_units_summary_only_source_text")
         for required_unit_type in sorted(required_unit_types):
             accepted_types = {required_unit_type}
             if required_unit_type == "decision_rule":
@@ -5409,7 +5517,7 @@ def lexical_search(query: str, filters: RetrievalFilters, limit: int) -> list[di
         return rerank_structural_matches(query, [dict(row) for row in rows])
 
 
-def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+def pgvector_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
     where_sql, params = filter_sql(filters)
     with connection() as conn:
         conn.row_factory = dict_row
@@ -5422,7 +5530,9 @@ def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) ->
                    d.source_filename,
                    v.version_number,
                    v.status,
+                   v.publish_state,
                    v.review_status,
+                   d.status AS document_status,
                    v.effective_from,
                    v.published_at,
                    (d.current_version_id = v.id) AS is_current_version,
@@ -5442,6 +5552,136 @@ def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) ->
             [vector_literal(vector), *params, vector_literal(vector), limit],
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def hydrate_vector_hits(hits: list[dict[str, Any]], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+    chunk_ids = [str(hit.get("chunk_id") or "") for hit in hits if hit.get("chunk_id")]
+    if not chunk_ids or limit <= 0:
+        return []
+    score_by_id = {str(hit.get("chunk_id")): float(hit.get("score") or 0.0) for hit in hits if hit.get("chunk_id")}
+    order_by_id = {chunk_id: index for index, chunk_id in enumerate(chunk_ids)}
+    where_sql, params = filter_sql(filters)
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT c.id AS chunk_id,
+                   c.document_id,
+                   c.version_id,
+                   d.title,
+                   d.source_filename,
+                   v.version_number,
+                   v.status,
+                   v.publish_state,
+                   v.review_status,
+                   d.status AS document_status,
+                   v.effective_from,
+                   v.published_at,
+                   (d.current_version_id = v.id) AS is_current_version,
+                   c.chunk_index,
+                   c.section,
+                   c.heading,
+                   c.content,
+                   c.metadata
+            FROM ai_chunks c
+            JOIN ai_documents d ON d.id = c.document_id
+            JOIN ai_document_versions v ON v.id = c.version_id
+            WHERE {where_sql}
+              AND c.id = ANY(%s::uuid[])
+            """,
+            [*params, chunk_ids],
+        ).fetchall()
+    hydrated: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        chunk_id = str(item.get("chunk_id"))
+        item["score"] = score_by_id.get(chunk_id, 0.0)
+        hydrated.append(item)
+    hydrated.sort(key=lambda item: order_by_id.get(str(item.get("chunk_id")), len(order_by_id)))
+    return hydrated[:limit]
+
+
+def vector_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+    backend = settings.vector_backend
+    if backend == "pgvector" or not qdrant_store.qdrant_configured():
+        return pgvector_search(vector, filters, limit)
+
+    try:
+        hits = qdrant_store.search(vector, filters, limit)
+        rows = hydrate_vector_hits(hits, filters, limit)
+        if rows or backend == "qdrant":
+            return rows
+    except Exception:
+        if backend == "qdrant":
+            raise
+
+    return pgvector_search(vector, filters, limit)
+
+
+def qdrant_index_rows_for_version(version_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            """
+            SELECT c.id AS chunk_id,
+                   c.document_id,
+                   c.version_id,
+                   d.title,
+                   COALESCE(c.metadata->>'source_filename', d.source_filename) AS source_filename,
+                   v.version_number,
+                   v.status,
+                   CASE WHEN v.status = 'published' THEN 'published_ready' ELSE v.publish_state END AS publish_state,
+                   v.review_status,
+                   d.status AS document_status,
+                   (d.current_version_id = v.id) AS is_current_version,
+                   c.chunk_index,
+                   c.section,
+                   c.heading,
+                   c.content,
+                   c.metadata,
+                   c.embedding::text AS embedding
+            FROM ai_chunks c
+            JOIN ai_documents d ON d.id = c.document_id
+            JOIN ai_document_versions v ON v.id = c.version_id
+            WHERE c.version_id = %s
+              AND c.embedding IS NOT NULL
+              AND COALESCE(c.metadata->>'review_status', '') = 'approved'
+              AND COALESCE(c.metadata->>'extraction_status', '') = ANY(%s)
+              AND COALESCE(c.metadata->>'publish_blocked', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'source_evidence_only', 'false') <> 'true'
+              AND COALESCE(c.metadata->>'unit_type', '') NOT IN ('source_evidence_section', 'visual_source_block')
+            ORDER BY c.chunk_index ASC
+            """,
+            (version_id, ["structured", "manually_curated"]),
+        ).fetchall()
+        return [row for row in (dict(row) for row in rows) if production_indexable_chunk_row(row)]
+
+
+def sync_qdrant_version(version_id: str) -> dict[str, Any]:
+    if not qdrant_store.qdrant_configured():
+        return {
+            "vector_backend": "pgvector",
+            "vector_index_verified": True,
+            "qdrant_indexed_count": 0,
+            "vector_indexing_error": "",
+        }
+    try:
+        rows = qdrant_index_rows_for_version(version_id)
+        indexed_count = qdrant_store.upsert_points(rows)
+        verified = indexed_count > 0
+        return {
+            "vector_backend": "qdrant",
+            "vector_index_verified": verified,
+            "qdrant_indexed_count": indexed_count,
+            "vector_indexing_error": "" if verified else "qdrant_no_points_indexed",
+        }
+    except Exception as exc:
+        return {
+            "vector_backend": "qdrant",
+            "vector_index_verified": False,
+            "qdrant_indexed_count": 0,
+            "vector_indexing_error": str(exc)[:500],
+        }
 
 
 def approved_relation_target_rows(source_document_ids: list[str], exclude_chunk_ids: list[str], limit: int) -> list[dict[str, Any]]:
@@ -5746,6 +5986,18 @@ def filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
         clauses.append("((d.metadata->'audience') ?| %s OR (c.metadata->'audience') ?| %s)")
         params.append(filters.audience)
         params.append(filters.audience)
+    if filters.visibility:
+        clauses.append("COALESCE(c.metadata->>'visibility', d.metadata->>'visibility', 'internal_only') = ANY(%s)")
+        params.append(filters.visibility)
+    if filters.scope:
+        clauses.append("COALESCE(c.metadata->>'scope', c.metadata->>'retrieval_scope', d.metadata->>'scope', 'generic') = ANY(%s)")
+        params.append(filters.scope)
+    if filters.policy_type:
+        clauses.append("COALESCE(c.metadata->>'policy_type', d.metadata->>'policy_type', c.metadata->>'unit_type', c.section) = ANY(%s)")
+        params.append(filters.policy_type)
+    if filters.authority_level:
+        clauses.append("COALESCE(c.metadata->>'authority_level', d.metadata->>'authority_level', 'policy') = ANY(%s)")
+        params.append(filters.authority_level)
     if filters.tags:
         clauses.append("((d.metadata->'tags') ?| %s OR (c.metadata->'tags') ?| %s)")
         params.append(filters.tags)
@@ -5786,15 +6038,22 @@ def lexical_tsquery(query: str) -> str:
     return " | ".join(terms)
 
 
-def log_retrieval(query: str, filters: dict[str, Any], mode: str, result_count: int, started_at: float) -> int:
+def log_retrieval(
+    query: str,
+    filters: dict[str, Any],
+    mode: str,
+    result_count: int,
+    started_at: float,
+    trace: dict[str, Any] | None = None,
+) -> int:
     latency_ms = int((time.perf_counter() - started_at) * 1000)
     with connection() as conn:
         conn.execute(
             """
-            INSERT INTO ai_retrieval_events (id, query, filters, mode, result_count, latency_ms)
-            VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+            INSERT INTO ai_retrieval_events (id, query, filters, mode, result_count, trace, latency_ms)
+            VALUES (%s, %s, %s::jsonb, %s, %s, %s::jsonb, %s)
             """,
-            (str(uuid.uuid4()), query, json.dumps(filters), mode, result_count, latency_ms),
+            (str(uuid.uuid4()), query, json.dumps(filters), mode, result_count, jsonb_text(trace or {}), latency_ms),
         )
     return latency_ms
 
@@ -6044,9 +6303,10 @@ def log_chat(response: Any) -> None:
         conn.execute(
             """
             INSERT INTO ai_chat_events (
-              id, question, answer, citation_count, confidence, warnings, source_chunk_ids, latency_ms
+              id, question, answer, citation_count, confidence, warnings, source_chunk_ids,
+              retrieval_trace, model_route, model_used, model_reason, latency_ms
             )
-            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s)
             """,
             (
                 str(uuid.uuid4()),
@@ -6056,6 +6316,10 @@ def log_chat(response: Any) -> None:
                 response.confidence,
                 pg_text(json.dumps(response.warnings, ensure_ascii=False)),
                 pg_text(json.dumps(source_chunk_ids, ensure_ascii=False)),
+                jsonb_text(getattr(response, "retrieval_trace", {}) or {}),
+                pg_text(getattr(response, "model_route", "") or ""),
+                pg_text(getattr(response, "model_used", "") or ""),
+                pg_text(getattr(response, "model_reason", "") or ""),
                 response.latency_ms,
             ),
         )

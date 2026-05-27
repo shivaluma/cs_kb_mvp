@@ -145,6 +145,31 @@ class SOPRankingPipelineTest(unittest.TestCase):
         self.assertIn("duplicate_parent", duplicate.score_debug["penalties"])
         self.assertIn("example_when_policy_exists", example.score_debug["penalties"])
 
+    def test_structured_table_row_value_can_beat_broad_group_for_lookup_query(self) -> None:
+        ranked = business_rerank(
+            "số điện thoại taxi thành lợi",
+            [
+                candidate(
+                    "group",
+                    "operational_note",
+                    "CS hướng dẫn tài xế beTaxi liên hệ tổng đài hãng. Danh sách taxi có Thanh Nga, Thành Lợi, Vina Taxi.",
+                    score=3.82,
+                    source_ref_quality="block_id",
+                ),
+                candidate(
+                    "row",
+                    "operational_note",
+                    "Tên Hãng: Thành Lợi; SĐT: 0243551551",
+                    score=2.33,
+                    source_ref_quality="structured",
+                ),
+            ],
+            RankingOptions(mode="portal_search", debug=True),
+        )
+
+        self.assertEqual(ranked[0].chunk_id, "row")
+        self.assertGreater(ranked[0].score_debug["boosts"]["structured_field_value_match"], 0)
+
     def test_config_change_affects_ranking_without_code_change(self) -> None:
         config = copy.deepcopy(load_ranking_config())
         config["chunk_type_priorities"]["generic"]["full_sop"] = 200
@@ -274,12 +299,36 @@ class SOPRankingPipelineTest(unittest.TestCase):
     def test_query_understanding_fallback_and_validation(self) -> None:
         seed = seed_intent("khi nào dùng xin lỗi")
         self.assertEqual(seed.intent, "wording")
-        invalid = normalize_query_understanding({"intent": "invented", "confidence": 0.9}, QueryUnderstanding(intent="handling", confidence=0.7))
+        invalid = normalize_query_understanding(
+            {
+                "intent": "invented",
+                "actor": "CS",
+                "recipient": "customer",
+                "required_scope": "cs_response",
+                "required_visibility": "customer_facing",
+                "confidence": 0.9,
+            },
+            QueryUnderstanding(intent="handling", confidence=0.7),
+        )
         self.assertEqual(invalid.intent, "handling")
+        self.assertEqual(invalid.actor, "CS")
+        self.assertEqual(invalid.required_scope, "cs_response")
         with patch.object(ranking.settings, "openrouter_api_key", "key"), patch("app.ranking.openrouter_chat_json", side_effect=ValueError("bad")):
             understood = ranking.understand_query("khi nào dùng xin lỗi", "ai_chat")
         self.assertEqual(understood.intent, "wording")
         self.assertTrue(any(warning.startswith("query_understanding_failed") for warning in understood.warnings))
+
+    def test_query_understanding_seed_classifier_extracts_scope_visibility_and_risk(self) -> None:
+        with patch.object(ranking.settings, "openrouter_api_key", ""):
+            understood = ranking.understand_query("CS có được nói cho khách tài xế bị khóa vì vi phạm 3 lần không", "ai_chat")
+
+        self.assertEqual(understood.actor, "CS")
+        self.assertEqual(understood.recipient, "customer")
+        self.assertEqual(understood.intent, "compliance")
+        self.assertEqual(understood.required_scope, "sanction_policy")
+        self.assertEqual(understood.required_visibility, "customer_facing")
+        self.assertTrue(understood.risk_sensitive)
+        self.assertIn("khóa", understood.key_concepts)
 
 
 if __name__ == "__main__":

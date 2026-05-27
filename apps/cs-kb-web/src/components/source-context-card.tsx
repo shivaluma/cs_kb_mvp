@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { MetaLine } from "@/components/common";
 import { formatDate } from "@/lib/format";
 import { blockMatchesHighlight, highlightedSegments, sourceDisplayLabel, type SourceDisplayGroup } from "@/lib/source-display";
+import { isDebugUiEnabled } from "@/lib/ui-mode";
 import { cn } from "@/lib/utils";
 
 export function SourceContextCard({
@@ -17,6 +18,7 @@ export function SourceContextCard({
   onOpenSource,
   onSelect,
   selected = false,
+  showDebugScore,
 }: {
   autoScrollToHighlight?: boolean;
   className?: string;
@@ -26,12 +28,15 @@ export function SourceContextCard({
   onOpenSource?: () => void;
   onSelect?: () => void;
   selected?: boolean;
+  showDebugScore?: boolean;
 }) {
   const firstHighlightRef = useRef<HTMLElement | null>(null);
   const segments = highlightedSegments(group.content, group.highlights);
   const primaryMatch = group.matches[0];
+  const debugScoreVisible = showDebugScore ?? isDebugUiEnabled();
   let highlightRefAssigned = false;
   const renderBlocks = group.blocks.length > 0 && (group.displayUnitType === "table_section" || segments.every((segment) => !segment.highlighted));
+  const openSourceLabel = group.displayUnitType === "workflow_diagram" || group.displayUnitType === "workflow_path" ? "Open in workflow" : "Open in SOP";
   const assignFirstHighlightRef = (node: HTMLElement | null) => {
     firstHighlightRef.current = node;
   };
@@ -44,6 +49,9 @@ export function SourceContextCard({
   ].filter(Boolean);
 
   useEffect(() => {
+    if (!debugScoreVisible) {
+      return;
+    }
     if (group.sourceResolutionStatus === "parent_missing") {
       console.warn("source_parent_missing", sourceLogPayload(group));
       return;
@@ -63,7 +71,7 @@ export function SourceContextCard({
     if (group.highlights.length) {
       console.debug("source_highlight_success", sourceLogPayload(group));
     }
-  }, [group]);
+  }, [debugScoreVisible, group]);
 
   useEffect(() => {
     if (autoScrollToHighlight) {
@@ -104,10 +112,12 @@ export function SourceContextCard({
             ) : null}
             {metaItems.length ? <MetaLine className="mt-1" items={metaItems} /> : null}
           </div>
-          <div className="shrink-0 text-right text-[11px] text-muted-foreground">
-            <div>score</div>
-            <div className="font-medium tabular-nums text-foreground">{group.score.toFixed(4)}</div>
-          </div>
+          {debugScoreVisible ? (
+            <div className="shrink-0 text-right text-[11px] text-muted-foreground">
+              <div>score</div>
+              <div className="font-medium tabular-nums text-foreground">{group.score.toFixed(4)}</div>
+            </div>
+          ) : null}
         </div>
 
         {renderBlocks ? (
@@ -168,7 +178,7 @@ export function SourceContextCard({
             {onOpenSource ? (
               <Button className="h-8 rounded-full px-3" onClick={(event) => { event.stopPropagation(); onOpenSource(); }} size="sm" type="button" variant="outline">
                 <ExternalLink data-icon="inline-start" className="size-3.5" />
-                Open source
+                {openSourceLabel}
               </Button>
             ) : null}
             {onCopyExcerpt ? (

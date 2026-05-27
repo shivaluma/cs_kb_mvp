@@ -34,6 +34,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { chatWarningLabels } from "@/lib/chat-warnings";
+import { isDebugUiEnabled } from "@/lib/ui-mode";
 import { groupResultsByDisplaySource } from "@/lib/source-display";
 import type {
   ChatModelRoute,
@@ -49,8 +51,8 @@ import type {
 const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
   {
     route: "simple",
-    label: "Gemini Flash Lite",
-    model: "google/gemini-2.5-flash-lite",
+    label: "Gemini 3.1 Flash Lite",
+    model: "google/gemini-3.1-flash-lite-preview",
     description: "Simple factual SOP Q&A, nhanh và rẻ cho câu hỏi tra cứu ngắn.",
   },
   {
@@ -78,10 +80,10 @@ const FALLBACK_CHAT_MODEL_ROUTES: ChatModelRouteConfig[] = [
     description: "Manual model override cân bằng tốc độ và chất lượng cho SOP chat.",
   },
   {
-    route: "google/gemini-3-flash-preview",
-    label: "Gemini 3 Flash Preview",
-    model: "google/gemini-3-flash-preview",
-    description: "Manual model override cho câu hỏi nhiều nguồn hoặc cần reasoning mới hơn.",
+    route: "google/gemini-3.1-flash-lite-preview",
+    label: "Gemini 3.1 Flash Lite Preview",
+    model: "google/gemini-3.1-flash-lite-preview",
+    description: "Manual model override cho Gemini multimodal/parser prompt và grounded SOP chat.",
   },
   {
     route: "anthropic/claude-3.5-haiku",
@@ -146,6 +148,7 @@ export function ChatWorkspace({
   const filteredSessions = sessions.filter((session) =>
     session.title.toLowerCase().includes(sessionSearch.trim().toLowerCase()),
   );
+  const debugEnabled = isDebugUiEnabled();
 
   function resetComposer() {
     setDraft("");
@@ -215,11 +218,12 @@ export function ChatWorkspace({
 
         <div className={cn("min-h-0 flex-1 overflow-y-auto", hasMessages ? "px-1 py-2" : "grid place-items-center px-4 py-10")}>
           {hasMessages ? (
-            <div className="mx-auto grid w-full max-w-3xl gap-6 pb-6">
+            <div className="mx-auto grid w-full max-w-5xl gap-6 pb-6">
               {messages.map((message) => (
                 <ChatBubble
                   key={message.id}
                   message={message}
+                  showDebug={debugEnabled}
                   onCopy={onCopy}
                   onOpenDocument={onOpenDocument}
                 />
@@ -248,6 +252,7 @@ export function ChatWorkspace({
             onUpdateFilter={onUpdateFilter}
             routeOptions={routeOptions}
             modelRoute={modelRoute}
+            showDebug={debugEnabled}
           />
         </div>
       </div>
@@ -392,6 +397,7 @@ function Composer({
   onSubmit,
   onUpdateFilter,
   routeOptions,
+  showDebug,
 }: {
   busy: boolean;
   collectionOptions: FilterOption[];
@@ -411,6 +417,7 @@ function Composer({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onUpdateFilter: (key: keyof FilterState, value: string) => void;
   routeOptions: ChatModelRouteConfig[];
+  showDebug: boolean;
 }) {
   const [scopeOpen, setScopeOpen] = useState(false);
   const scopedValues = [filters.collection, filters.audience, filters.vertical, filters.taskType];
@@ -434,7 +441,7 @@ function Composer({
   });
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-2">
+    <div className="mx-auto w-full max-w-5xl space-y-2">
       <div className="flex justify-end">
         <Button
           aria-expanded={scopeOpen}
@@ -514,43 +521,45 @@ function Composer({
             style={{ gridArea: isExpanded ? "footer" : "trailing" }}
           >
             <div className="ms-auto flex items-center gap-1.5">
-              <div className="hidden min-w-0 sm:block">
-                <Select
-                  disabled={busy}
-                  onValueChange={(value) => onModelRouteChange(value as ChatModelRoute)}
-                  value={modelRoute}
-                >
-                  <SelectTrigger
-                    aria-label="Select model route"
-                    className="h-9 w-48 max-w-[42vw] rounded-full border-0 bg-transparent px-2 text-base text-muted-foreground shadow-none hover:bg-accent hover:text-foreground focus-visible:ring-0"
-                    size="sm"
-                    title={selectedRouteLabel}
+              {showDebug ? (
+                <div className="hidden min-w-0 sm:block">
+                  <Select
+                    disabled={busy}
+                    onValueChange={(value) => onModelRouteChange(value as ChatModelRoute)}
+                    value={modelRoute}
                   >
-                    <span className="min-w-0 flex-1 truncate text-left">{selectedRouteLabel}</span>
-                  </SelectTrigger>
-                  <SelectContent align="end" className="w-80" position="popper" side="top" sideOffset={8}>
-                    {groupRouteOptions(routeOptions).map((group) => (
-                      <div className="px-1 py-1" key={group.label}>
-                        <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                          {group.label}
+                    <SelectTrigger
+                      aria-label="Select model route"
+                      className="h-9 w-48 max-w-[42vw] rounded-full border-0 bg-transparent px-2 text-base text-muted-foreground shadow-none hover:bg-accent hover:text-foreground focus-visible:ring-0"
+                      size="sm"
+                      title={selectedRouteLabel}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-left">{selectedRouteLabel}</span>
+                    </SelectTrigger>
+                    <SelectContent align="end" className="w-80" position="popper" side="top" sideOffset={8}>
+                      {groupRouteOptions(routeOptions).map((group) => (
+                        <div className="px-1 py-1" key={group.label}>
+                          <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            {group.label}
+                          </div>
+                          {group.routes.map((route) => (
+                            <SelectItem key={route.route} textValue={route.label} value={route.route}>
+                              <div className="flex flex-col">
+                                <span className="text-sm font-medium">{route.label}</span>
+                                {route.description ? (
+                                  <span className="line-clamp-1 text-[11px] text-muted-foreground">
+                                    {route.description}
+                                  </span>
+                                ) : null}
+                              </div>
+                            </SelectItem>
+                          ))}
                         </div>
-                        {group.routes.map((route) => (
-                          <SelectItem key={route.route} textValue={route.label} value={route.route}>
-                            <div className="flex flex-col">
-                              <span className="text-sm font-medium">{route.label}</span>
-                              {route.description ? (
-                                <span className="line-clamp-1 text-[11px] text-muted-foreground">
-                                  {route.description}
-                                </span>
-                              ) : null}
-                            </div>
-                          </SelectItem>
-                        ))}
-                      </div>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
 
               {draft.trim() ? (
                 <Button
@@ -606,10 +615,12 @@ function ChatBubble({
   message,
   onCopy,
   onOpenDocument,
+  showDebug,
 }: {
   message: ChatThreadMessage;
   onCopy: (text: string) => void;
   onOpenDocument: (source: RetrievalResult) => void;
+  showDebug: boolean;
 }) {
   const isUser = message.role === "user";
   const response = message.response;
@@ -617,7 +628,7 @@ function ChatBubble({
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const sourceCount = groupedSources.reduce((total, group) => total + group.sources.length, 0);
   return (
-    <article className={cn("min-w-0", isUser ? "ml-auto max-w-[78%]" : "mr-auto w-full max-w-3xl")}>
+    <article className={cn("min-w-0", isUser ? "ml-auto max-w-[78%]" : "mr-auto w-full max-w-5xl")}>
       <div
         className={cn(
           "min-w-0 break-words text-sm leading-6",
@@ -638,15 +649,15 @@ function ChatBubble({
 
         {response ? (
           <div className="mt-3 grid min-w-0 gap-3">
-            <ResponseMeta response={response} onCopy={onCopy} />
+            <ResponseMeta response={response} onCopy={onCopy} showDebug={showDebug} />
             {response.steps.length ? <ActionSteps steps={response.steps} /> : null}
-            {response.warnings.length ? <Warnings warnings={response.warnings} /> : null}
-            {response.model_reason ? (
+            {response.warnings.length ? <Warnings showDebug={showDebug} warnings={response.warnings} /> : null}
+            {showDebug && response.model_reason ? (
               <p className="max-w-full rounded-xl bg-muted/35 px-3 py-2 text-xs leading-5 text-muted-foreground">
                 Model routing: {response.model_reason}
               </p>
             ) : null}
-            {hasRetrievalTrace(response) ? <RetrievalTrace trace={response.retrieval_trace ?? {}} /> : null}
+            {showDebug && hasRetrievalTrace(response) ? <RetrievalTrace trace={response.retrieval_trace ?? {}} /> : null}
             {groupedSources.length ? (
               <section className="min-w-0 rounded-xl border bg-muted/10 px-3 py-2.5">
                 <button
@@ -655,7 +666,7 @@ function ChatBubble({
                   onClick={() => setSourcesOpen((current) => !current)}
                   type="button"
                 >
-                  <span className="shrink-0 text-xs font-semibold text-muted-foreground">Context candidates</span>
+                  <span className="shrink-0 text-xs font-semibold text-muted-foreground">Sources used</span>
                   <CompactBadge variant="secondary">{sourceCount}</CompactBadge>
                   <span className="flex min-w-0 flex-1 flex-wrap gap-1.5">
                     {groupedSources.map((group) => (
@@ -682,6 +693,7 @@ function ChatBubble({
                               key={`${group.role}-${sourceGroup.id}`}
                               onCopyExcerpt={(text) => onCopy(text)}
                               onOpenSource={() => onOpenDocument(sourceGroup.results[0])}
+                              showDebugScore={showDebug}
                             />
                           ))}
                         </div>
@@ -701,9 +713,11 @@ function ChatBubble({
 function ResponseMeta({
   onCopy,
   response,
+  showDebug,
 }: {
   onCopy: (text: string) => void;
   response: NonNullable<ChatThreadMessage["response"]>;
+  showDebug: boolean;
 }) {
   const finalSourceCount = numericTraceValue(response.retrieval_trace, "final_count");
   return (
@@ -712,13 +726,15 @@ function ResponseMeta({
         {response.citations.length ? `${response.citations.length} citations` : "no citation"}
       </CompactBadge>
       <CompactBadge>{Math.round(response.confidence * 100)}% evidence</CompactBadge>
-      {finalSourceCount ? <CompactBadge>{finalSourceCount} context candidates</CompactBadge> : null}
-      {response.model_route ? <CompactBadge>{response.model_route}</CompactBadge> : null}
-      {response.model_used ? <CompactBadge className="max-w-[13rem]">{response.model_used}</CompactBadge> : null}
-      <CompactBadge>
-        <Clock3 data-icon="inline-start" className="size-3" />
-        {response.latency_ms}ms
-      </CompactBadge>
+      {finalSourceCount ? <CompactBadge>{finalSourceCount} sources checked</CompactBadge> : null}
+      {showDebug && response.model_route ? <CompactBadge>{response.model_route}</CompactBadge> : null}
+      {showDebug && response.model_used ? <CompactBadge className="max-w-[13rem]">{response.model_used}</CompactBadge> : null}
+      {showDebug ? (
+        <CompactBadge>
+          <Clock3 data-icon="inline-start" className="size-3" />
+          {response.latency_ms}ms
+        </CompactBadge>
+      ) : null}
       <Button className="ml-auto h-7 rounded-full px-2" onClick={() => onCopy(response.answer)} size="sm" type="button" variant="outline">
         <Clipboard data-icon="inline-start" className="size-3.5" />
         Copy
@@ -768,17 +784,34 @@ function ActionSteps({ steps }: { steps: string[] }) {
   );
 }
 
-function Warnings({ warnings }: { warnings: string[] }) {
+function Warnings({ showDebug, warnings }: { showDebug: boolean; warnings: string[] }) {
+  const { userWarnings, debugWarnings } = chatWarningLabels(warnings, showDebug);
+  if (!userWarnings.length && !debugWarnings.length) {
+    return null;
+  }
   return (
-    <section className="min-w-0 rounded-xl border border-destructive/25 bg-destructive/5 px-3 py-2.5">
-      <p className="text-xs font-semibold text-destructive">Warnings</p>
-      <div className="mt-2 flex max-w-full flex-wrap gap-1.5">
-        {warnings.slice(0, 8).map((warning, index) => (
-          <CompactBadge className="max-w-full text-destructive" key={`${warning}-${index}`}>
-            {warning}
-          </CompactBadge>
-        ))}
-      </div>
+    <section className="min-w-0 rounded-xl border bg-muted/15 px-3 py-2.5">
+      <p className="text-xs font-semibold text-muted-foreground">Review notes</p>
+      {userWarnings.length ? (
+        <ul className="mt-2 space-y-1 text-sm leading-6">
+          {userWarnings.map((warning, index) => (
+            <li className="grid grid-cols-[0.5rem_minmax(0,1fr)] gap-2" key={`${warning}-${index}`}>
+              <span className="mt-2 size-1.5 rounded-full bg-amber-500" aria-hidden="true" />
+              <span className="min-w-0 break-words">{warning}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {debugWarnings.length ? (
+        <details className="mt-2 text-xs text-muted-foreground">
+          <summary className="cursor-pointer select-none">Debug warnings</summary>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {debugWarnings.map((warning) => (
+              <CompactBadge key={warning}>{warning}</CompactBadge>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </section>
   );
 }

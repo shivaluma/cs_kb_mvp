@@ -12,7 +12,7 @@ class ChatModelRoutingTest(unittest.TestCase):
 
         self.assertEqual(selection.route, "simple")
         self.assertEqual(selection.reason, "manual_route")
-        self.assertEqual(selection.model, "google/gemini-2.5-flash-lite")
+        self.assertEqual(selection.model, "google/gemini-3.1-flash-lite-preview")
         self.assertFalse(selection.strict_grounding)
 
     def test_legacy_auto_request_is_coerced_to_simple(self) -> None:
@@ -20,7 +20,7 @@ class ChatModelRoutingTest(unittest.TestCase):
 
         self.assertEqual(selection.route, "simple")
         self.assertEqual(selection.reason, "auto_route_disabled_simple_default")
-        self.assertEqual(selection.model, "google/gemini-2.5-flash-lite")
+        self.assertEqual(selection.model, "google/gemini-3.1-flash-lite-preview")
 
     def test_manual_policy_route_still_uses_kimi(self) -> None:
         selection = select_chat_model(GroundedChatRequest(question="Khi nào cần chuyển xử lý cho Lead?", model_route="policy"), empty_retrieval())

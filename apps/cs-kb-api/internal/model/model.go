@@ -71,14 +71,18 @@ type SearchRequest struct {
 }
 
 type SearchFilters struct {
-	Audience    []string `json:"audience"`
-	Vertical    []string `json:"vertical"`
-	Category    []string `json:"category"`
-	Tags        []string `json:"tags"`
-	CaseReasons []string `json:"case_reasons"`
-	Collections []string `json:"collections"`
-	TaskTypes   []string `json:"task_types"`
-	UnitTypes   []string `json:"unit_types"`
+	Audience       []string `json:"audience"`
+	Vertical       []string `json:"vertical"`
+	Category       []string `json:"category"`
+	Tags           []string `json:"tags"`
+	CaseReasons    []string `json:"case_reasons"`
+	Collections    []string `json:"collections"`
+	TaskTypes      []string `json:"task_types"`
+	UnitTypes      []string `json:"unit_types"`
+	Visibility     []string `json:"visibility"`
+	Scope          []string `json:"scope"`
+	PolicyType     []string `json:"policy_type"`
+	AuthorityLevel []string `json:"authority_level"`
 }
 
 type SearchResponse struct {
@@ -92,18 +96,28 @@ type SearchResponse struct {
 }
 
 type SearchResult struct {
-	SOPID      string         `json:"sop_id"`
-	Title      string         `json:"title"`
-	Snippet    string         `json:"snippet"`
-	Category   string         `json:"category"`
-	Audience   []string       `json:"audience"`
-	Vertical   string         `json:"vertical"`
-	Tags       []string       `json:"tags"`
-	UpdatedAt  time.Time      `json:"updated_at"`
-	Version    int            `json:"version"`
-	Confidence float64        `json:"confidence"`
-	Score      float64        `json:"score,omitempty"`
-	Debug      map[string]any `json:"debug,omitempty"`
+	SOPID             string         `json:"sop_id"`
+	ResultType        string         `json:"result_type,omitempty"`
+	DocumentID        string         `json:"document_id,omitempty"`
+	DocumentVersionID string         `json:"document_version_id,omitempty"`
+	VersionID         string         `json:"version_id,omitempty"`
+	ChunkID           string         `json:"chunk_id,omitempty"`
+	Title             string         `json:"title"`
+	Snippet           string         `json:"snippet"`
+	Category          string         `json:"category"`
+	Audience          []string       `json:"audience"`
+	Vertical          string         `json:"vertical"`
+	Tags              []string       `json:"tags"`
+	Collections       []string       `json:"collections,omitempty"`
+	SectionPath       []string       `json:"section_path,omitempty"`
+	ChunkType         string         `json:"chunk_type,omitempty"`
+	RiskLevel         string         `json:"risk_level,omitempty"`
+	SourceRefs        any            `json:"source_refs,omitempty"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	Version           int            `json:"version"`
+	Confidence        float64        `json:"confidence"`
+	Score             float64        `json:"score,omitempty"`
+	Debug             map[string]any `json:"debug,omitempty"`
 }
 
 type SemanticResult struct {

@@ -18,6 +18,7 @@ import { EmptyPanel, Fact, MacroCopyButton, MetaLine, SectionTitle, TagSummary }
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/format";
+import { isDebugUiEnabled } from "@/lib/ui-mode";
 import type { Macro, SOP } from "@/types";
 
 export function SOPDetailWorkspace({
@@ -57,6 +58,7 @@ export function SOPDetailWorkspace({
   const version = sop.current_version;
   const sections = version.sections;
   const chatPrompt = sop.title;
+  const debugEnabled = isDebugUiEnabled();
 
   return (
     <div className="space-y-5">
@@ -81,12 +83,12 @@ export function SOPDetailWorkspace({
         </div>
       </div>
 
-      <section className="rounded-2xl border bg-card p-4 md:p-5">
+      <section className="rounded-xl border bg-card p-4 md:p-5">
         <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0">
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <Badge variant="secondary">{sop.code}</Badge>
-              <Badge variant="secondary">{version.status}</Badge>
+              <Badge variant="secondary">Published source of truth</Badge>
               <Badge variant="outline">v{version.version_number}</Badge>
             </div>
             <h2 className="max-w-4xl text-2xl font-semibold tracking-tight md:text-3xl">{sop.title}</h2>
@@ -169,6 +171,28 @@ export function SOPDetailWorkspace({
         </div>
 
         <aside className="space-y-4">
+          <PolicySection icon={Checklist} title="On this SOP">
+            <nav className="grid gap-1 text-sm">
+              {[
+                "Effective window",
+                "Applicability",
+                "Case reasons",
+                "Main procedure",
+                "SLA",
+                "Macro responses",
+              ].map((item) => (
+                <button
+                  className="rounded-md px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  key={item}
+                  onClick={() => document.getElementById(sectionId(item))?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                  type="button"
+                >
+                  {item}
+                </button>
+              ))}
+            </nav>
+          </PolicySection>
+
           <PolicySection icon={Clock} title="SLA">
             <p className="text-sm leading-6 text-muted-foreground">{sections.sla || "No explicit SLA was published."}</p>
           </PolicySection>
@@ -222,11 +246,16 @@ export function SOPDetailWorkspace({
             </div>
           </PolicySection>
 
-          <PolicySection icon={FileText} title="Version snapshot">
+          <PolicySection icon={FileText} title={debugEnabled ? "Version snapshot" : "Review notes"}>
             <dl className="grid gap-3">
               <Definition label="Change summary" value={version.change_summary || "No change summary"} />
-              <Definition label="Version ID" value={version.id} />
               <Definition label="Approved by" value={version.approved_by || "n/a"} />
+              {debugEnabled ? (
+                <>
+                  <Definition label="Version ID" value={version.id} />
+                  <Definition label="Current version pointer" value={sop.current_version_id} />
+                </>
+              ) : null}
             </dl>
           </PolicySection>
         </aside>
@@ -245,7 +274,7 @@ function PolicySection({
   title: string;
 }) {
   return (
-    <section className="rounded-2xl border bg-card p-4">
+    <section className="scroll-mt-24 rounded-xl border bg-card p-4" id={sectionId(title)}>
       <div className="mb-3 flex items-center gap-2">
         <Icon className="size-4 text-muted-foreground" />
         <h3 className="text-sm font-semibold">{title}</h3>
@@ -253,6 +282,10 @@ function PolicySection({
       {children}
     </section>
   );
+}
+
+function sectionId(title: string) {
+  return `sop-section-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")}`;
 }
 
 function Definition({ label, value }: { label: string; value: string }) {

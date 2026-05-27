@@ -127,6 +127,7 @@ export function RetrievalWorkspace({
                     group={group}
                     key={group.id}
                     onCopyExcerpt={(text) => void navigator.clipboard.writeText(text)}
+                    showDebugScore
                   />
                 ))}
               </div>

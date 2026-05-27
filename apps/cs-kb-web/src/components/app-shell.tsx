@@ -100,7 +100,7 @@ function MainSidebar({ workspace, reviewCount }: { workspace: Workspace; reviewC
 						<SidebarGroupLabel>{group.label}</SidebarGroupLabel>
 						<SidebarGroupContent>
 							<SidebarMenu>
-								{group.label === "Operations" ? (
+								{group.label === "Review and governance" ? (
 									<DocumentWorkflowNav
 										onNavigate={closeMobile}
 										reviewCount={reviewCount}
@@ -525,7 +525,7 @@ export function AppShell({
 												{group.label}
 											</div>
 											<div className="space-y-1">
-												{group.label === "Operations" ? (
+												{group.label === "Review and governance" ? (
 													<div className="mb-1 rounded-lg border bg-muted/15 p-1.5">
 														<div className="flex items-center justify-between gap-2 px-2 pb-1 text-[11px] font-medium text-muted-foreground">
 															<span>Document workflow</span>

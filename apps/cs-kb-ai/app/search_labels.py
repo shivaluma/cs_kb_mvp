@@ -11,8 +11,17 @@ BAD_LABELS = {"", "yes", "no", "start", "end", "row", "dong", "dòng", "link", "
 
 UNIT_TYPE_LABELS = {
     "decision_point": "Điều kiện",
+    "decision_node": "Điều kiện",
+    "decision_branch": "Nhánh điều kiện",
     "decision_rule": "Điều kiện",
+    "full_workflow_diagram": "Workflow diagram",
+    "workflow_phase": "Phase workflow",
+    "workflow_path": "Luồng xử lý",
     "workflow_step": "Bước xử lý",
+    "script_block": "Kịch bản",
+    "annotation": "Ghi chú workflow",
+    "relation_to_sop": "SOP liên quan",
+    "visual_source_block": "Visual source",
     "operational_instruction": "Hướng dẫn",
     "routing_rule": "Điều hướng",
     "policy_rule": "Quy định",

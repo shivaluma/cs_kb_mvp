@@ -4,7 +4,7 @@ import { RouteLoading } from "@/components/route-loading";
 import { defaultFilters } from "@/constants";
 import { useHomepage } from "@/hooks/api/homepage";
 import { useCollections, useRecordKBEvent } from "@/hooks/api/kb-index";
-import { useAISuggest, useSearch, useSearchFilterOptions, useSOP } from "@/hooks/api/search";
+import { useAISuggest, useSearch, useSearchAutocomplete, useSearchFilterOptions, useSOP } from "@/hooks/api/search";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { compactFilters, optionizeFilterValues, toSearchResult } from "@/lib/format";
 import { useFeedback } from "@/providers/feedback-context";
@@ -38,12 +38,14 @@ export function LookupPage() {
   const collectionsQuery = useCollections();
   const filterOptionsQuery = useSearchFilterOptions();
   const searchMutation = useSearch();
+  const autocompleteQuery = useSearchAutocomplete(query);
   const sopMutation = useSOP();
   const aiSuggestMutation = useAISuggest();
   const eventMutation = useRecordKBEvent();
   const [searchEventId, setSearchEventId] = useState("");
   const homepage = homepageQuery.data;
   const searchResults = hasSearchQuery ? (searchMutation.data?.results ?? []) : [];
+  const catalogSearchResults = searchResults.filter((result) => !result.chunk_id && result.result_type !== "sop_chunk");
   const semanticResults = hasSearchQuery ? (searchMutation.data?.semantic_results ?? []) : [];
   const aiSuggestion = (aiSuggestMutation.data as AISuggestion | undefined) ?? null;
   const booting = homepageQuery.isLoading && !homepageQuery.data && !homepageQuery.error && !searchMutation.data;
@@ -75,11 +77,11 @@ export function LookupPage() {
     if (hasStructuredFilters) {
       return [];
     }
-    if (searchResults.length > 0) {
-      return searchResults;
+    if (catalogSearchResults.length > 0) {
+      return catalogSearchResults;
     }
     return searchMutation.data ? [] : (homepage?.most_viewed ?? []).map(toSearchResult);
-  }, [hasSearchQuery, hasStructuredFilters, homepage, searchMutation.data, searchResults]);
+  }, [catalogSearchResults, hasSearchQuery, hasStructuredFilters, homepage, searchMutation.data]);
   const feedbackTotal = selected ? selected.analytics.helpful + selected.analytics.not_helpful : 0;
   const helpfulRate = feedbackTotal && selected ? Math.round((selected.analytics.helpful / feedbackTotal) * 100) : 0;
 
@@ -133,6 +135,10 @@ export function LookupPage() {
       searchMutation.reset();
       setSelectedDocumentMatch(null);
       setParams({ chunk: "" });
+      return;
+    }
+    if ([...trimmedQuery].length === 1) {
+      reportNotice("Enter at least 2 characters for title or macro lookup.");
       return;
     }
     const nextSearchEventId = crypto.randomUUID();
@@ -273,6 +279,10 @@ export function LookupPage() {
         onCopyMacro={copyMacro}
         onOpenSOP={openSOP}
         onRunSearch={() => runSearch()}
+        onSuggestionSelect={(suggestion) => {
+          setQuery(suggestion);
+          runSearch(suggestion);
+        }}
         onSelectDocumentMatch={selectDocumentMatch}
         onUpdateFilter={updateFilter}
         query={query}
@@ -281,6 +291,7 @@ export function LookupPage() {
         selectedVersion={selected?.current_version}
         semanticResults={semanticResults}
         searchEventId={searchEventId}
+        suggestions={autocompleteQuery.data?.suggestions ?? []}
         setQuery={setQuery}
       />
     </Suspense>

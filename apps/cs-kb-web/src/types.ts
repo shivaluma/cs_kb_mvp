@@ -48,12 +48,22 @@ export type SOP = {
 
 export type SearchResult = {
   sop_id: string;
+  result_type?: "sop_catalog" | "sop_chunk";
+  document_id?: string;
+  document_version_id?: string;
+  version_id?: string;
+  chunk_id?: string;
   title: string;
   snippet: string;
   category: string;
   audience: string[];
   vertical: string;
   tags: string[];
+  collections?: string[];
+  section_path?: string[];
+  chunk_type?: string;
+  risk_level?: string;
+  source_refs?: Array<Record<string, unknown>>;
   updated_at: string;
   version: number;
   confidence: number;
@@ -157,6 +167,7 @@ export type ChatModelRoute =
   | "high_risk"
   | "complex"
   | "google/gemini-2.5-flash"
+  | "google/gemini-3.1-flash-lite-preview"
   | "google/gemini-3-flash-preview"
   | "anthropic/claude-3.5-haiku";
 

@@ -25,6 +25,15 @@ VALID_INTENTS = {
     "document_title",
     "generic",
 }
+INTENT_SPECIFICITY_PRIORITY = {
+    "forbidden_wording": 70,
+    "compliance": 60,
+    "wording": 50,
+    "macro": 45,
+    "document_title": 35,
+    "handling": 30,
+    "generic": 0,
+}
 RRF_K = 60
 
 
@@ -37,7 +46,11 @@ class IntentMatch:
 
 @dataclass(frozen=True)
 class QueryUnderstanding:
+    actor: str = "unknown"
+    recipient: str = "unknown"
     intent: str = "generic"
+    required_scope: str = "unknown"
+    required_visibility: str = "unknown"
     confidence: float = 0.0
     rewritten_query: str = ""
     key_concepts: tuple[str, ...] = ()
@@ -49,7 +62,11 @@ class QueryUnderstanding:
 
     def as_debug(self) -> dict[str, Any]:
         return {
+            "actor": self.actor,
+            "recipient": self.recipient,
             "intent": self.intent,
+            "required_scope": self.required_scope,
+            "required_visibility": self.required_visibility,
             "confidence": self.confidence,
             "rewritten_query": self.rewritten_query,
             "key_concepts": list(self.key_concepts),
@@ -92,6 +109,10 @@ class SearchCandidate:
     category: str = ""
     collections: tuple[str, ...] = ()
     audience: tuple[str, ...] = ()
+    visibility: str = "internal_only"
+    scope: str = "generic"
+    policy_type: str = ""
+    authority_level: str = "policy"
     vertical: str = ""
     updated_at: str = ""
     effective_from: str = ""
@@ -200,19 +221,55 @@ def default_ranking_config() -> dict[str, Any]:
                 "macro_text": 16,
                 "forbidden_phrases": 20,
                 "content": 12,
-                "max_total": 30,
+                "max_total": 36,
             },
-            "source_ref_quality": {"table_row": 8, "block_id": 6, "paragraph_only": 3, "none": -20},
+            "structured_field_value_match": {"table_row": 180, "structured": 180, "default": 80},
+            "source_ref_quality": {"table_row": 8, "bbox": 8, "block_id": 6, "paragraph_only": 3, "none": -20},
             "status": {"published": 15, "approved": 5, "needs_review": -20, "draft": -40},
             "current_version": {"true": 8, "false": -25},
+            "authority_level": {"source_of_truth": 14, "policy": 10, "procedure": 6, "reference": 2, "example": -8, "deprecated": -30},
+            "policy_type": {"compliance_rule": 7, "communication_rule": 6, "handling_process": 4, "macro": 3, "reference": 0, "example": -6},
+            "visibility_alignment": {"customer_facing": 6, "internal_only": -6, "any": 0},
             "risk_for_compliance": {"critical": 10, "high": 7, "medium": 3, "low": 0},
             "stale_version_penalty": -25,
             "duplicate_parent_penalty": {"second": -8, "third_or_more": -16},
             "example_penalty_when_policy_exists": -8,
             "full_sop_penalty_for_specific_query": -10,
         },
-        "chunk_type_priorities": {"generic": {"source_evidence_section": 4}},
-        "intent_rules": {},
+        "chunk_type_priorities": {
+            "handling": {
+                "decision_branch": 22,
+                "workflow_path": 20,
+                "decision_node": 12,
+                "workflow_step": 10,
+                "workflow_phase": 4,
+                "full_workflow_diagram": -10,
+            },
+            "generic": {
+                "decision_branch": 10,
+                "workflow_path": 8,
+                "workflow_step": 5,
+                "source_evidence_section": 4,
+                "full_workflow_diagram": -10,
+            },
+        },
+        "intent_rules": {
+            "handling": {
+                "seed_terms": [
+                    "khi nào",
+                    "trường hợp",
+                    "nếu",
+                    "có được",
+                    "xử lý sao",
+                    "không cung cấp email",
+                    "teamlead",
+                    "layer 2",
+                    "mời đánh giá",
+                    "đúng kênh",
+                    "cuộc gọi",
+                ]
+            }
+        },
         "model_query_understanding": {
             "enabled_for_ai_chat": True,
             "enabled_for_portal": False,
@@ -237,6 +294,7 @@ def seed_intent(query: str, config: dict[str, Any] | None = None) -> IntentMatch
     normalized_query = normalize_text(query)
     rules = config.get("intent_rules") if isinstance(config.get("intent_rules"), dict) else {}
     best = IntentMatch()
+    best_score: tuple[int, float, int, int] = (0, 0.0, 0, 0)
     for intent, rule in rules.items():
         if intent not in VALID_INTENTS or not isinstance(rule, dict):
             continue
@@ -245,15 +303,74 @@ def seed_intent(query: str, config: dict[str, Any] | None = None) -> IntentMatch
         if not matched:
             continue
         confidence = min(0.95, 0.55 + 0.15 * len(matched))
-        if len(matched) > len(best.matched_terms) or (len(matched) == len(best.matched_terms) and confidence > best.confidence):
+        specificity = max(len(normalize_text(term)) for term in matched)
+        score = (len(matched), confidence, specificity, INTENT_SPECIFICITY_PRIORITY.get(intent, 0))
+        if score > best_score:
             best = IntentMatch(intent=intent, confidence=confidence, matched_terms=matched)
+            best_score = score
     return best
+
+
+def seed_query_understanding(query: str, seed: IntentMatch) -> QueryUnderstanding:
+    normalized_query = normalize_text(query)
+    actor = "CS" if contains_any(normalized_query, ("cs", "agent", "nhan vien", "tong dai vien")) else "unknown"
+    recipient = "unknown"
+    if contains_any(normalized_query, ("khach", "customer", "nguoi dung")):
+        recipient = "customer"
+    elif contains_any(normalized_query, ("tai xe", "tx", "driver")):
+        recipient = "driver"
+    elif contains_any(normalized_query, ("merchant", "nha hang", "mcu")):
+        recipient = "merchant"
+    elif contains_any(normalized_query, ("noi bo", "internal", "lead", "qa")):
+        recipient = "internal"
+
+    required_scope = "unknown"
+    if contains_any(normalized_query, ("che tai", "khoa", "vi pham", "nguong", "3 lan", "sanction")):
+        required_scope = "sanction_policy"
+    elif contains_any(normalized_query, ("refund", "hoan tien", "hoan phi", "boi hoan")):
+        required_scope = "refund_policy"
+    elif contains_any(normalized_query, ("xu ly", "chuyen", "bo phan chuyen mon", "si", "noi bo")):
+        required_scope = "internal_handling"
+    elif contains_any(normalized_query, ("noi cho khach", "phan hoi", "tra loi", "email", "macro", "wording", "xin loi", "rat tiec")):
+        required_scope = "cs_response"
+    elif seed.intent in {"macro", "wording", "forbidden_wording"}:
+        required_scope = "cs_response"
+    elif seed.intent == "handling":
+        required_scope = "internal_handling"
+    else:
+        required_scope = "generic"
+
+    required_visibility = "unknown"
+    if contains_any(normalized_query, ("noi cho khach", "cho khach", "phan hoi", "tra loi", "email", "macro", "wording")) or recipient == "customer":
+        required_visibility = "customer_facing"
+    if contains_any(normalized_query, ("noi bo", "quy trinh noi bo", "si da goi", "tasklist noi bo")):
+        required_visibility = "internal_only"
+
+    risk_sensitive = seed.intent in {"compliance", "forbidden_wording"} or contains_any(
+        normalized_query,
+        ("co duoc", "khong duoc", "tuyet doi khong", "cam", "che tai", "khoa", "vi pham", "nguong", "noi bo", "zt"),
+    )
+    preferred_chunk_types = preferred_chunk_types_for_intent(seed.intent)
+    return QueryUnderstanding(
+        actor=actor,
+        recipient=recipient,
+        intent=seed.intent,
+        required_scope=required_scope,
+        required_visibility=required_visibility,
+        confidence=seed.confidence,
+        rewritten_query=query.strip(),
+        key_concepts=seed.matched_terms,
+        must_have_terms=seed.matched_terms,
+        preferred_chunk_types=preferred_chunk_types,
+        risk_sensitive=risk_sensitive,
+        source="seed",
+    )
 
 
 def understand_query(query: str, mode: str, config: dict[str, Any] | None = None) -> QueryUnderstanding:
     config = config or load_ranking_config()
     seed = seed_intent(query, config)
-    fallback = QueryUnderstanding(intent=seed.intent, confidence=seed.confidence, key_concepts=seed.matched_terms, source="seed")
+    fallback = seed_query_understanding(query, seed)
     model_cfg = config.get("model_query_understanding") if isinstance(config.get("model_query_understanding"), dict) else {}
     if mode != "ai_chat" or not bool(model_cfg.get("enabled_for_ai_chat", False)):
         return fallback
@@ -285,6 +402,10 @@ def understand_query(query: str, mode: str, config: dict[str, Any] | None = None
                         "Query:\n"
                         f"{query}\n\n"
                         "Return JSON: {\"intent\":\"macro|forbidden_wording|wording|compliance|handling|document_title|generic\","
+                        "\"actor\":\"CS|customer|driver|merchant|admin|unknown\","
+                        "\"recipient\":\"customer|driver|merchant|internal|unknown\","
+                        "\"required_scope\":\"cs_response|internal_handling|sanction_policy|refund_policy|generic|unknown\","
+                        "\"required_visibility\":\"customer_facing|internal_only|any|unknown\","
                         "\"confidence\":0.0,\"rewritten_query\":\"string\",\"key_concepts\":[\"string\"],"
                         "\"must_have_terms\":[\"string\"],\"preferred_chunk_types\":[\"string\"],\"risk_sensitive\":true}"
                     ),
@@ -316,7 +437,19 @@ def normalize_query_understanding(payload: Any, fallback: QueryUnderstanding) ->
     if confidence < 0.2:
         intent = fallback.intent
     return QueryUnderstanding(
+        actor=normalize_enum(payload.get("actor"), {"CS", "customer", "driver", "merchant", "admin", "unknown"}, fallback.actor),
+        recipient=normalize_enum(payload.get("recipient"), {"customer", "driver", "merchant", "internal", "unknown"}, fallback.recipient),
         intent=intent,
+        required_scope=normalize_enum(
+            payload.get("required_scope"),
+            {"cs_response", "internal_handling", "sanction_policy", "refund_policy", "generic", "unknown"},
+            fallback.required_scope,
+        ),
+        required_visibility=normalize_enum(
+            payload.get("required_visibility"),
+            {"customer_facing", "internal_only", "any", "unknown"},
+            fallback.required_visibility,
+        ),
         confidence=confidence,
         rewritten_query=str(payload.get("rewritten_query") or ""),
         key_concepts=string_tuple(payload.get("key_concepts")),
@@ -394,6 +527,11 @@ def score_candidate(
     if exact_boost:
         boosts["exact_phrase"] = round(exact_boost, 4)
 
+    structured_boost, structured_debug = structured_field_value_boost(query, candidate, stable)
+    score += structured_boost
+    if structured_boost:
+        boosts["structured_field_value_match"] = round(structured_boost, 4)
+
     chunk_priority = chunk_type_priority(candidate, query_understanding.intent, config)
     if candidate.chunk_type.endswith("_group") and query_understanding.intent in {"wording", "handling", "compliance", "forbidden_wording"}:
         group_boost = float(stable.get("grouped_context_for_intent") or 0)
@@ -429,6 +567,32 @@ def score_candidate(
         score += stale_penalty
         penalties["stale_version"] = round(stale_penalty, 4)
 
+    authority_boost = map_weight(stable.get("authority_level"), candidate.authority_level)
+    score += authority_boost
+    if authority_boost >= 0:
+        boosts["authority_level"] = round(authority_boost, 4)
+    else:
+        penalties["authority_level"] = round(authority_boost, 4)
+
+    policy_type_boost = map_weight(stable.get("policy_type"), candidate.policy_type or candidate.chunk_type)
+    score += policy_type_boost
+    if policy_type_boost >= 0:
+        boosts["policy_type"] = round(policy_type_boost, 4)
+    else:
+        penalties["policy_type"] = round(policy_type_boost, 4)
+
+    if query_understanding.required_visibility in {"customer_facing", "internal_only"}:
+        visibility_map = stable.get("visibility_alignment") if isinstance(stable.get("visibility_alignment"), dict) else {}
+        aligned = candidate.visibility == query_understanding.required_visibility or candidate.visibility in {"", "any"}
+        visibility_weight = float(visibility_map.get(query_understanding.required_visibility if aligned else candidate.visibility, 0) or 0)
+        if not aligned:
+            visibility_weight = -abs(visibility_weight or 6)
+        score += visibility_weight
+        if visibility_weight >= 0:
+            boosts["visibility_alignment"] = round(visibility_weight, 4)
+        else:
+            penalties["visibility_alignment"] = round(visibility_weight, 4)
+
     if query_understanding.intent in {"compliance", "forbidden_wording"} or query_understanding.risk_sensitive:
         risk_boost = map_weight(stable.get("risk_for_compliance"), candidate.risk_level)
         score += risk_boost
@@ -457,6 +621,7 @@ def score_candidate(
         "boosts": boosts,
         "penalties": penalties,
         "exact_phrase": exact_debug,
+        "structured_field_value": structured_debug,
         "source_ref_quality": candidate.source_ref_quality,
     }
     return replace(candidate, business_score=score, final_score=score, score_debug=debug if options.debug else {})
@@ -818,6 +983,10 @@ def candidate_from_row(row: dict[str, Any], source: str = "", rank: int | None =
         category=first_text(row.get("category"), metadata.get("category")),
         collections=tuple(collection_values(metadata.get("collections") or metadata.get("collection_slug"))),
         audience=tuple(string_list(row.get("audience") or metadata.get("audience"))),
+        visibility=first_text(row.get("visibility"), metadata.get("visibility"), "internal_only"),
+        scope=first_text(row.get("scope"), metadata.get("scope"), metadata.get("retrieval_scope"), "generic"),
+        policy_type=first_text(row.get("policy_type"), metadata.get("policy_type"), chunk_type),
+        authority_level=first_text(row.get("authority_level"), metadata.get("authority_level"), "policy"),
         vertical=first_text(row.get("vertical"), metadata.get("vertical")),
         updated_at=first_text(row.get("updated_at"), metadata.get("updated_at")),
         effective_from=first_text(row.get("effective_from"), metadata.get("effective_from"), metadata.get("effective_date")),
@@ -853,6 +1022,10 @@ def rows_from_candidates(candidates: list[SearchCandidate], debug: bool = False)
         row["vector_score"] = candidate.vector_score
         row["lexical_score"] = candidate.lexical_score
         row["fusion_score"] = candidate.fusion_score
+        row["visibility"] = candidate.visibility
+        row["scope"] = candidate.scope
+        row["policy_type"] = candidate.policy_type
+        row["authority_level"] = candidate.authority_level
         rank_source = list(row.get("rank_source") or [])
         if candidate.lexical_score > 0 and not candidate.from_meilisearch and "lexical" not in rank_source:
             rank_source.append("lexical")
@@ -947,6 +1120,50 @@ def exact_phrases(query: str, extra_phrases: tuple[str, ...] = ()) -> list[str]:
     return list(dict.fromkeys(phrases))
 
 
+def structured_field_value_boost(query: str, candidate: SearchCandidate, stable_boosts: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    cfg = stable_boosts.get("structured_field_value_match") if isinstance(stable_boosts.get("structured_field_value_match"), dict) else {}
+    if not cfg:
+        return 0.0, {"matched": []}
+    query_text = normalize_text(query)
+    if not query_text:
+        return 0.0, {"matched": []}
+    matches = []
+    for value in structured_field_values(candidate.content):
+        value_text = normalize_text(value)
+        if not is_specific_field_value(value_text):
+            continue
+        value_tokens = meaningful_tokens(value_text)
+        if value_text in query_text or (value_tokens and all(token in query_text for token in value_tokens)):
+            matches.append(value_text)
+    if not matches:
+        return 0.0, {"matched": []}
+    normalized_quality = normalize_key(candidate.source_ref_quality)
+    quality_key = normalized_quality if normalized_quality in cfg else "default"
+    weight = float(cfg.get(quality_key, cfg.get("default", 0)) or 0)
+    return weight, {"matched": list(dict.fromkeys(matches)), "weight_key": quality_key}
+
+
+def structured_field_values(text: str) -> list[str]:
+    values = []
+    for part in re.split(r"[;\n|]+", str(text or "")):
+        if ":" not in part:
+            continue
+        _, value = part.split(":", 1)
+        cleaned = value.strip(" \t\r\n.,;")
+        if cleaned:
+            values.append(cleaned)
+    return values
+
+
+def is_specific_field_value(value: str) -> bool:
+    tokens = meaningful_tokens(value)
+    return len(tokens) >= 2 or any(any(char.isdigit() for char in token) and len(token) >= 3 for token in tokens)
+
+
+def meaningful_tokens(text: str) -> list[str]:
+    return [token for token in re.findall(r"[a-z0-9]+", normalize_text(text)) if len(token) >= 2]
+
+
 def chunk_type_priority(candidate: SearchCandidate, intent: str, config: dict[str, Any]) -> float:
     priorities = config.get("chunk_type_priorities") if isinstance(config.get("chunk_type_priorities"), dict) else {}
     intent_map = priorities.get(intent) if isinstance(priorities.get(intent), dict) else {}
@@ -1021,6 +1238,8 @@ def derive_source_ref_quality(source_refs: tuple[dict[str, Any], ...], metadata:
     for ref in source_refs:
         if ref.get("row_index") is not None and ref.get("table_index") is not None:
             return "table_row"
+    if any(isinstance(ref.get("bbox"), list) and len(ref.get("bbox") or []) >= 4 for ref in source_refs):
+        return "bbox"
     if metadata.get("block_id") or any(ref.get("block_id") for ref in source_refs):
         return "block_id"
     if any(ref.get("paragraph_index") is not None for ref in source_refs):
@@ -1069,6 +1288,29 @@ def normalize_key(value: Any) -> str:
 
 def string_tuple(value: Any) -> tuple[str, ...]:
     return tuple(string_list(value))
+
+
+def normalize_enum(value: Any, allowed: set[str], fallback: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else fallback
+
+
+def contains_any(text: str, phrases: tuple[str, ...]) -> bool:
+    return any(phrase in text for phrase in phrases)
+
+
+def preferred_chunk_types_for_intent(intent: str) -> tuple[str, ...]:
+    if intent == "macro":
+        return ("macro_script", "macro_table")
+    if intent in {"forbidden_wording", "compliance"}:
+        return ("compliance_rule", "compliance_rule_group", "warning")
+    if intent == "wording":
+        return ("wording_rule_group", "wording_rule", "macro_script")
+    if intent == "handling":
+        return ("decision_branch", "workflow_path", "handling_rule_group", "handling_rule", "workflow_step", "operational_instruction")
+    if intent == "document_title":
+        return ("full_sop", "source_evidence_section")
+    return ()
 
 
 def string_list(value: Any) -> list[str]:

@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from app.config import ADMIN_RESET_CONFIRMATION, DEFAULT_EMBEDDING_MODEL, Settings
+from app.config import ADMIN_RESET_CONFIRMATION, DEFAULT_DOCUMENT_PARSER_MODEL, DEFAULT_EMBEDDING_MODEL, Settings
 
 
 class EmbeddingConfigTest(unittest.TestCase):
@@ -37,6 +37,19 @@ class EmbeddingConfigTest(unittest.TestCase):
         self.assertEqual(settings.openrouter_api_key, "openrouter-key")
         self.assertEqual(settings.embedding_api_key, "openrouter-key")
 
+    def test_document_parser_defaults_use_gemini_flash_lite_preview_with_low_reasoning(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            settings = Settings()
+
+        self.assertEqual(DEFAULT_DOCUMENT_PARSER_MODEL, "google/gemini-3.1-flash-lite-preview")
+        self.assertEqual(settings.openrouter_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_extraction_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_refine_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_vision_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_metadata_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_chat_simple_model, DEFAULT_DOCUMENT_PARSER_MODEL)
+        self.assertEqual(settings.openrouter_reasoning_effort, "low")
+
     def test_magic_reset_is_disabled_by_default(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings()
@@ -49,6 +62,21 @@ class EmbeddingConfigTest(unittest.TestCase):
             settings = Settings()
 
         self.assertTrue(settings.admin_reset_enabled)
+
+    def test_vector_backend_config_supports_qdrant_dual_mode(self) -> None:
+        env = {
+            "VECTOR_BACKEND": "dual",
+            "QDRANT_URL": " http://qdrant:6333 ",
+            "QDRANT_COLLECTION": " sop_chunks_prod ",
+            "QDRANT_TIMEOUT_SECONDS": "2.5",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings()
+
+        self.assertEqual(settings.vector_backend, "dual")
+        self.assertEqual(settings.qdrant_url, "http://qdrant:6333")
+        self.assertEqual(settings.qdrant_collection, "sop_chunks_prod")
+        self.assertEqual(settings.qdrant_timeout_seconds, 2.5)
 
 
 if __name__ == "__main__":

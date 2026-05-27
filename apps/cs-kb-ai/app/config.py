@@ -5,6 +5,7 @@ import os
 
 EMBEDDING_DIMENSIONS = 1536
 DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
+DEFAULT_DOCUMENT_PARSER_MODEL = "google/gemini-3.1-flash-lite-preview"
 ADMIN_RESET_CONFIRMATION = "RESET CS KB DATA"
 
 
@@ -33,11 +34,11 @@ class Settings:
         self.max_upload_bytes = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
+        self.openrouter_model = os.getenv("OPENROUTER_MODEL", DEFAULT_DOCUMENT_PARSER_MODEL)
         self.openrouter_extraction_model = os.getenv("OPENROUTER_EXTRACTION_MODEL", self.openrouter_model).strip() or self.openrouter_model
         self.openrouter_refine_model = os.getenv(
             "OPENROUTER_REFINE_MODEL",
-            "google/gemini-3-flash-preview",
+            DEFAULT_DOCUMENT_PARSER_MODEL,
         ).strip()
         self.openrouter_vision_model = (
             os.getenv("OPENROUTER_VISION_MODEL", "").strip()
@@ -47,7 +48,7 @@ class Settings:
         self.openrouter_chat_model = os.getenv("OPENROUTER_CHAT_MODEL", self.openrouter_model)
         self.openrouter_chat_simple_model = os.getenv(
             "OPENROUTER_CHAT_SIMPLE_MODEL",
-            os.getenv("OPENROUTER_CHAT_MODEL_SIMPLE", "google/gemini-2.5-flash-lite"),
+            os.getenv("OPENROUTER_CHAT_MODEL_SIMPLE", DEFAULT_DOCUMENT_PARSER_MODEL),
         ).strip()
         self.openrouter_chat_policy_model = os.getenv(
             "OPENROUTER_CHAT_POLICY_MODEL",
@@ -71,13 +72,14 @@ class Settings:
         ).strip()
         self.openrouter_chat_gemini_3_flash_model = os.getenv(
             "OPENROUTER_CHAT_GEMINI_3_FLASH_MODEL",
-            "google/gemini-3-flash-preview",
+            DEFAULT_DOCUMENT_PARSER_MODEL,
         ).strip()
         self.openrouter_chat_claude_35_haiku_model = os.getenv(
             "OPENROUTER_CHAT_CLAUDE_35_HAIKU_MODEL",
             "anthropic/claude-3.5-haiku",
         ).strip()
         self.openrouter_timeout_seconds = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "30"))
+        self.openrouter_reasoning_effort = os.getenv("OPENROUTER_REASONING_EFFORT", "low").strip().lower()
         self.meili_host = os.getenv("MEILI_HOST", "").strip()
         self.meili_master_key = os.getenv("MEILI_MASTER_KEY", "dev_master_key").strip()
         self.ranking_config_path = os.getenv("SOP_RANKING_CONFIG_PATH", "").strip()
@@ -94,6 +96,12 @@ class Settings:
         self.public_app_url = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
         self.qdrant_url = os.getenv("QDRANT_URL", "").strip()
         self.qdrant_api_key = os.getenv("QDRANT_API_KEY", "").strip()
+        vector_backend = os.getenv("VECTOR_BACKEND", "dual").strip().lower()
+        if vector_backend not in {"pgvector", "qdrant", "dual"}:
+            vector_backend = "dual"
+        self.vector_backend = vector_backend
+        self.qdrant_collection = os.getenv("QDRANT_COLLECTION", "sop_chunks").strip() or "sop_chunks"
+        self.qdrant_timeout_seconds = float(os.getenv("QDRANT_TIMEOUT_SECONDS", "3"))
         self.embedding_dimensions = int(os.getenv("EMBEDDING_DIMENSIONS", str(EMBEDDING_DIMENSIONS)))
         self.embedding_base_url = first_non_empty(os.getenv("EMBEDDING_BASE_URL"), self.openrouter_base_url)
         self.embedding_api_key = first_non_empty(os.getenv("EMBEDDING_API_KEY"), self.openrouter_api_key)

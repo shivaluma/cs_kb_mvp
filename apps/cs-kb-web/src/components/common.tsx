@@ -165,20 +165,14 @@ export function FilterGrid({
     label: string;
     options: FilterOption[];
   }> = [
+    { key: "collection", label: "Collection", options: collections },
+    { key: "contentType", label: "Content type", options: filterOptions.contentType ?? defaultFilterOptions.contentType },
     { key: "taskType", label: "Task type", options: filterOptions.taskType ?? defaultFilterOptions.taskType },
-    { key: "vertical", label: "Vertical", options: filterOptions.vertical ?? defaultFilterOptions.vertical },
-    { key: "category", label: "Category", options: filterOptions.category ?? defaultFilterOptions.category },
   ];
   const advancedActiveCount = advancedFilters.filter(({ key }) => filters[key] !== "all").length;
   return (
     <div className="space-y-2">
       <div className="grid gap-2 md:grid-cols-3">
-        <FilterSelect
-          label="Collection"
-          onValueChange={(value) => onUpdateFilter("collection", value)}
-          options={collections}
-          value={filters.collection}
-        />
         <FilterSelect
           label="Audience"
           onValueChange={(value) => onUpdateFilter("audience", value)}
@@ -186,10 +180,16 @@ export function FilterGrid({
           value={filters.audience}
         />
         <FilterSelect
-          label="Content type"
-          onValueChange={(value) => onUpdateFilter("contentType", value)}
-          options={filterOptions.contentType ?? defaultFilterOptions.contentType}
-          value={filters.contentType}
+          label="Category"
+          onValueChange={(value) => onUpdateFilter("category", value)}
+          options={filterOptions.category ?? defaultFilterOptions.category}
+          value={filters.category}
+        />
+        <FilterSelect
+          label="Channel / vertical"
+          onValueChange={(value) => onUpdateFilter("vertical", value)}
+          options={filterOptions.vertical ?? defaultFilterOptions.vertical}
+          value={filters.vertical}
         />
       </div>
 
@@ -402,8 +402,8 @@ export function EmptyResults({ query }: { query: string }) {
       <Search className="mx-auto size-7 text-muted-foreground/60" strokeWidth={1.5} />
       <h3 className="mt-3 text-sm font-semibold">No reliable source matched</h3>
       <p className="mt-1 text-sm leading-6 text-muted-foreground">
-        Try a tag, CRM case reason, or add a governed synonym for{" "}
-        <span className="font-medium text-foreground">{query}</span>.
+        Try a SOP title, case reason, macro name, or shorter wording for{" "}
+        <span className="font-medium text-foreground">{query}</span>. If this should exist, send feedback for CS Ops review.
       </p>
     </div>
   );
@@ -411,11 +411,13 @@ export function EmptyResults({ query }: { query: string }) {
 
 export function EmptyPanel({
   compact = false,
+  actions,
   icon: Icon,
   text,
   title,
 }: {
   compact?: boolean;
+  actions?: React.ReactNode;
   icon: ElementType;
   text: string;
   title: string;
@@ -431,6 +433,7 @@ export function EmptyPanel({
         <Icon className="mx-auto size-8 text-muted-foreground/60" strokeWidth={1.5} />
         <h2 className="mt-3 text-sm font-semibold">{title}</h2>
         <p className="mt-1 text-sm leading-6 text-muted-foreground">{text}</p>
+        {actions ? <div className="mt-4 flex flex-wrap justify-center gap-2">{actions}</div> : null}
       </div>
     </div>
   );

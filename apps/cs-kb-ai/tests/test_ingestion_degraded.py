@@ -276,6 +276,46 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(full_sop["metadata"]["document_layer_role"], "overview")
         self.assertTrue(full_sop["metadata"]["full_source_in_source_evidence_sections"])
 
+    def test_source_evidence_chunks_preserve_layout_section_bbox_refs(self) -> None:
+        classification = ingestion.classify_document(
+            "purchase-order.pdf",
+            "application/pdf",
+            "Purchase order\nItem 030 quantity 4",
+        )
+        payload = {
+            "formatter": "ai_multimodal_layout_parser",
+            "model": "google/gemini-3.1-flash-lite-preview",
+            "markdown": '<div data-bbox="[100,50,180,950]" data-label="Table"><table><tr><th colspan="2">Qty</th></tr><tr><td>030</td><td>4</td></tr></table></div>',
+            "sections": [
+                {
+                    "title": "Table",
+                    "markdown": '<table><tr><th colspan="2">Qty</th></tr><tr><td>030</td><td>4</td></tr></table>',
+                    "layout_label": "Table",
+                    "bbox": [50.0, 100.0, 950.0, 180.0],
+                    "bbox_order": "xyxy",
+                    "confidence": 0.85,
+                }
+            ],
+            "coverage_report": {"raw_text_chars": 28, "formatted_chars": 128},
+        }
+
+        chunks, report = ingestion.build_source_evidence_section_chunks(
+            filename="purchase-order.pdf",
+            raw_text="Purchase order\nItem 030 quantity 4",
+            classification=classification,
+            source_view_payload=payload,
+            raw_context={},
+            existing_chunks=[],
+        )
+
+        self.assertEqual(report["source_text_kind"], "layout_sections")
+        self.assertEqual(report["formatter"], "ai_multimodal_layout_parser")
+        self.assertEqual(len(chunks), 1)
+        self.assertIn('colspan="2"', chunks[0].content)
+        self.assertEqual(chunks[0].metadata["source_refs"][0]["page"], 1)
+        self.assertEqual(chunks[0].metadata["source_refs"][0]["bbox"], [50.0, 100.0, 950.0, 180.0])
+        self.assertEqual(chunks[0].metadata["source_ref_quality"], "bbox")
+
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])
         data = workbook_bytes(
@@ -819,6 +859,100 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(semantic_candidate.metadata["source_ref_quality"], "bbox")
         self.assertTrue(semantic_candidate.metadata["topology_review_required"])
 
+    def test_workflow_degraded_fallback_drops_marker_only_annotations_and_normalizes_display_text(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        raw_annotation = "(c) Nếu\nKH/Partner/NH\ncần hỗ trợ thêm\nvấn đề khác Agent hỗ trợ theo quy trình"
+        semantic_refinement = {
+            "workflow_graph_candidate": {"graph_confidence": 0.62, "uncertain_edges": [], "topology_review_required": True},
+            "pages": [
+                {
+                    "page": 1,
+                    "semantic_nodes": [],
+                    "annotations": [
+                        {
+                            "id": "ann_c_marker",
+                            "semantic_node_type": "annotation",
+                            "title": "(c)",
+                            "content": "(c)",
+                            "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [10, 20, 30, 40]}],
+                        },
+                        {
+                            "id": "ann_c_full",
+                            "semantic_node_type": "annotation",
+                            "title": "(c) Nếu",
+                            "content": raw_annotation,
+                            "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [40, 50, 120, 160]}],
+                        },
+                    ],
+                }
+            ],
+        }
+
+        chunks = ingestion.semantic_workflow_candidate_chunks(
+            "workflow.pdf",
+            semantic_refinement,
+            start_index=0,
+            classification=classification,
+            ai_error="workflow_graph_requires_review",
+        )
+
+        annotations = [chunk for chunk in chunks if chunk.section == "candidate_annotation"]
+        self.assertEqual(len(annotations), 1)
+        self.assertNotEqual(annotations[0].content, "(c)")
+        self.assertNotIn("\n", annotations[0].content)
+        self.assertIn("(c) Nếu KH/Partner/NH cần hỗ trợ thêm", annotations[0].content)
+        self.assertEqual(annotations[0].metadata["source_text"], raw_annotation)
+        self.assertEqual(annotations[0].metadata["display_text"], annotations[0].content)
+
+    def test_workflow_degraded_fallback_normalizes_raw_ocr_line_breaks_for_all_candidate_units(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        raw_action = "16. Review the account\nstate with the\nescalation owner"
+        raw_decision = "17. Does the customer\nneed another\nsupport path?"
+        semantic_refinement = {
+            "workflow_graph_candidate": {"graph_confidence": 0.62, "uncertain_edges": [], "topology_review_required": True},
+            "pages": [
+                {
+                    "page": 1,
+                    "semantic_nodes": [
+                        {
+                            "id": "step_16",
+                            "semantic_node_type": "action",
+                            "title": "16. Review the account\nstate",
+                            "content": raw_action,
+                            "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [10, 20, 120, 160]}],
+                        },
+                        {
+                            "id": "step_17",
+                            "semantic_node_type": "decision",
+                            "title": "17. Does the customer\nneed another support path?",
+                            "content": raw_decision,
+                            "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [140, 20, 260, 160]}],
+                        },
+                    ],
+                    "annotations": [],
+                }
+            ],
+        }
+
+        chunks = ingestion.semantic_workflow_candidate_chunks(
+            "workflow.pdf",
+            semantic_refinement,
+            start_index=0,
+            classification=classification,
+            ai_error="workflow_graph_requires_review",
+        )
+
+        action = next(chunk for chunk in chunks if chunk.section == "candidate_action")
+        decision = next(chunk for chunk in chunks if chunk.section == "candidate_decision")
+        self.assertNotIn("\n", action.content)
+        self.assertNotIn("\n", decision.content)
+        self.assertEqual(action.content, "16. Review the account state with the escalation owner")
+        self.assertEqual(decision.content, "17. Does the customer need another support path?")
+        self.assertEqual(action.metadata["source_text"], raw_action)
+        self.assertEqual(decision.metadata["source_text"], raw_decision)
+        self.assertEqual(action.metadata["display_text"], action.content)
+        self.assertEqual(decision.metadata["display_text"], decision.content)
+
     def test_workflow_semantic_refine_does_not_treat_numbered_oval_as_start(self) -> None:
         self.assertEqual(
             ingestion.classify_semantic_node_type("10. Tạo case lưu trữ trên hệ thống", "start"),
@@ -1165,6 +1299,61 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(chunks, [])
         self.assertIn("full_sop_missing_from_model_synthesized_for_review", warnings)
         self.assertIn("workflow_graph_missing_from_model_synthesized_for_review", ai_error)
+
+    def test_semantic_workflow_fallback_with_only_uncertain_edges_stays_degraded(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        semantic_refinement = {
+            "workflow_graph_candidate": {
+                "workflow_id": "wf_inbound_call",
+                "title": "Inbound call workflow",
+                "nodes": [
+                    {"id": "sem_8", "type": "decision", "semantic_node_type": "decision", "title": "8. KH/Partner/NH đồng ý cung cấp?", "content": "8. KH/Partner/NH đồng ý cung cấp?", "step_code": "8", "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [1, 2, 3, 4]}]},
+                    {"id": "sem_8_1", "type": "action", "semantic_node_type": "action", "title": "8.1 Note email", "content": "8.1. Note email KH/Partner/NH cung cấp", "step_code": "8.1", "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [5, 6, 7, 8]}]},
+                ],
+                "edges": [],
+                "uncertain_edges": [
+                    {"from_node": "sem_8", "to_node": "sem_8_1", "condition": "yes", "confidence": 0.42, "reason": "geometric_guess"}
+                ],
+                "annotations": [],
+                "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [0, 0, 100, 100]}],
+                "graph_confidence": 0.56,
+                "validation_errors": ["decision_missing_branches_or_uncertain_edges:sem_8"],
+                "topology_review_required": True,
+            },
+            "pages": [
+                {
+                    "page": 1,
+                    "semantic_nodes": [
+                        {"id": "sem_8", "semantic_node_type": "decision", "title": "8. KH/Partner/NH đồng ý cung cấp?", "content": "8. KH/Partner/NH đồng ý cung cấp?", "source_refs": [{"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [1, 2, 3, 4]}]},
+                    ],
+                    "annotations": [],
+                }
+            ],
+        }
+        ingestion.extract_workflow_units_v3 = lambda _filename, _raw_text, page_images=None, visual_context=None: (
+            [],
+            ["workflow_v3_fidelity_failed:workflow_v3_missing_visible_steps:8.1"],
+            {"workflow_fidelity_report": {"blockers": ["workflow_v3_missing_visible_steps:8.1"]}},
+        )
+        ingestion.extract_workflow_units_v2 = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_workflow_v2_disabled"])
+        ingestion.extract_workflow_units = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_workflow_legacy_disabled"])
+        ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], [])
+
+        chunks, warnings, ai_error = ingestion.try_ai_structuring(
+            filename="workflow.pdf",
+            content_type="application/pdf",
+            data=b"%PDF-1.4",
+            raw_text="8. KH/Partner/NH đồng ý cung cấp?\n8.1. Note email KH/Partner/NH cung cấp",
+            classification=classification,
+            visual_layout={"summary": {"shape_candidate_count": 2}},
+            raw_context={"workflow_semantic_refinement": semantic_refinement},
+        )
+
+        self.assertNotEqual(chunks, [])
+        self.assertTrue(all(chunk.metadata.get("extraction_status") == "degraded" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata.get("publish_blocked") for chunk in chunks))
+        self.assertIn("semantic_workflow_structuring_used_after_ai_failure", warnings)
+        self.assertIn("workflow_graph_requires_review", ai_error)
 
     def test_workflow_ai_without_atomic_units_is_not_structured_success(self) -> None:
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()

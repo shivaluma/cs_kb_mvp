@@ -36,10 +36,16 @@
       "macro_text": 16,
       "forbidden_phrases": 20,
       "content": 12,
-      "max_total": 30
+      "max_total": 36
+    },
+    "structured_field_value_match": {
+      "table_row": 180,
+      "structured": 180,
+      "default": 80
     },
     "source_ref_quality": {
       "table_row": 8,
+      "bbox": 8,
       "block_id": 6,
       "paragraph_only": 3,
       "none": -20
@@ -53,6 +59,27 @@
     "current_version": {
       "true": 8,
       "false": -25
+    },
+    "authority_level": {
+      "source_of_truth": 14,
+      "policy": 10,
+      "procedure": 6,
+      "reference": 2,
+      "example": -8,
+      "deprecated": -30
+    },
+    "policy_type": {
+      "compliance_rule": 7,
+      "communication_rule": 6,
+      "handling_process": 4,
+      "macro": 3,
+      "reference": 0,
+      "example": -6
+    },
+    "visibility_alignment": {
+      "customer_facing": 6,
+      "internal_only": -6,
+      "any": 0
     },
     "risk_for_compliance": {
       "critical": 10,
@@ -96,9 +123,14 @@
       "full_sop": -8
     },
     "handling": {
+      "decision_branch": 22,
+      "workflow_path": 20,
       "handling_rule_group": 18,
       "handling_rule": 14,
+      "decision_node": 12,
+      "workflow_step": 10,
       "macro_script": 5,
+      "workflow_phase": 4,
       "full_sop": -8
     },
     "document_title": {
@@ -107,6 +139,9 @@
       "macro_script": -8
     },
     "generic": {
+      "decision_branch": 10,
+      "workflow_path": 8,
+      "workflow_step": 5,
       "source_evidence_section": 4
     }
   },
@@ -124,7 +159,7 @@
       "seed_terms": ["chế tài", "khóa tài khoản", "khóa", "vi phạm", "quy trình nội bộ", "tiết lộ", "SI", "bộ phận chuyên môn"]
     },
     "handling": {
-      "seed_terms": ["khi nào", "trường hợp", "nếu", "có được", "xử lý sao"]
+      "seed_terms": ["khi nào", "trường hợp", "nếu", "có được", "xử lý sao", "không cung cấp email", "teamlead", "layer 2", "mời đánh giá", "đúng kênh", "cuộc gọi"]
     },
     "document_title": {
       "seed_terms": ["sop", "quy định", "tài liệu"]
@@ -135,7 +170,11 @@
     "enabled_for_portal": false,
     "cache_ttl_seconds": 86400,
     "output_schema": {
+      "actor": "string",
+      "recipient": "string",
       "intent": "string",
+      "required_scope": "string",
+      "required_visibility": "string",
       "confidence": "number",
       "rewritten_query": "string",
       "key_concepts": ["string"],

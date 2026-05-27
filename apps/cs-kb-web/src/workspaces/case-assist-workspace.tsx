@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { isDebugUiEnabled } from "@/lib/ui-mode";
 import type {
   ActionTemplateSummary,
   FilterOption,
@@ -30,6 +31,12 @@ import type {
   RetrievalResult,
   ToolLinkSummary,
 } from "@/types";
+
+const CASE_ASSIST_EXAMPLES = [
+  "khách hỏi vì sao tài xế bị khóa",
+  "khách đã nói vấn đề rồi có hỏi lại không",
+  "mẫu email mở đầu không rõ giới tính",
+];
 
 export type CaseAssistCandidate = {
   audience: string[];
@@ -205,7 +212,20 @@ export function CaseAssistWorkspace({
               <EmptyPanel
                 compact
                 icon={Route}
-                text="Type the issue in plain language. Case Assist composes quick answer, checklist, tools, and related SOPs from approved content."
+                actions={CASE_ASSIST_EXAMPLES.map((example) => (
+                  <Button
+                    key={example}
+                    onClick={() => {
+                      setQuery(example);
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {example}
+                  </Button>
+                ))}
+                text="Start from the customer issue or policy signal. Case Assist will turn approved SOP evidence into answer, checklist, tools, and related sources."
                 title="Start with the issue"
               />
             ) : loading ? (
@@ -267,8 +287,24 @@ export function CaseAssistWorkspace({
             <EmptyPanel
               compact
               icon={Checklist}
-              text="Select a match to see the action card."
-              title="No action card selected"
+              actions={
+                !normalizedQuery ? (
+                  <Button
+                    onClick={() => setQuery(CASE_ASSIST_EXAMPLES[0])}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Try example
+                  </Button>
+                ) : undefined
+              }
+              text={
+                normalizedQuery
+                  ? "Select an approved match to see the quick answer, checklist, linked tools, and source trail."
+                  : "Search an issue first. The action card stays empty until approved SOP evidence is selected."
+              }
+              title={normalizedQuery ? "No action card selected" : "Action card"}
             />
           )}
         </section>
@@ -298,9 +334,9 @@ function CaseAssistResult({
     >
       <div className="flex items-start justify-between gap-3">
         <h3 className="min-w-0 text-sm font-semibold leading-snug">{candidate.title}</h3>
-        <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
-          {Math.round(candidate.score * 100) || 1}
-        </span>
+        <Badge className="shrink-0" variant="outline">
+          {isDebugUiEnabled() ? `${Math.round(candidate.score * 100) || 1}` : roleLabel(candidate.sourceRole)}
+        </Badge>
       </div>
       <p className="mt-1 truncate text-xs text-muted-foreground">
         {candidate.parentTitle || candidate.collection || roleLabel(candidate.sourceRole)}

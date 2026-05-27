@@ -150,7 +150,7 @@ def chat_model_routes() -> dict[str, Any]:
         "routes": [
             {
                 "route": "simple",
-                "label": "Gemini Flash Lite",
+                "label": "Gemini 3.1 Flash Lite",
                 "model": settings.openrouter_chat_simple_model,
                 "description": "Simple factual SOP Q&A.",
             },
@@ -179,10 +179,10 @@ def chat_model_routes() -> dict[str, Any]:
                 "description": "Manual model override for balanced speed and quality on grounded SOP chat.",
             },
             {
-                "route": "google/gemini-3-flash-preview",
-                "label": "Gemini 3 Flash Preview",
+                "route": "google/gemini-3.1-flash-lite-preview",
+                "label": "Gemini 3.1 Flash Lite Preview",
                 "model": settings.openrouter_chat_gemini_3_flash_model,
-                "description": "Manual model override for newer Gemini reasoning on multi-source SOP questions.",
+                "description": "Manual model override for low-cost multimodal Gemini parsing and grounded SOP questions.",
             },
             {
                 "route": "anthropic/claude-3.5-haiku",
@@ -458,6 +458,8 @@ async def upload_document(
         review_status="approved" if status == "published" else enrichment["review_status"],
         extraction_confidence=enrichment["extraction_confidence"],
     )
+    if status == "published":
+        version.update(repository.sync_qdrant_version(version["version_id"]))
     return DocumentVersionResponse(**version, warnings=warnings)
 
 
@@ -958,7 +960,9 @@ def get_version_source_page(version_id: str, page_number: int) -> Response:
 def publish_version(version_id: str, payload: PublishVersionRequest | None = None) -> dict[str, Any]:
     try:
         data = payload or PublishVersionRequest()
-        return repository.publish_version(version_id, data.actor, data.force)
+        result = repository.publish_version(version_id, data.actor, data.force)
+        result.update(repository.sync_qdrant_version(version_id))
+        return result
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -969,7 +973,9 @@ def publish_version(version_id: str, payload: PublishVersionRequest | None = Non
 def retry_version_indexing(version_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         actor = str((payload or {}).get("actor") or "api-gateway")
-        return repository.prepare_version_indexing_retry(version_id, actor)
+        result = repository.prepare_version_indexing_retry(version_id, actor)
+        result.update(repository.sync_qdrant_version(version_id))
+        return result
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

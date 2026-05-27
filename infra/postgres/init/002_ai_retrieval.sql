@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS ai_retrieval_events (
   filters jsonb NOT NULL DEFAULT '{}'::jsonb,
   mode text NOT NULL,
   result_count integer NOT NULL,
+  trace jsonb NOT NULL DEFAULT '{}'::jsonb,
   latency_ms integer NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
