@@ -176,7 +176,7 @@ export const navItems = [
   {
     id: "documentQueue",
     path: workspacePaths.documentQueue,
-    label: "Source queue",
+    label: "Document list",
     icon: LayoutDashboard,
     description: "Select active or archived sources for review.",
     section: "ops",

@@ -16,7 +16,7 @@ export const sidebarGroupSpecs = [
   },
   {
     label: "Knowledge",
-    itemIds: ["documents", "documentUpload", "collections", "tools"],
+    itemIds: ["documents", "documentUpload", "documentQueue", "collections", "tools"],
   },
   {
     label: "Review",
