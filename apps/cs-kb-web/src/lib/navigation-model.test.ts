@@ -27,7 +27,7 @@ test("sidebar navigation keeps daily knowledge work visible and hides setup/debu
   assert.deepEqual(groups.map((group) => group.label), ["Daily workspace", "Knowledge", "Review"]);
   assert.ok(ids.includes("lookup"));
   assert.ok(ids.includes("documents"));
-  assert.ok(!ids.includes("documentUpload"));
+  assert.ok(ids.includes("documentUpload"));
   assert.ok(!ids.includes("documentQueue"));
   assert.ok(!ids.includes("operations"));
   assert.ok(!ids.includes("synonyms"));

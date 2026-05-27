@@ -168,7 +168,7 @@ export const navItems = [
   {
     id: "documentUpload",
     path: workspacePaths.documentUpload,
-    label: "Upload",
+    label: "Upload document",
     icon: FileUpload,
     description: "Add a source file or raw text draft for extraction.",
     section: "ops",
