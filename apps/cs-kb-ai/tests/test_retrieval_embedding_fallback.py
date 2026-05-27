@@ -35,6 +35,29 @@ def retrieval_row(
     }
 
 
+def compiled_page_row() -> dict[str, object]:
+    return {
+        "chunk_id": "page-1",
+        "document_id": "doc-1",
+        "version_id": "version-1",
+        "title": "Refund SOP",
+        "source_filename": "refund.md",
+        "version_number": 1,
+        "chunk_index": -1,
+        "section": "document_overview",
+        "heading": "Refund SOP",
+        "content": "Full refund handling instructions compiled from approved units.",
+        "metadata": {
+            "unit_type": "compiled_document_overview",
+            "chunk_type": "compiled_document_overview",
+            "retrieval_scope": "document",
+            "review_status": "approved",
+            "extraction_status": "structured",
+        },
+        "score": 0.72,
+    }
+
+
 class RetrievalEmbeddingFallbackTest(unittest.TestCase):
     def test_hybrid_degrades_to_lexical_when_embedding_is_unavailable(self) -> None:
         with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \
@@ -142,6 +165,24 @@ class RetrievalEmbeddingFallbackTest(unittest.TestCase):
         self.assertEqual(trace["ranking_debug"]["final_selected_context_ids"], ["chunk-1"])
         self.assertEqual(trace["selected_context"][0]["chunk_id"], "chunk-1")
         self.assertEqual(response.ranking_debug["final_selected_context_ids"], ["chunk-1"])
+
+    def test_vector_retrieval_can_include_compiled_page_context(self) -> None:
+        with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \
+            patch("app.retrieval.repository.vector_search", return_value=[]), \
+            patch("app.retrieval.repository.compiled_page_vector_search", return_value=[compiled_page_row()]) as compiled_search, \
+            patch("app.retrieval.repository.approved_relation_target_rows", return_value=[]), \
+            patch("app.retrieval.repository.display_context_rows_for_results", return_value={}), \
+            patch("app.retrieval.repository.log_retrieval", return_value=12), \
+            patch("app.retrieval.embed_text", return_value=[0.1, 0.2]):
+            response = retrieve(
+                RetrievalRequest(query="refund overview", mode="vector", include_compiled_pages=True, limit=3, debug=True)
+            )
+
+        compiled_search.assert_called_once()
+        self.assertEqual(response.results[0].chunk_id, "page-1")
+        self.assertEqual(response.results[0].metadata["unit_type"], "compiled_document_overview")
+        self.assertEqual(response.results[0].rank_source, ["vector"])
+        self.assertEqual(response.ranking_debug["compiled_page_candidate_count"], 1)
 
     def test_ai_chat_applies_confident_query_understanding_filters_to_candidate_generation(self) -> None:
         with patch("app.retrieval.repository.active_synonym_groups", return_value=[]), \

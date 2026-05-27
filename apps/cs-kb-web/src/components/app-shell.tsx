@@ -31,7 +31,7 @@ import {
 	SidebarTrigger,
 	useSidebar,
 } from "@/components/ui/sidebar";
-import { documentWorkflowItems, navGroups, navItems, type Workspace } from "@/constants";
+import { commandNavGroups, navItems, sidebarNavGroups, type Workspace } from "@/constants";
 import { cn } from "@/lib/utils";
 
 const themeStorageKey = "cs-kb-theme";
@@ -95,18 +95,11 @@ function MainSidebar({ workspace, reviewCount }: { workspace: Workspace; reviewC
 			</SidebarHeader>
 
 			<SidebarContent className="px-1">
-				{navGroups.map((group) => (
+				{sidebarNavGroups.map((group) => (
 					<SidebarGroup key={group.label}>
 						<SidebarGroupLabel>{group.label}</SidebarGroupLabel>
 						<SidebarGroupContent>
 							<SidebarMenu>
-								{group.label === "Review and governance" ? (
-									<DocumentWorkflowNav
-										onNavigate={closeMobile}
-										reviewCount={reviewCount}
-										workspace={workspace}
-									/>
-								) : null}
 								{group.items.map((item) => {
 									const showBadge = item.id === "documents" && reviewCount > 0;
 									return (
@@ -136,87 +129,6 @@ function MainSidebar({ workspace, reviewCount }: { workspace: Workspace; reviewC
 			</SidebarContent>
 			<SidebarRail />
 		</Sidebar>
-	);
-}
-
-function DocumentWorkflowNav({
-	onNavigate,
-	reviewCount,
-	workspace,
-}: {
-	onNavigate: () => void;
-	reviewCount: number;
-	workspace: Workspace;
-}) {
-	const workflowActive = documentWorkflowItems.some((item) => item.id === workspace);
-	const WorkflowIcon = documentWorkflowItems[0].icon;
-	const compactTarget = documentWorkflowItems.find((item) => item.id === workspace)?.path ?? documentWorkflowItems[1].path;
-
-	return (
-		<SidebarMenuItem>
-			<div
-				aria-label="Document workflow"
-				className={cn(
-					"rounded-xl border border-sidebar-border bg-sidebar/70 p-1.5 group-data-[collapsible=icon]:hidden",
-					workflowActive && "border-sidebar-primary/30 bg-sidebar-accent/60",
-				)}
-				role="group"
-			>
-				<div className="flex items-center justify-between gap-2 px-2 pb-1 pt-1">
-					<span className="truncate text-[11px] font-medium text-sidebar-foreground/70">
-						Document workflow
-					</span>
-					<span className="text-[10px] tabular-nums text-sidebar-foreground/50">
-						1-3
-					</span>
-				</div>
-				<ol className="space-y-0.5">
-					{documentWorkflowItems.map((item, index) => {
-						const active = workspace === item.id;
-						const label = item.id === "documents" ? "Review & publish" : item.label;
-						const showBadge = item.id === "documents" && reviewCount > 0;
-						return (
-							<li key={item.id}>
-								<Link
-									className={cn(
-										"flex h-8 items-center gap-2 rounded-lg px-2 text-sm text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
-										active && "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
-									)}
-									onClick={onNavigate}
-									to={item.path}
-								>
-									<span
-										className={cn(
-											"flex size-5 shrink-0 items-center justify-center rounded-full border border-sidebar-border text-[10px] tabular-nums text-sidebar-foreground/60",
-											active && "border-sidebar-primary bg-sidebar-primary text-sidebar-primary-foreground",
-										)}
-									>
-										{index + 1}
-									</span>
-									<span className="min-w-0 flex-1 truncate">{label}</span>
-									{showBadge ? (
-										<span className="rounded-full bg-sidebar-primary px-1.5 py-0.5 text-[10px] font-medium leading-none text-sidebar-primary-foreground">
-											{reviewCount > 99 ? "99+" : reviewCount}
-										</span>
-									) : null}
-								</Link>
-							</li>
-						);
-					})}
-				</ol>
-			</div>
-			<SidebarMenuButton
-				asChild
-				className="hidden group-data-[collapsible=icon]:flex"
-				isActive={workflowActive}
-				tooltip="Document workflow"
-			>
-				<Link onClick={onNavigate} to={compactTarget}>
-					<WorkflowIcon className="size-4" />
-					<span>Document workflow</span>
-				</Link>
-			</SidebarMenuButton>
-		</SidebarMenuItem>
 	);
 }
 
@@ -519,43 +431,12 @@ export function AppShell({
 							<section>
 								<div className="mb-2 text-xs font-medium text-muted-foreground">Go to</div>
 								<div className="space-y-3">
-									{navGroups.map((group) => (
+									{commandNavGroups.map((group) => (
 										<div key={group.label}>
 											<div className="px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
 												{group.label}
 											</div>
 											<div className="space-y-1">
-												{group.label === "Review and governance" ? (
-													<div className="mb-1 rounded-lg border bg-muted/15 p-1.5">
-														<div className="flex items-center justify-between gap-2 px-2 pb-1 text-[11px] font-medium text-muted-foreground">
-															<span>Document workflow</span>
-															<span className="tabular-nums">1-3</span>
-														</div>
-														<div className="space-y-0.5">
-															{documentWorkflowItems.map((item, index) => {
-																const label = item.id === "documents" ? "Review & publish" : item.label;
-																const showBadge = item.id === "documents" && reviewCount > 0;
-																return (
-																	<button
-																		className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-																		key={item.id}
-																		onClick={() => {
-																			onWorkspaceChange(item.id);
-																			setCommandOpen(false);
-																		}}
-																		type="button"
-																	>
-																		<span className="flex size-5 shrink-0 items-center justify-center rounded-full border text-[10px] tabular-nums text-muted-foreground">
-																			{index + 1}
-																		</span>
-																		<span className="min-w-0 flex-1 truncate">{label}</span>
-																		{showBadge ? <Badge variant="secondary">{reviewCount > 99 ? "99+" : reviewCount}</Badge> : null}
-																	</button>
-																);
-															})}
-														</div>
-													</div>
-												) : null}
 												{group.items.map((item) => (
 													<button
 														className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40"

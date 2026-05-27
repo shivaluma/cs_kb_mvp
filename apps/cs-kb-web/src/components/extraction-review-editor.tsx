@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetaLine } from "@/components/common";
 import { nextReviewDueIso, withReviewFrequencyDates } from "@/lib/date";
+import { reviewDetailDisclosureOpen, reviewItemLabel, reviewUnitFacts } from "@/lib/extraction-review-editor-model";
 import { cn } from "@/lib/utils";
 import type { ExtractionUnit, ExtractionUnitUpdate } from "@/types";
 
@@ -116,6 +117,8 @@ export function ExtractionReviewEditor({
   const workflowGraphError = workflowGraphJsonError(draft.workflowGraphJson);
   const valid = normalizedSearchLabel.length > 0 && draft.content.trim().length > 0 && Number.isFinite(Number(draft.confidence)) && !workflowGraphError;
   const confidence = Math.max(0, Math.min(Number(draft.confidence) || 0, 1));
+  const detailPanelOpen = reviewDetailDisclosureOpen({ changed, workflowGraphError });
+  const summaryFacts = reviewUnitFacts(unit);
   const busy = saving || deleting;
 
   function buildUpdate(reviewStatus = draft.reviewStatus): ExtractionUnitUpdate {
@@ -177,7 +180,7 @@ export function ExtractionReviewEditor({
       className={cn("rounded-xl border bg-card p-4", changed && "border-primary/60 bg-primary/5", disabled && "bg-muted/20")}
       data-testid={`extraction-unit-${unit.unit_id}`}
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={unit.review_status === "approved" ? "secondary" : unit.review_status === "reviewed" ? "outline" : "destructive"}>
@@ -185,110 +188,28 @@ export function ExtractionReviewEditor({
             </Badge>
             {disabled ? <Badge variant="outline">read-only published version</Badge> : null}
           </div>
+          <h3 className="mt-2 text-sm font-semibold leading-5 text-foreground">
+            {draft.title.trim() || normalizedSearchLabel || "Untitled unit"}
+          </h3>
           <MetaLine
             className="mt-1"
-            items={[
-              unit.unit_type,
-              `${Math.round(unit.confidence * 100)}% confidence`,
-              unit.source_sheet,
-              unit.source_row ? `row ${unit.source_row}` : null,
-              unit.source_page ? `page ${unit.source_page}` : null,
-            ]}
+            items={summaryFacts}
           />
         </div>
-        <span className="font-mono text-[10px] text-muted-foreground">unit {unit.unit_index}</span>
+        <span className="rounded-full border bg-muted/20 px-2 py-1 text-[11px] font-medium text-muted-foreground">
+          {reviewItemLabel(unit)}
+        </span>
       </div>
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_11rem_9rem]">
-        <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Search label
-          <Input
-            disabled={disabled}
-            onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-            placeholder="Short label for cards and search"
-            value={draft.title}
-          />
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] leading-4 text-muted-foreground">
-            <span>
-              {searchLabelWillNormalize
-                ? `Will save as: ${normalizedSearchLabel}`
-                : "Used for source cards and retrieval weighting."}
-            </span>
-            {searchLabelWillNormalize && !disabled ? (
-              <Button
-                className="h-6 px-2 text-[11px]"
-                onClick={() => setDraft((current) => ({ ...current, title: normalizedSearchLabel }))}
-                type="button"
-                variant="ghost"
-              >
-                Use generated label
-              </Button>
-            ) : null}
-          </div>
-        </div>
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Unit type
-          <Select
-            disabled={disabled}
-            onValueChange={(unitType) => setDraft((current) => ({ ...current, unitType }))}
-            value={draft.unitType}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {UNIT_TYPES.map((type) => (
-                <SelectItem key={type} value={type}>{type}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </label>
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Confidence
-          <Input
-            disabled={disabled}
-            max="1"
-            min="0"
-            onChange={(event) => setDraft((current) => ({ ...current, confidence: event.target.value }))}
-            step="0.01"
-            type="number"
-            value={draft.confidence}
-          />
-        </label>
+      <div className="mt-3 rounded-lg border bg-muted/15 px-3 py-3">
+        <p className="max-h-40 overflow-auto whitespace-pre-wrap text-sm leading-6 text-foreground/90">
+          {draft.content || "No extracted content yet."}
+        </p>
       </div>
-
-      <label className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
-        Unit content
-        <textarea
-          className="min-h-28 rounded-xl border border-input bg-background px-3 py-2 text-sm leading-6 shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={disabled}
-          onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
-          value={draft.content}
-        />
-      </label>
-
-      {unit.metadata.workflow_graph ? (
-        <label className="mt-3 grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Workflow graph JSON
-          <textarea
-            className={cn(
-              "min-h-44 rounded-xl border border-input bg-background px-3 py-2 font-mono text-xs leading-5 shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50",
-              workflowGraphError && "border-destructive focus-visible:border-destructive focus-visible:ring-destructive/20",
-            )}
-            disabled={disabled}
-            onChange={(event) => setDraft((current) => ({ ...current, workflowGraphJson: event.target.value }))}
-            spellCheck={false}
-            value={draft.workflowGraphJson}
-          />
-          <span className={cn("text-[11px] leading-4 text-muted-foreground", workflowGraphError && "text-destructive")}>
-            {workflowGraphError || "Edit nodes, edges, annotations, and validation errors. Invalid JSON cannot be saved."}
-          </span>
-        </label>
-      ) : null}
 
       {unit.metadata.source_ref_quality === "page_only" ? (
         <div className="mt-3 rounded-xl border border-amber-300/70 bg-amber-50 px-3 py-2 text-sm text-amber-950">
-          <p className="font-medium">Page-only source reference</p>
+          <p className="font-medium">Source verification required</p>
           <p className="mt-1 text-xs leading-5">
             This PDF/diagram unit has page-level trace only, no bbox. Publish requires CS Ops to verify this unit against the source page.
           </p>
@@ -305,99 +226,196 @@ export function ExtractionReviewEditor({
         </div>
       ) : null}
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Review status
-          <Select
-            disabled={disabled}
-            onValueChange={(reviewStatus) => setDraft((current) => ({ ...current, reviewStatus: reviewStatus as ExtractionUnit["review_status"] }))}
-            value={draft.reviewStatus}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="needs_review">needs_review</SelectItem>
-              <SelectItem value="reviewed">reviewed</SelectItem>
-              <SelectItem value="approved">approved</SelectItem>
-              <SelectItem value="rejected">rejected</SelectItem>
-            </SelectContent>
-          </Select>
-        </label>
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Risk level
-          <Select
-            disabled={disabled}
-            onValueChange={(riskLevel) => setDraft((current) => ({ ...current, riskLevel: riskLevel === "inherit" ? "" : riskLevel }))}
-            value={draft.riskLevel || "inherit"}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="inherit">{inheritedLabel(documentGovernance?.riskLevel)}</SelectItem>
-              <SelectItem value="low">low</SelectItem>
-              <SelectItem value="medium">medium</SelectItem>
-              <SelectItem value="high">high</SelectItem>
-              <SelectItem value="critical">critical</SelectItem>
-            </SelectContent>
-          </Select>
-        </label>
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Effective from
-          <Input
-            disabled={disabled}
-            onChange={(event) => setDraft((current) => ({ ...current, effectiveFrom: event.target.value }))}
-            placeholder="2025-04-22"
-            value={draft.effectiveFrom}
-          />
-        </label>
-      </div>
+      <details className="mt-3 rounded-lg border bg-muted/10 px-3 py-2" open={detailPanelOpen || undefined}>
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+          <span>Edit label, content, and governance</span>
+          <Badge variant={workflowGraphError ? "destructive" : changed ? "secondary" : "outline"}>
+            {workflowGraphError ? "invalid JSON" : changed ? "unsaved" : "optional"}
+          </Badge>
+        </summary>
+        <div className="mt-3 space-y-3 border-t pt-3">
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_11rem_9rem]">
+            <div className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Search label
+              <Input
+                disabled={disabled}
+                onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
+                placeholder="Short label for cards and search"
+                value={draft.title}
+              />
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] leading-4 text-muted-foreground">
+                <span>
+                  {searchLabelWillNormalize
+                    ? `Will save as: ${normalizedSearchLabel}`
+                    : "Used for source cards and retrieval weighting."}
+                </span>
+                {searchLabelWillNormalize && !disabled ? (
+                  <Button
+                    className="h-6 px-2 text-[11px]"
+                    onClick={() => setDraft((current) => ({ ...current, title: normalizedSearchLabel }))}
+                    type="button"
+                    variant="ghost"
+                  >
+                    Use generated label
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Unit type
+              <Select
+                disabled={disabled}
+                onValueChange={(unitType) => setDraft((current) => ({ ...current, unitType }))}
+                value={draft.unitType}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {UNIT_TYPES.map((type) => (
+                    <SelectItem key={type} value={type}>{type}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Confidence
+              <Input
+                disabled={disabled}
+                max="1"
+                min="0"
+                onChange={(event) => setDraft((current) => ({ ...current, confidence: event.target.value }))}
+                step="0.01"
+                type="number"
+                value={draft.confidence}
+              />
+            </label>
+          </div>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Review frequency
-          <Select
-            disabled={disabled}
-            onValueChange={(reviewFrequency) => setDraft((current) => withReviewFrequencyDates(current, reviewFrequency === "inherit" ? "" : reviewFrequency))}
-            value={draft.reviewFrequency || "inherit"}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="inherit">{inheritedLabel(documentGovernance?.reviewFrequency)}</SelectItem>
-              <SelectItem value="quarterly">quarterly</SelectItem>
-              <SelectItem value="semiannual">semiannual</SelectItem>
-              <SelectItem value="annual">annual</SelectItem>
-            </SelectContent>
-          </Select>
-        </label>
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Last reviewed
-          <DatePicker
-            disabled={disabled}
-            label="Last reviewed"
-            onChange={(lastReviewedAt) => setDraft((current) => ({
-              ...current,
-              lastReviewedAt,
-              nextReviewDue: current.reviewFrequency ? nextReviewDueIso(lastReviewedAt, current.reviewFrequency) : current.nextReviewDue,
-            }))}
-            placeholder={documentGovernance?.lastReviewedAt ? `inherits ${documentGovernance.lastReviewedAt}` : "YYYY-MM-DD"}
-            value={draft.lastReviewedAt}
-          />
-        </label>
-        <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-          Next review due
-          <DatePicker
-            disabled={disabled}
-            label="Next review due"
-            onChange={(nextReviewDue) => setDraft((current) => ({ ...current, nextReviewDue }))}
-            placeholder={documentGovernance?.nextReviewDue ? `inherits ${documentGovernance.nextReviewDue}` : "YYYY-MM-DD"}
-            value={draft.nextReviewDue}
-          />
-        </label>
-      </div>
+          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+            Unit content
+            <textarea
+              className="min-h-28 rounded-xl border border-input bg-background px-3 py-2 text-sm leading-6 shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={disabled}
+              onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
+              value={draft.content}
+            />
+          </label>
+
+          {unit.metadata.workflow_graph ? (
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Workflow graph JSON
+              <textarea
+                className={cn(
+                  "min-h-44 rounded-xl border border-input bg-background px-3 py-2 font-mono text-xs leading-5 shadow-xs outline-none transition-[border-color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50",
+                  workflowGraphError && "border-destructive focus-visible:border-destructive focus-visible:ring-destructive/20",
+                )}
+                disabled={disabled}
+                onChange={(event) => setDraft((current) => ({ ...current, workflowGraphJson: event.target.value }))}
+                spellCheck={false}
+                value={draft.workflowGraphJson}
+              />
+              <span className={cn("text-[11px] leading-4 text-muted-foreground", workflowGraphError && "text-destructive")}>
+                {workflowGraphError || "Edit nodes, edges, annotations, and validation errors. Invalid JSON cannot be saved."}
+              </span>
+            </label>
+          ) : null}
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Review status
+              <Select
+                disabled={disabled}
+                onValueChange={(reviewStatus) => setDraft((current) => ({ ...current, reviewStatus: reviewStatus as ExtractionUnit["review_status"] }))}
+                value={draft.reviewStatus}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="needs_review">needs_review</SelectItem>
+                  <SelectItem value="reviewed">reviewed</SelectItem>
+                  <SelectItem value="approved">approved</SelectItem>
+                  <SelectItem value="rejected">rejected</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Risk level
+              <Select
+                disabled={disabled}
+                onValueChange={(riskLevel) => setDraft((current) => ({ ...current, riskLevel: riskLevel === "inherit" ? "" : riskLevel }))}
+                value={draft.riskLevel || "inherit"}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">{inheritedLabel(documentGovernance?.riskLevel)}</SelectItem>
+                  <SelectItem value="low">low</SelectItem>
+                  <SelectItem value="medium">medium</SelectItem>
+                  <SelectItem value="high">high</SelectItem>
+                  <SelectItem value="critical">critical</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Effective from
+              <Input
+                disabled={disabled}
+                onChange={(event) => setDraft((current) => ({ ...current, effectiveFrom: event.target.value }))}
+                placeholder="2025-04-22"
+                value={draft.effectiveFrom}
+              />
+            </label>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Review frequency
+              <Select
+                disabled={disabled}
+                onValueChange={(reviewFrequency) => setDraft((current) => withReviewFrequencyDates(current, reviewFrequency === "inherit" ? "" : reviewFrequency))}
+                value={draft.reviewFrequency || "inherit"}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">{inheritedLabel(documentGovernance?.reviewFrequency)}</SelectItem>
+                  <SelectItem value="quarterly">quarterly</SelectItem>
+                  <SelectItem value="semiannual">semiannual</SelectItem>
+                  <SelectItem value="annual">annual</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Last reviewed
+              <DatePicker
+                disabled={disabled}
+                label="Last reviewed"
+                onChange={(lastReviewedAt) => setDraft((current) => ({
+                  ...current,
+                  lastReviewedAt,
+                  nextReviewDue: current.reviewFrequency ? nextReviewDueIso(lastReviewedAt, current.reviewFrequency) : current.nextReviewDue,
+                }))}
+                placeholder={documentGovernance?.lastReviewedAt ? `inherits ${documentGovernance.lastReviewedAt}` : "YYYY-MM-DD"}
+                value={draft.lastReviewedAt}
+              />
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              Next review due
+              <DatePicker
+                disabled={disabled}
+                label="Next review due"
+                onChange={(nextReviewDue) => setDraft((current) => ({ ...current, nextReviewDue }))}
+                placeholder={documentGovernance?.nextReviewDue ? `inherits ${documentGovernance.nextReviewDue}` : "YYYY-MM-DD"}
+                value={draft.nextReviewDue}
+              />
+            </label>
+          </div>
+        </div>
+      </details>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs leading-5 text-muted-foreground">
@@ -405,7 +423,7 @@ export function ExtractionReviewEditor({
             ? "Published versions are immutable. Create a new draft version to edit."
             : changed
               ? "Unsaved changes will refresh the embedding after save."
-              : "No unsaved changes. Use review actions to move this unit through curation."}
+              : "Use review actions for routine decisions. Open edit details only when the extracted text or metadata needs curation."}
         </p>
         <div className="flex flex-wrap items-center justify-end gap-2">
           {draft.reviewStatus === "reviewed" || draft.reviewStatus === "approved" ? (

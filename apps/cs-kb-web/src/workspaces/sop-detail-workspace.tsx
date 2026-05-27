@@ -15,11 +15,13 @@ import {
 import type { ElementType, ReactNode } from "react";
 
 import { EmptyPanel, Fact, MacroCopyButton, MetaLine, SectionTitle, TagSummary } from "@/components/common";
+import { SourceContextCard } from "@/components/source-context-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/format";
+import { groupResultsByDisplaySource } from "@/lib/source-display";
 import { isDebugUiEnabled } from "@/lib/ui-mode";
-import type { Macro, SOP } from "@/types";
+import type { Macro, RetrievalResult, SOP } from "@/types";
 
 export function SOPDetailWorkspace({
   copied,
@@ -29,6 +31,8 @@ export function SOPDetailWorkspace({
   onCopyMacro,
   onOpenCategory,
   onSearchRelated,
+  sourceMatch,
+  sourceQuery,
   sop,
 }: {
   copied: string;
@@ -38,6 +42,8 @@ export function SOPDetailWorkspace({
   onCopyMacro: (macro: Macro) => void;
   onOpenCategory: (sop: SOP) => void;
   onSearchRelated: (query: string) => void;
+  sourceMatch?: RetrievalResult | null;
+  sourceQuery?: string;
   sop: SOP | null;
 }) {
   if (loading) {
@@ -59,6 +65,7 @@ export function SOPDetailWorkspace({
   const sections = version.sections;
   const chatPrompt = sop.title;
   const debugEnabled = isDebugUiEnabled();
+  const sourceGroup = sourceMatch ? groupResultsByDisplaySource([sourceMatch])[0] : null;
 
   return (
     <div className="space-y-5">
@@ -106,6 +113,28 @@ export function SOPDetailWorkspace({
           </div>
         </div>
       </section>
+
+      {sourceGroup ? (
+        <section className="space-y-3" aria-label="Matched source from lookup">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Matched source</p>
+              <h3 className="mt-1 text-base font-semibold leading-tight">Why this SOP opened from Lookup</h3>
+            </div>
+            {sourceQuery ? (
+              <Button onClick={() => onSearchRelated(sourceQuery)} size="sm" type="button" variant="outline">
+                <Search data-icon="inline-start" className="size-4" />
+                Back to results
+              </Button>
+            ) : null}
+          </div>
+          <SourceContextCard
+            autoScrollToHighlight
+            group={sourceGroup}
+            showDebugScore={debugEnabled}
+          />
+        </section>
+      ) : null}
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(22rem,0.75fr)]">
         <div className="space-y-4">

@@ -1,13 +1,14 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 
 import { RouteLoading } from "@/components/route-loading";
 import { workspacePaths } from "@/constants";
 import { useRecordKBEvent } from "@/hooks/api/kb-index";
 import { useSOPDetail } from "@/hooks/api/search";
 import { categoryKey } from "@/lib/format";
+import { SOP_SOURCE_STORAGE_KEY, sourceMatchBelongsToSop } from "@/lib/sop-source-link";
 import { useFeedback } from "@/providers/feedback-context";
-import type { Macro, SOP } from "@/types";
+import type { Macro, RetrievalResult, SOP } from "@/types";
 
 const SOPDetailWorkspace = lazy(() =>
   import("@/workspaces/sop-detail-workspace").then((module) => ({ default: module.SOPDetailWorkspace })),
@@ -16,11 +17,34 @@ const SOPDetailWorkspace = lazy(() =>
 export function SOPDetailPage() {
   const navigate = useNavigate();
   const { sopId } = useParams({ from: "/sop/$sopId" });
+  const search = useRouterState({ select: (state) => state.location.search as Record<string, unknown> });
+  const sourceChunkId = typeof search.source === "string" ? search.source : "";
+  const sourceQuery = typeof search.q === "string" ? search.q : "";
   const sopQuery = useSOPDetail(sopId);
   const eventMutation = useRecordKBEvent();
   const { reportError, reportNotice } = useFeedback();
   const [copied, setCopied] = useState("");
+  const [sourceMatch, setSourceMatch] = useState<RetrievalResult | null>(null);
   const recordedOpenRef = useRef("");
+
+  useEffect(() => {
+    if (!sourceChunkId) {
+      setSourceMatch(null);
+      return;
+    }
+    const stored = sessionStorage.getItem(SOP_SOURCE_STORAGE_KEY);
+    if (!stored) {
+      setSourceMatch(null);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(stored) as RetrievalResult;
+      setSourceMatch(sourceMatchBelongsToSop(parsed, { sourceChunkId, sopId }) ? parsed : null);
+    } catch {
+      sessionStorage.removeItem(SOP_SOURCE_STORAGE_KEY);
+      setSourceMatch(null);
+    }
+  }, [sopId, sourceChunkId]);
 
   useEffect(() => {
     if (!sopQuery.data) {
@@ -89,6 +113,8 @@ export function SOPDetailPage() {
         onCopyMacro={copyMacro}
         onOpenCategory={openCategory}
         onSearchRelated={searchRelated}
+        sourceMatch={sourceMatch}
+        sourceQuery={sourceQuery}
         sop={sopQuery.data ?? null}
       />
     </Suspense>

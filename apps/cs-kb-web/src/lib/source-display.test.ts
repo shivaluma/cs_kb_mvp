@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { blockMatchesHighlight, groupResultsByDisplaySource, highlightedSegments } from "./source-display.ts";
+import { blockMatchesHighlight, groupResultsByDisplaySource, highlightedSegments, sourceMatchFacts, sourceMatchHint } from "./source-display.ts";
 import type { RetrievalResult } from "../types.ts";
 
 test("exact offset highlight splits the source content", () => {
@@ -101,6 +101,7 @@ test("table row chunks use structural row highlight anchors", () => {
   assert.equal(group.displayUnitType, "table_section");
   assert.equal(blockMatchesHighlight(group.blocks[0], group.highlights), false);
   assert.equal(blockMatchesHighlight(group.blocks[1], group.highlights), true);
+  assert.equal(sourceMatchHint(group), "Matched a table row in Refund table");
 });
 
 test("table row fallback parses numeric row anchors from metadata strings", () => {
@@ -155,6 +156,25 @@ test("missing display context uses safe parent-missing fallback", () => {
 
   assert.equal(group.displayUnitType, "missing_source");
   assert.ok(!group.content.includes("Raw chunk text"));
+  assert.equal(sourceMatchHint(group), "Open the SOP to verify the source");
+});
+
+test("source match hint explains highlighted source without exposing retrieval strategy", () => {
+  const item = result("chunk-hint", "Refund SOP", "Refund after delivery is allowed.", 0, 33);
+  const group = groupResultsByDisplaySource([item])[0];
+
+  assert.equal(sourceMatchHint(group), "Matched highlighted text in Refund policy");
+  assert.ok(!sourceMatchHint(group).includes("chunk"));
+  assert.ok(!sourceMatchHint(group).includes("score"));
+});
+
+test("source match facts hide unit type outside debug mode", () => {
+  const item = result("chunk-facts", "Refund SOP", "Refund after delivery is allowed.", 0, 33);
+  item.metadata.unit_type = "policy_rule";
+  const match = groupResultsByDisplaySource([item])[0].matches[0];
+
+  assert.deepEqual(sourceMatchFacts(match), ["Refund policy"]);
+  assert.deepEqual(sourceMatchFacts(match, { debug: true }), ["Refund policy", "policy_rule"]);
 });
 
 function result(

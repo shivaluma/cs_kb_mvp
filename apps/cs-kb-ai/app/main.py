@@ -36,7 +36,14 @@ from app.schemas import (
     DocumentRelation,
     DocumentSummary,
     DocumentVersionResponse,
+    EmbeddingMigrationJob,
+    EmbeddingMigrationPlanRequest,
+    EmbeddingMigrationRunRequest,
+    ExtractionCompilationPlan,
+    ExtractionCompilationPlanStatusUpdateRequest,
     ExtractionJobSummary,
+    ExtractionMapUnitOutput,
+    ExtractionMapUnitStatusUpdateRequest,
     ExtractionPipelineInspection,
     ExtractionUnit,
     ExtractionUnitCreateRequest,
@@ -55,6 +62,7 @@ from app.schemas import (
     OpsAnalyticsResponse,
     PublishVersionRequest,
     RejectRelationRequest,
+    ReduceReconcileReport,
     RetrievalFilters,
     RetrievalRequest,
     RetrievalResponse,
@@ -246,6 +254,9 @@ PIPELINE_INSPECTION_STAGE_ORDER = [
 
 def build_extraction_pipeline_inspection(job: dict[str, Any]) -> dict[str, Any]:
     outputs = [dict(output) for output in job.get("outputs", []) if isinstance(output, dict)]
+    map_units = [dict(map_unit) for map_unit in job.get("map_units", []) if isinstance(map_unit, dict)]
+    compilation_plans = [dict(plan) for plan in job.get("compilation_plans", []) if isinstance(plan, dict)]
+    reduce_items = [dict(item) for item in job.get("reduce_items", []) if isinstance(item, dict)]
     stage_names = [
         *PIPELINE_INSPECTION_STAGE_ORDER,
         *[
@@ -273,10 +284,118 @@ def build_extraction_pipeline_inspection(job: dict[str, Any]) -> dict[str, Any]:
         "stage_order": list(dict.fromkeys(stage_names)),
         "stage_summary": stage_summary,
         "issue_summary": issue_summary,
+        "map_units": map_units,
+        "compilation_plans": compilation_plans,
+        "reduce_items": reduce_items,
         "artifacts": outputs,
     }
     inspection["summary_markdown"] = pipeline_inspection_markdown(inspection)
     return inspection
+
+
+def build_reduce_reconcile_report(job: dict[str, Any]) -> dict[str, Any]:
+    outputs = [dict(output) for output in job.get("outputs", []) if isinstance(output, dict)]
+    reduce_items = [dict(item) for item in job.get("reduce_items", []) if isinstance(item, dict)]
+    reconcile_payloads = [
+        output.get("payload")
+        for output in outputs
+        if output.get("artifact_type") == "reconcile_suggestions" and isinstance(output.get("payload"), dict)
+    ]
+    verification_payloads = [
+        output.get("payload")
+        for output in outputs
+        if output.get("artifact_type") == "reduce_reconcile_verification" and isinstance(output.get("payload"), dict)
+    ]
+    duplicate_claims = [item for item in reduce_items if integer_value(item.get("duplicate_count")) > 1]
+    duplicate_titles = flatten_payload_list(reconcile_payloads, "duplicate_title")
+    related_sops = flatten_payload_list(reconcile_payloads, "related_sop")
+    possible_conflicts = flatten_payload_list(reconcile_payloads, "possible_conflict")
+    conflicts = [
+        {
+            **item,
+            "type": str(item.get("type") or "possible_conflict"),
+            "source": "reconcile_suggestions",
+        }
+        for item in possible_conflicts
+    ]
+    for payload in verification_payloads:
+        for conflict in payload.get("conflicts", []) if isinstance(payload.get("conflicts"), list) else []:
+            if isinstance(conflict, dict):
+                conflicts.append({**conflict, "source": "reduce_reconcile_verification"})
+    summary = {
+        "conflict_count": len(conflicts),
+        "duplicate_claim_count": len(duplicate_claims),
+        "duplicate_source_unit_count": sum(integer_value(item.get("duplicate_count")) for item in duplicate_claims),
+        "duplicate_title_count": len(duplicate_titles),
+        "reduce_item_count": len(reduce_items),
+        "related_sop_count": len(related_sops),
+    }
+    report = {
+        "version_id": str(job.get("version_id") or ""),
+        "document_id": str(job.get("document_id") or ""),
+        "job_id": str(job.get("id") or ""),
+        "status": str(job.get("status") or "unknown"),
+        "summary": summary,
+        "duplicate_claims": duplicate_claims,
+        "duplicate_titles": duplicate_titles,
+        "related_sops": related_sops,
+        "conflicts": conflicts,
+        "reconcile_suggestions": reconcile_payloads[0] if reconcile_payloads else {},
+    }
+    report["summary_markdown"] = reduce_reconcile_report_markdown(report)
+    return report
+
+
+def flatten_payload_list(payloads: list[Any], key: str) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for payload in payloads:
+        if not isinstance(payload, dict) or not isinstance(payload.get(key), list):
+            continue
+        output.extend(dict(item) for item in payload[key] if isinstance(item, dict))
+    return output
+
+
+def integer_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def reduce_reconcile_report_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    lines = [
+        "# Reduce/reconcile report",
+        "",
+        f"- Version: `{report.get('version_id', '')}`",
+        f"- Document: `{report.get('document_id', '')}`",
+        f"- Job: `{report.get('job_id', '')}`",
+        f"- Status: `{report.get('status', 'unknown')}`",
+        "",
+        "## Summary",
+        "",
+        f"- Reduce items: {summary.get('reduce_item_count', 0)}",
+        f"- Duplicate claims: {summary.get('duplicate_claim_count', 0)}",
+        f"- Duplicate titles: {summary.get('duplicate_title_count', 0)}",
+        f"- Related SOPs: {summary.get('related_sop_count', 0)}",
+        f"- Conflicts: {summary.get('conflict_count', 0)}",
+    ]
+    duplicate_claims = report.get("duplicate_claims") if isinstance(report.get("duplicate_claims"), list) else []
+    conflicts = report.get("conflicts") if isinstance(report.get("conflicts"), list) else []
+    if duplicate_claims:
+        lines.extend(["", "## Duplicate Claims", ""])
+        for item in duplicate_claims[:20]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"- `{item.get('item_key', '')}`: {item.get('title', '')} ({item.get('duplicate_count', 0)} source units)")
+    if conflicts:
+        lines.extend(["", "## Conflicts", ""])
+        for item in conflicts[:20]:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("title") or item.get("type") or item.get("document_id") or "conflict"
+            lines.append(f"- `{item.get('source', '')}`: {label}")
+    return "\n".join(lines).strip() + "\n"
 
 
 def stage_inspection_summary(stage: str, outputs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -298,9 +417,20 @@ def pipeline_issue_summary(outputs: list[dict[str, Any]]) -> dict[str, Any]:
     hard_blockers: list[str] = []
     coverage_score: int | None = None
     warnings: list[str] = []
+    map_unit_count = 0
+    map_source_element_count = 0
+    mapped_source_element_count = 0
+    unmapped_source_element_count = 0
+    map_blocked_unit_count = 0
     for output in outputs:
         payload = output.get("payload") if isinstance(output.get("payload"), dict) else {}
         warnings.extend(payload_warning_strings(payload))
+        if output.get("artifact_type") == "map_unit_extracts":
+            map_unit_count += int_payload_value(payload, "unit_count")
+            map_source_element_count += int_payload_value(payload, "source_element_count")
+            mapped_source_element_count += int_payload_value(payload, "mapped_source_element_count")
+            unmapped_source_element_count += int_payload_value(payload, "unmapped_source_element_count")
+            map_blocked_unit_count += int_payload_value(payload, "blocked_unit_count")
         if output.get("artifact_type") in {"verification_report", "publish_readiness_report"}:
             hard_blockers.extend(str(item) for item in payload.get("hard_blockers", []) if item)
             if payload.get("coverage_score") is not None:
@@ -312,9 +442,21 @@ def pipeline_issue_summary(outputs: list[dict[str, Any]]) -> dict[str, Any]:
         "failed_output_count": sum(1 for output in outputs if output.get("status") == "failed"),
         "degraded_output_count": sum(1 for output in outputs if output.get("status") == "degraded"),
         "warning_count": len(list(dict.fromkeys(warnings))),
+        "map_blocked_unit_count": map_blocked_unit_count,
+        "map_source_element_count": map_source_element_count,
+        "map_unit_count": map_unit_count,
+        "mapped_source_element_count": mapped_source_element_count,
+        "unmapped_source_element_count": unmapped_source_element_count,
         "hard_blockers": list(dict.fromkeys(hard_blockers)),
         "coverage_score": coverage_score,
     }
+
+
+def int_payload_value(payload: dict[str, Any], key: str) -> int:
+    try:
+        return int(payload.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def payload_warning_strings(payload: Any) -> list[str]:
@@ -354,6 +496,9 @@ def pipeline_inspection_markdown(inspection: dict[str, Any]) -> str:
         f"- Failed outputs: {issue_summary.get('failed_output_count', 0)}",
         f"- Degraded outputs: {issue_summary.get('degraded_output_count', 0)}",
         f"- Warnings: {issue_summary.get('warning_count', 0)}",
+        f"- Map units: {issue_summary.get('map_unit_count', 0)}",
+        f"- Map source elements: {issue_summary.get('mapped_source_element_count', 0)}/{issue_summary.get('map_source_element_count', 0)} mapped",
+        f"- Map blocked units: {issue_summary.get('map_blocked_unit_count', 0)}",
         f"- Coverage score: {issue_summary.get('coverage_score') if issue_summary.get('coverage_score') is not None else 'n/a'}",
         f"- Hard blockers: {', '.join(issue_summary.get('hard_blockers') or []) or 'none'}",
         "",
@@ -883,6 +1028,86 @@ def inspect_version_extraction_pipeline_markdown(version_id: str) -> Response:
         raise HTTPException(status_code=404, detail="extraction_pipeline_not_found")
     inspection = build_extraction_pipeline_inspection(jobs[0])
     return Response(content=inspection["summary_markdown"], media_type="text/plain; charset=utf-8")
+
+
+@app.get("/ai/v1/versions/{version_id}/reduce-reconcile/report", response_model=ReduceReconcileReport)
+def get_version_reduce_reconcile_report(version_id: str) -> ReduceReconcileReport:
+    jobs = repository.list_extraction_pipeline(version_id)
+    if not jobs:
+        raise HTTPException(status_code=404, detail="extraction_pipeline_not_found")
+    return ReduceReconcileReport(**build_reduce_reconcile_report(jobs[0]))
+
+
+@app.get("/ai/v1/versions/{version_id}/reduce-reconcile/report.md")
+def get_version_reduce_reconcile_report_markdown(version_id: str) -> Response:
+    jobs = repository.list_extraction_pipeline(version_id)
+    if not jobs:
+        raise HTTPException(status_code=404, detail="extraction_pipeline_not_found")
+    report = build_reduce_reconcile_report(jobs[0])
+    return Response(content=report["summary_markdown"], media_type="text/plain; charset=utf-8")
+
+
+@app.patch("/ai/v1/extraction-map-units/{job_id}/{unit_id}", response_model=ExtractionMapUnitOutput)
+def update_extraction_map_unit(job_id: str, unit_id: str, request: ExtractionMapUnitStatusUpdateRequest) -> ExtractionMapUnitOutput:
+    try:
+        return ExtractionMapUnitOutput(
+            **repository.update_extraction_map_unit_status(
+                job_id=job_id,
+                unit_id=unit_id,
+                status=request.status,
+                error=request.error,
+                warnings=request.warnings,
+            )
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/ai/v1/extraction-compilation-plans/{plan_id}", response_model=ExtractionCompilationPlan)
+def update_extraction_compilation_plan(plan_id: str, request: ExtractionCompilationPlanStatusUpdateRequest) -> ExtractionCompilationPlan:
+    try:
+        return ExtractionCompilationPlan(
+            **repository.update_extraction_compilation_plan_status(
+                plan_id=plan_id,
+                status=request.status,
+                actor=request.actor,
+                rejection_reason=request.rejection_reason,
+                error=request.error,
+            )
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/ai/v1/embedding/migration-plan", response_model=EmbeddingMigrationJob)
+def create_embedding_migration_plan(request: EmbeddingMigrationPlanRequest) -> EmbeddingMigrationJob:
+    return EmbeddingMigrationJob(
+        **repository.create_embedding_migration_plan(
+            provider=request.provider,
+            model=request.model,
+            dimensions=request.dimensions,
+            source_spec_id=request.source_spec_id,
+        )
+    )
+
+
+@app.post("/ai/v1/embedding/migration-jobs/{job_id}/run", response_model=EmbeddingMigrationJob)
+def run_embedding_migration_job(job_id: str, request: EmbeddingMigrationRunRequest) -> EmbeddingMigrationJob:
+    try:
+        return EmbeddingMigrationJob(
+            **repository.run_embedding_migration_job(
+                job_id,
+                batch_size=request.batch_size,
+            )
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.patch("/ai/v1/extraction-units/{unit_id}", response_model=ExtractionUnit)

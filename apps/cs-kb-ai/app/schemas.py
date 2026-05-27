@@ -154,6 +154,7 @@ class AdminResetStatus(BaseModel):
     embedding_dimensions: int
     embedding_column_dimensions: int | None = None
     embedding_new_column_dimensions: int | None = None
+    compiled_page_embedding_column_dimensions: int | None = None
     warning: str = ""
 
 
@@ -172,6 +173,7 @@ class AdminResetResponse(BaseModel):
     preserved_tables: list[str]
     embedding_dimensions: int
     embedding_column_dimensions: int | None = None
+    compiled_page_embedding_column_dimensions: int | None = None
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -1070,6 +1072,102 @@ class ExtractionStageOutput(BaseModel):
     created_at: datetime
 
 
+class ExtractionMapUnitOutput(BaseModel):
+    id: str = ""
+    job_id: str = ""
+    unit_id: str
+    unit_index: int = 0
+    unit_type: str = "unknown"
+    title: str = ""
+    status: str = "completed"
+    confidence: float = 0.0
+    evidence_hash: str = ""
+    source_element_ids: list[Any] = Field(default_factory=list)
+    missing_source_element_ids: list[Any] = Field(default_factory=list)
+    source_refs: list[Any] = Field(default_factory=list)
+    source_ref_quality: str = "none"
+    warnings: list[Any] = Field(default_factory=list)
+    attempt_count: int = 0
+    last_error: str = ""
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class ExtractionMapUnitStatusUpdateRequest(BaseModel):
+    status: Literal["pending", "in_progress", "completed", "failed", "blocked", "skipped"] = "in_progress"
+    error: str = ""
+    warnings: list[Any] = Field(default_factory=list)
+
+
+class ExtractionCompilationPlan(BaseModel):
+    id: str = ""
+    job_id: str = ""
+    plan_version: str = "document_compilation_plan_v1"
+    status: str = "pending_review"
+    payload: dict[str, Any] = Field(default_factory=dict)
+    operation_count: int = 0
+    human_approval_required: bool = True
+    source_coverage: dict[str, Any] = Field(default_factory=dict)
+    review_gates: dict[str, Any] = Field(default_factory=dict)
+    last_error: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    approved_at: datetime | None = None
+    approved_by: str = ""
+    rejected_at: datetime | None = None
+    rejection_reason: str = ""
+
+
+class ExtractionCompilationPlanStatusUpdateRequest(BaseModel):
+    status: Literal["pending_review", "approved", "rejected", "superseded"] = "approved"
+    actor: str = "cs-ops-ui"
+    rejection_reason: str = ""
+    error: str = ""
+
+
+class EmbeddingMigrationPlanRequest(BaseModel):
+    provider: str = Field(min_length=1, max_length=120)
+    model: str = Field(min_length=1, max_length=240)
+    dimensions: int = Field(default=1536, ge=1, le=8192)
+    source_spec_id: str = ""
+
+
+class EmbeddingMigrationRunRequest(BaseModel):
+    batch_size: int = Field(default=100, ge=1, le=1000)
+
+
+class EmbeddingMigrationJob(BaseModel):
+    id: str
+    source_spec_id: str = ""
+    target_spec_id: str
+    status: str = "pending"
+    total_items: int = 0
+    processed_items: int = 0
+    error: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+
+
+class ExtractionReduceItem(BaseModel):
+    id: str = ""
+    job_id: str = ""
+    item_kind: str
+    item_key: str
+    title: str = ""
+    status: str = "suggested"
+    score: float = 0.0
+    duplicate_count: int = 1
+    source_unit_ids: list[Any] = Field(default_factory=list)
+    evidence_hashes: list[Any] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class ExtractionJobSummary(BaseModel):
     id: str
     document_id: str
@@ -1082,6 +1180,9 @@ class ExtractionJobSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
     outputs: list[ExtractionStageOutput] = Field(default_factory=list)
+    map_units: list[ExtractionMapUnitOutput] = Field(default_factory=list)
+    compilation_plans: list[ExtractionCompilationPlan] = Field(default_factory=list)
+    reduce_items: list[ExtractionReduceItem] = Field(default_factory=list)
 
 
 class ExtractionStageInspection(BaseModel):
@@ -1098,6 +1199,11 @@ class ExtractionPipelineIssueSummary(BaseModel):
     failed_output_count: int = 0
     degraded_output_count: int = 0
     warning_count: int = 0
+    map_blocked_unit_count: int = 0
+    map_source_element_count: int = 0
+    map_unit_count: int = 0
+    mapped_source_element_count: int = 0
+    unmapped_source_element_count: int = 0
     hard_blockers: list[str] = Field(default_factory=list)
     coverage_score: int | None = None
 
@@ -1116,7 +1222,24 @@ class ExtractionPipelineInspection(BaseModel):
     stage_order: list[str] = Field(default_factory=list)
     stage_summary: list[ExtractionStageInspection] = Field(default_factory=list)
     issue_summary: ExtractionPipelineIssueSummary = Field(default_factory=ExtractionPipelineIssueSummary)
+    map_units: list[ExtractionMapUnitOutput] = Field(default_factory=list)
+    compilation_plans: list[ExtractionCompilationPlan] = Field(default_factory=list)
+    reduce_items: list[ExtractionReduceItem] = Field(default_factory=list)
     artifacts: list[ExtractionStageOutput] = Field(default_factory=list)
+    summary_markdown: str = ""
+
+
+class ReduceReconcileReport(BaseModel):
+    version_id: str
+    document_id: str = ""
+    job_id: str = ""
+    status: str = "unknown"
+    summary: dict[str, Any] = Field(default_factory=dict)
+    duplicate_claims: list[ExtractionReduceItem] = Field(default_factory=list)
+    duplicate_titles: list[dict[str, Any]] = Field(default_factory=list)
+    related_sops: list[dict[str, Any]] = Field(default_factory=list)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    reconcile_suggestions: dict[str, Any] = Field(default_factory=dict)
     summary_markdown: str = ""
 
 
@@ -1380,6 +1503,7 @@ class RetrievalRequest(BaseModel):
     ranking_mode: RankingMode = "portal_search"
     debug: bool = False
     use_model_rerank: bool | None = None
+    include_compiled_pages: bool = False
 
 
 class CollectionRef(BaseModel):

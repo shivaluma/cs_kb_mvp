@@ -72,7 +72,7 @@ def _add_list_condition(conditions: list[dict[str, Any]], key: str, values: list
         conditions.append(_match_any(key, clean_values))
 
 
-def build_filter(filters: RetrievalFilters) -> dict[str, Any]:
+def build_filter(filters: RetrievalFilters, retrieval_layer: str = "chunk") -> dict[str, Any]:
     statuses = filters.status or ["published"]
     conditions: list[dict[str, Any]] = [
         _match_value("document_status", "active"),
@@ -103,7 +103,10 @@ def build_filter(filters: RetrievalFilters) -> dict[str, Any]:
     _add_list_condition(conditions, "collections", filters.collections)
     _add_list_condition(conditions, "task_type", filters.task_types)
     _add_list_condition(conditions, "unit_type", filters.unit_types)
-    return {"must": conditions}
+    if retrieval_layer == "compiled_page":
+        conditions.append(_match_value("retrieval_layer", "compiled_page"))
+        return {"must": conditions}
+    return {"must": conditions, "must_not": [_match_value("retrieval_layer", "compiled_page")]}
 
 
 def parse_metadata(value: Any) -> dict[str, Any]:
@@ -192,6 +195,7 @@ def payload_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "collections": collections,
         "task_type": _list_value(metadata.get("task_type")),
         "unit_type": str(_metadata_value(metadata, ["unit_type"], row.get("section") or "")),
+        "retrieval_layer": str(_metadata_value(metadata, ["retrieval_layer"], "chunk")),
     }
 
 
@@ -248,6 +252,32 @@ def search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[d
         "with_payload": True,
         "with_vector": False,
         "filter": build_filter(filters),
+    }
+    with _client() as client:
+        response = client.post(target, json=payload)
+        response.raise_for_status()
+    result = response.json().get("result") or []
+    hits: list[dict[str, Any]] = []
+    for point in result:
+        point_payload = point.get("payload") or {}
+        chunk_id = point_payload.get("chunk_id") or point.get("id")
+        if not chunk_id:
+            continue
+        hits.append({"chunk_id": str(chunk_id), "score": float(point.get("score") or 0.0)})
+    return hits
+
+
+def search_compiled_pages(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    ensure_collection()
+    target = f"{_base_url()}/collections/{settings.qdrant_collection}/points/search"
+    payload = {
+        "vector": vector,
+        "limit": limit,
+        "with_payload": True,
+        "with_vector": False,
+        "filter": build_filter(filters, retrieval_layer="compiled_page"),
     }
     with _client() as client:
         response = client.post(target, json=payload)

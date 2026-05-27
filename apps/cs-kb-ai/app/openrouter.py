@@ -120,6 +120,19 @@ Architecture/schema mapping:
 """
 
 
+IMAGE_CAPTION_PROMPT = """You describe uploaded CS knowledge-base image assets.
+
+Use the image as source of truth. Return only JSON:
+{"caption":"","confidence":0.0,"warnings":[]}
+
+Rules:
+- Caption must be one concise sentence describing operationally relevant visible content.
+- Do not invent policy, workflow order, or hidden text.
+- If the image is unreadable, say so and include a warning.
+- Use Vietnamese when the image content is Vietnamese; otherwise use neutral English.
+"""
+
+
 RULE_TABLE_EXTRACTION_PROMPT = """You are extracting a CS policy rule table.
 
 Use table rows/cells as the source of truth.
@@ -334,6 +347,84 @@ def apply_reasoning_effort(payload: dict[str, Any], effort: str | None = None) -
 
 def enabled() -> bool:
     return bool(settings.openrouter_api_key.strip())
+
+
+def describe_image_asset(
+    *,
+    filename: str,
+    content_type: str,
+    image_data_url: str,
+) -> tuple[dict[str, Any], list[str], str]:
+    if not enabled():
+        record_ai_breakdown({"filename": filename, "flow": "image_caption", "status": "skipped", "skip_reason": "openrouter_disabled"})
+        return {}, [], "openrouter_disabled"
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+    }
+    user_content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": f"Describe this uploaded KB image asset. filename={filename}; content_type={content_type}",
+        },
+        {"type": "image_url", "image_url": {"url": image_data_url}},
+    ]
+    payload = apply_reasoning_effort(
+        {
+            "model": settings.openrouter_vision_model,
+            "messages": [
+                {"role": "system", "content": IMAGE_CAPTION_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+        },
+        "low",
+    )
+    started_at = time.perf_counter()
+    try:
+        content = completion_content(payload, headers)
+        parsed = parse_llm_json(content)
+        if not isinstance(parsed, dict):
+            raise ValueError("image_caption_not_object")
+        caption_text = str(parsed.get("caption") or parsed.get("text") or "").strip()
+        if not caption_text:
+            raise ValueError("image_caption_empty")
+        try:
+            confidence = float(parsed.get("confidence") or 0.7)
+        except (TypeError, ValueError):
+            confidence = 0.7
+        warnings = [str(warning) for warning in parsed.get("warnings", []) if str(warning).strip()] if isinstance(parsed.get("warnings"), list) else []
+        caption = {
+            "confidence": max(0.0, min(1.0, confidence)),
+            "model": settings.openrouter_vision_model,
+            "text": caption_text,
+        }
+        record_ai_breakdown(
+            {
+                "filename": filename,
+                "flow": "image_caption",
+                "latency_ms": round((time.perf_counter() - started_at) * 1000),
+                "model": settings.openrouter_vision_model,
+                "response": ai_response_preview(content),
+                "status": "completed",
+                "warnings": warnings,
+            }
+        )
+        return caption, warnings, ""
+    except Exception as exc:
+        error = f"image_caption_failed:{exc.__class__.__name__}"
+        record_ai_breakdown(
+            {
+                "filename": filename,
+                "flow": "image_caption",
+                "latency_ms": round((time.perf_counter() - started_at) * 1000),
+                "model": settings.openrouter_vision_model,
+                "status": "failed",
+                "error": error,
+            }
+        )
+        return {}, [error], error
 
 
 def completion_content(payload: dict[str, Any], headers: dict[str, str]) -> str:

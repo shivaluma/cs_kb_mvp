@@ -15,8 +15,8 @@ from psycopg_pool import ConnectionPool
 
 from app import qdrant_store
 from app.config import settings
-from app.embedding import vector_literal
-from app.search_labels import is_bad_search_label, meaningful_search_label
+from app.embedding import embed_texts, embedding_runtime_metadata, embedding_spec_id, vector_literal
+from app.search_labels import embedding_text_for_unit, is_bad_search_label, meaningful_search_label
 from app.schemas import DocumentMetadata, RetrievalFilters, SynonymGroupCreateRequest, SynonymSuggestionAcceptRequest
 from app.text_processing import normalize_phrase, render_pdf_page_jpeg, tokenize
 
@@ -141,6 +141,7 @@ ADMIN_RESET_TABLE_GROUPS: dict[str, tuple[str, ...]] = {
     "knowledge_base": (
         "ai_document_sources",
         "ai_document_relations",
+        "ai_compiled_pages",
         "ai_chunks",
         "ai_document_versions",
         "ai_documents",
@@ -148,6 +149,9 @@ ADMIN_RESET_TABLE_GROUPS: dict[str, tuple[str, ...]] = {
         "kb_sops",
     ),
     "extraction": (
+        "extraction_reduce_items",
+        "extraction_compilation_plans",
+        "extraction_map_unit_outputs",
         "extraction_stage_outputs",
         "extraction_jobs",
     ),
@@ -343,6 +347,59 @@ def ensure_schema() -> None:
             """
         )
         conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS ai_compiled_pages (
+              id uuid PRIMARY KEY,
+              document_id uuid NOT NULL REFERENCES ai_documents(id) ON DELETE CASCADE,
+              version_id uuid NOT NULL REFERENCES ai_document_versions(id) ON DELETE CASCADE,
+              page_type text NOT NULL DEFAULT 'document_overview',
+              title text NOT NULL DEFAULT '',
+              content_md text NOT NULL DEFAULT '',
+              summary text NOT NULL DEFAULT '',
+              status text NOT NULL DEFAULT 'draft',
+              source_chunk_indexes jsonb NOT NULL DEFAULT '[]'::jsonb,
+              source_unit_types jsonb NOT NULL DEFAULT '[]'::jsonb,
+              embedding vector({settings.embedding_dimensions}),
+              metadata jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+              created_at timestamptz NOT NULL DEFAULT now(),
+              updated_at timestamptz NOT NULL DEFAULT now(),
+              UNIQUE (version_id, page_type)
+            )
+            """
+        )
+        conn.execute(f"ALTER TABLE ai_compiled_pages ADD COLUMN IF NOT EXISTS embedding vector({settings.embedding_dimensions})")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embedding_model_specs (
+              spec_id text PRIMARY KEY,
+              provider text NOT NULL,
+              model text NOT NULL,
+              dimensions integer NOT NULL,
+              status text NOT NULL DEFAULT 'available',
+              is_active boolean NOT NULL DEFAULT false,
+              created_at timestamptz NOT NULL DEFAULT now(),
+              activated_at timestamptz
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embedding_migration_jobs (
+              id uuid PRIMARY KEY,
+              source_spec_id text NOT NULL DEFAULT '',
+              target_spec_id text NOT NULL REFERENCES embedding_model_specs(spec_id),
+              status text NOT NULL DEFAULT 'pending',
+              total_items integer NOT NULL DEFAULT 0,
+              processed_items integer NOT NULL DEFAULT 0,
+              error text NOT NULL DEFAULT '',
+              created_at timestamptz NOT NULL DEFAULT now(),
+              updated_at timestamptz NOT NULL DEFAULT now(),
+              completed_at timestamptz
+            )
+            """
+        )
+        upsert_embedding_model_spec_tx(conn, embedding_model_spec_from_metadata(embedding_runtime_metadata()))
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_document_sources (
               version_id uuid PRIMARY KEY REFERENCES ai_document_versions(id) ON DELETE CASCADE,
@@ -441,6 +498,86 @@ def ensure_schema() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS extraction_map_unit_outputs (
+              id uuid PRIMARY KEY,
+              job_id uuid NOT NULL REFERENCES extraction_jobs(id) ON DELETE CASCADE,
+              unit_id text NOT NULL,
+              unit_index integer NOT NULL DEFAULT 0,
+              unit_type text NOT NULL DEFAULT 'unknown',
+              title text NOT NULL DEFAULT '',
+              status text NOT NULL DEFAULT 'completed',
+              confidence numeric NOT NULL DEFAULT 0,
+              evidence_hash text NOT NULL DEFAULT '',
+              source_element_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+              missing_source_element_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+              source_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
+              source_ref_quality text NOT NULL DEFAULT 'none',
+              warnings jsonb NOT NULL DEFAULT '[]'::jsonb,
+              attempt_count integer NOT NULL DEFAULT 0,
+              last_error text NOT NULL DEFAULT '',
+              started_at timestamptz,
+              completed_at timestamptz,
+              updated_at timestamptz NOT NULL DEFAULT now(),
+              created_at timestamptz NOT NULL DEFAULT now(),
+              UNIQUE (job_id, unit_id)
+            )
+            """
+        )
+        conn.execute("ALTER TABLE extraction_map_unit_outputs ADD COLUMN IF NOT EXISTS attempt_count integer NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE extraction_map_unit_outputs ADD COLUMN IF NOT EXISTS last_error text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE extraction_map_unit_outputs ADD COLUMN IF NOT EXISTS started_at timestamptz")
+        conn.execute("ALTER TABLE extraction_map_unit_outputs ADD COLUMN IF NOT EXISTS completed_at timestamptz")
+        conn.execute("ALTER TABLE extraction_map_unit_outputs ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS extraction_compilation_plans (
+              id uuid PRIMARY KEY,
+              job_id uuid NOT NULL REFERENCES extraction_jobs(id) ON DELETE CASCADE,
+              plan_version text NOT NULL DEFAULT 'document_compilation_plan_v1',
+              status text NOT NULL DEFAULT 'pending_review',
+              payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+              operation_count integer NOT NULL DEFAULT 0,
+              human_approval_required boolean NOT NULL DEFAULT true,
+              source_coverage jsonb NOT NULL DEFAULT '{}'::jsonb,
+              review_gates jsonb NOT NULL DEFAULT '{}'::jsonb,
+              last_error text NOT NULL DEFAULT '',
+              created_at timestamptz NOT NULL DEFAULT now(),
+              updated_at timestamptz NOT NULL DEFAULT now(),
+              approved_at timestamptz,
+              approved_by text NOT NULL DEFAULT '',
+              rejected_at timestamptz,
+              rejection_reason text NOT NULL DEFAULT '',
+              UNIQUE (job_id, plan_version)
+            )
+            """
+        )
+        conn.execute("ALTER TABLE extraction_compilation_plans ADD COLUMN IF NOT EXISTS last_error text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE extraction_compilation_plans ADD COLUMN IF NOT EXISTS approved_at timestamptz")
+        conn.execute("ALTER TABLE extraction_compilation_plans ADD COLUMN IF NOT EXISTS approved_by text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE extraction_compilation_plans ADD COLUMN IF NOT EXISTS rejected_at timestamptz")
+        conn.execute("ALTER TABLE extraction_compilation_plans ADD COLUMN IF NOT EXISTS rejection_reason text NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS extraction_reduce_items (
+              id uuid PRIMARY KEY,
+              job_id uuid NOT NULL REFERENCES extraction_jobs(id) ON DELETE CASCADE,
+              item_kind text NOT NULL,
+              item_key text NOT NULL,
+              title text NOT NULL DEFAULT '',
+              status text NOT NULL DEFAULT 'suggested',
+              score numeric NOT NULL DEFAULT 0,
+              duplicate_count integer NOT NULL DEFAULT 1,
+              source_unit_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+              evidence_hashes jsonb NOT NULL DEFAULT '[]'::jsonb,
+              payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+              created_at timestamptz NOT NULL DEFAULT now(),
+              updated_at timestamptz NOT NULL DEFAULT now(),
+              UNIQUE (job_id, item_key)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS ai_retrieval_events (
               id uuid PRIMARY KEY,
               query text NOT NULL,
@@ -526,6 +663,12 @@ def ensure_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_documents_status ON ai_documents(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_versions_status ON ai_document_versions(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_document_version ON ai_chunks(document_id, version_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_compiled_pages_version ON ai_compiled_pages(version_id, page_type)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_compiled_pages_embedding_hnsw ON ai_compiled_pages USING hnsw (embedding vector_cosine_ops)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_embedding_model_specs_active ON embedding_model_specs(is_active, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_embedding_migration_jobs_target ON embedding_migration_jobs(target_spec_id, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_sources_document ON ai_document_sources(document_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_relations_status ON ai_document_relations(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_document_relations_source ON ai_document_relations(source_document_id, source_version_id)")
@@ -534,6 +677,10 @@ def ensure_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_session_created ON ai_chat_messages(session_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_jobs_version ON extraction_jobs(version_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_stage_outputs_job ON extraction_stage_outputs(job_id, stage)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_map_unit_outputs_job ON extraction_map_unit_outputs(job_id, unit_index)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_map_unit_outputs_status ON extraction_map_unit_outputs(job_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_compilation_plans_job ON extraction_compilation_plans(job_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_extraction_reduce_items_job ON extraction_reduce_items(job_id, item_kind, status)")
         conn.execute("DROP INDEX IF EXISTS idx_ai_chunks_content_fts")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_content_unaccent_fts ON ai_chunks USING gin (to_tsvector('simple', immutable_unaccent(content)))")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_chunks_metadata ON ai_chunks USING gin (metadata)")
@@ -662,6 +809,7 @@ def admin_reset_status() -> dict[str, Any]:
             "embedding_dimensions": settings.embedding_dimensions,
             "embedding_column_dimensions": embedding_column_dimensions_tx(conn, "embedding"),
             "embedding_new_column_dimensions": embedding_column_dimensions_tx(conn, "embedding_new"),
+            "compiled_page_embedding_column_dimensions": vector_column_dimensions_tx(conn, "ai_compiled_pages", "embedding"),
             "warning": (
                 ""
                 if settings.admin_reset_enabled
@@ -687,7 +835,7 @@ def reset_application_data(actor: str, reason: str = "") -> dict[str, Any]:
                         sql.SQL(", ").join(sql.Identifier(table) for table in existing_tables)
                     )
                 )
-            reset_ai_chunk_embedding_schema_tx(conn)
+            reset_vector_embedding_schema_tx(conn)
             ensure_kb_index_schema(conn)
             seed_search_taxonomy(conn)
             audit_tx(
@@ -705,8 +853,13 @@ def reset_application_data(actor: str, reason: str = "") -> dict[str, Any]:
             )
     with connection() as conn:
         embedding_dimensions = embedding_column_dimensions_tx(conn, "embedding")
+        compiled_page_embedding_dimensions = vector_column_dimensions_tx(conn, "ai_compiled_pages", "embedding")
         if embedding_dimensions != settings.embedding_dimensions:
             warnings.append(f"embedding_dimension_mismatch:{embedding_dimensions}:{settings.embedding_dimensions}")
+        if compiled_page_embedding_dimensions != settings.embedding_dimensions:
+            warnings.append(
+                f"compiled_page_embedding_dimension_mismatch:{compiled_page_embedding_dimensions}:{settings.embedding_dimensions}"
+            )
     return {
         "reset_id": reset_id,
         "status": "reset",
@@ -716,6 +869,7 @@ def reset_application_data(actor: str, reason: str = "") -> dict[str, Any]:
         "preserved_tables": list(ADMIN_RESET_PRESERVED_TABLES),
         "embedding_dimensions": settings.embedding_dimensions,
         "embedding_column_dimensions": embedding_dimensions,
+        "compiled_page_embedding_column_dimensions": compiled_page_embedding_dimensions,
         "warnings": warnings,
     }
 
@@ -767,9 +921,33 @@ def reset_ai_chunk_embedding_schema_tx(conn: Connection[Any]) -> None:
     )
 
 
+def reset_vector_embedding_schema_tx(conn: Connection[Any]) -> None:
+    reset_ai_chunk_embedding_schema_tx(conn)
+    if "ai_compiled_pages" not in existing_tables_tx(conn, ("ai_compiled_pages",)):
+        return
+    dimension = int(settings.embedding_dimensions)
+    conn.execute("DROP INDEX IF EXISTS idx_ai_compiled_pages_embedding_hnsw")
+    conn.execute("ALTER TABLE ai_compiled_pages DROP COLUMN IF EXISTS embedding")
+    conn.execute(f"ALTER TABLE ai_compiled_pages ADD COLUMN embedding vector({dimension})")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_compiled_pages_embedding_hnsw ON ai_compiled_pages USING hnsw (embedding vector_cosine_ops)"
+    )
+
+
 def embedding_column_dimensions_tx(conn: Connection[Any], column_name: str) -> int | None:
     if column_name not in {"embedding", "embedding_new"}:
         raise ValueError("invalid_embedding_column")
+    return vector_column_dimensions_tx(conn, "ai_chunks", column_name)
+
+
+def vector_column_dimensions_tx(conn: Connection[Any], table_name: str, column_name: str) -> int | None:
+    allowed_columns = {
+        ("ai_chunks", "embedding"),
+        ("ai_chunks", "embedding_new"),
+        ("ai_compiled_pages", "embedding"),
+    }
+    if (table_name, column_name) not in allowed_columns:
+        raise ValueError("invalid_vector_column")
     row = conn.execute(
         """
         SELECT a.atttypmod
@@ -777,15 +955,15 @@ def embedding_column_dimensions_tx(conn: Connection[Any], column_name: str) -> i
         JOIN pg_class c ON c.oid = a.attrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public'
-          AND c.relname = 'ai_chunks'
+          AND c.relname = %s
           AND a.attname = %s
           AND NOT a.attisdropped
         """,
-        (column_name,),
+        (table_name, column_name),
     ).fetchone()
     if not row:
         return None
-    value = row[0]
+    value = row["atttypmod"] if isinstance(row, dict) else row[0]
     return int(value) if value else None
 
 
@@ -1004,6 +1182,7 @@ def create_document_version(
                 )
 
             insert_chunks(conn, document_id, version_id, chunks)
+            upsert_compiled_pages_tx(conn, document_id, version_id, clean_title, chunks)
             job_id = persist_extraction_pipeline_artifacts(
                 conn,
                 document_id=document_id,
@@ -1077,6 +1256,7 @@ def replace_document_version_extraction(
         with conn.transaction():
             conn.execute("DELETE FROM ai_chunks WHERE version_id = %s", (version_id,))
             insert_chunks(conn, document_id, version_id, chunks)
+            upsert_compiled_pages_tx(conn, document_id, version_id, "", chunks)
             conn.execute("DELETE FROM extraction_jobs WHERE version_id = %s", (version_id,))
             job_id = persist_extraction_pipeline_artifacts(
                 conn,
@@ -1167,6 +1347,696 @@ def insert_chunks(conn: Connection[Any], document_id: str, version_id: str, chun
             """,
             rows,
         )
+
+
+def compiled_pages_from_chunks(
+    title: str,
+    chunks: list[dict[str, Any]],
+    *,
+    approved_compilation_plans: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    pages: list[dict[str, Any]] = []
+    full_sop = next((chunk for chunk in chunks if chunk_unit_type(chunk) == "full_sop" or chunk.get("section") == "full_sop"), None)
+    if full_sop:
+        source_chunks = [
+            chunk
+            for chunk in chunks
+            if chunk_unit_type(chunk) not in {"source_evidence_section", "visual_source_block"}
+        ]
+        source_chunk_indexes = [int_or_default(chunk.get("chunk_index")) for chunk in source_chunks]
+        source_unit_types: list[str] = []
+        for chunk in source_chunks:
+            append_unique(source_unit_types, chunk_unit_type(chunk) or str(chunk.get("section") or "body"))
+        page_title = pg_text(full_sop.get("heading") or title or "Document overview")
+        content_md = pg_text(full_sop.get("content"))
+        summary = first_non_empty_line(content_md)[:600] or content_md[:600]
+        full_sop_metadata = full_sop.get("metadata") if isinstance(full_sop.get("metadata"), dict) else {}
+        embedding = full_sop.get("embedding") if isinstance(full_sop.get("embedding"), list) else []
+        metadata = {
+            "compiled_from": "full_sop",
+            "retrieval_role": "broad_document_context",
+            "retrieval_layer": "compiled_page",
+            "unit_type": "compiled_document_overview",
+            "chunk_type": "compiled_document_overview",
+            "review_status": "approved",
+            "extraction_status": "structured",
+            "publish_blocked": False,
+            "embedding_source": "full_sop" if embedding else "",
+        }
+        embedding_spec = full_sop_metadata.get("embedding_spec_id")
+        if embedding_spec:
+            metadata["embedding_spec_id"] = str(embedding_spec)
+        pages.append(
+            {
+                "content_md": content_md,
+                "embedding": embedding,
+                "metadata": metadata,
+                "page_type": "document_overview",
+                "source_chunk_indexes": source_chunk_indexes,
+                "source_unit_types": source_unit_types,
+                "status": "draft",
+                "summary": summary,
+                "title": page_title,
+            }
+        )
+    for plan in approved_compilation_plans or []:
+        pages.extend(compiled_wiki_pages_from_plan(title, chunks, plan))
+    return pages
+
+
+def compiled_wiki_pages_from_plan(title: str, chunks: list[dict[str, Any]], plan: dict[str, Any]) -> list[dict[str, Any]]:
+    if str(plan.get("status") or "") != "approved":
+        return []
+    payload = plan.get("payload") if isinstance(plan.get("payload"), dict) else {}
+    operations = payload.get("operations") if isinstance(payload.get("operations"), list) else []
+    eligible_indexes_by_type: dict[str, list[int]] = {}
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        if str(operation.get("operation") or "create_or_update_unit") != "create_or_update_unit":
+            continue
+        if operation.get("publish_eligible") is False:
+            continue
+        unit_type = pg_text(operation.get("unit_type") or "text_section")
+        if unit_type in {"full_sop", "source_evidence_section", "visual_source_block"}:
+            continue
+        eligible_indexes_by_type.setdefault(unit_type, []).append(int_or_default(operation.get("index")))
+
+    chunk_by_index = {int_or_default(chunk.get("chunk_index")): chunk for chunk in chunks}
+    pages: list[dict[str, Any]] = []
+    for unit_type, indexes in eligible_indexes_by_type.items():
+        page_chunks = [chunk_by_index[index] for index in indexes if index in chunk_by_index]
+        if not page_chunks:
+            continue
+        page_title = f"{pg_text(title or 'Document')} - {unit_type.replace('_', ' ').title()}"
+        content_md = wiki_page_markdown(page_title, page_chunks)
+        embedding_chunk = next((chunk for chunk in page_chunks if isinstance(chunk.get("embedding"), list)), {})
+        embedding = embedding_chunk.get("embedding") if isinstance(embedding_chunk.get("embedding"), list) else []
+        source_chunk_indexes = [int_or_default(chunk.get("chunk_index")) for chunk in page_chunks]
+        source_unit_types: list[str] = []
+        for chunk in page_chunks:
+            append_unique(source_unit_types, chunk_unit_type(chunk) or unit_type)
+        metadata = {
+            "chunk_type": "compiled_wiki_page",
+            "compilation_plan_id": str(plan.get("id") or ""),
+            "compiled_from": "approved_compilation_plan",
+            "embedding_source": "first_wiki_source_chunk" if embedding else "",
+            "extraction_status": "structured",
+            "plan_version": str(plan.get("plan_version") or payload.get("plan_version") or "document_compilation_plan_v1"),
+            "publish_blocked": False,
+            "retrieval_layer": "compiled_page",
+            "retrieval_role": "curated_wiki_context",
+            "review_status": "approved",
+            "unit_type": "compiled_wiki_page",
+            "wiki_page_unit_type": unit_type,
+        }
+        pages.append(
+            {
+                "content_md": content_md,
+                "embedding": embedding,
+                "metadata": metadata,
+                "page_type": f"wiki_{compiled_page_slug(unit_type)}",
+                "source_chunk_indexes": source_chunk_indexes,
+                "source_unit_types": source_unit_types,
+                "status": "draft",
+                "summary": first_non_empty_line(content_md)[:600] or content_md[:600],
+                "title": page_title,
+            }
+        )
+    return pages
+
+
+def wiki_page_markdown(page_title: str, chunks: list[dict[str, Any]]) -> str:
+    lines = [f"# {page_title}", ""]
+    for chunk in chunks:
+        heading = pg_text(chunk.get("heading") or chunk_unit_type(chunk) or "Section")
+        content = pg_text(chunk.get("content"))
+        lines.extend([f"## {heading}", "", content, ""])
+    return "\n".join(lines).strip()
+
+
+def compiled_page_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", normalize_phrase(value)).strip("_")
+    return slug or "page"
+
+
+def compiled_page_row(
+    page: dict[str, Any],
+    *,
+    document_id: str,
+    version_id: str,
+) -> tuple[Any, ...]:
+    return (
+        str(uuid.uuid4()),
+        document_id,
+        version_id,
+        page["page_type"],
+        pg_text(page["title"]),
+        pg_text(page["content_md"]),
+        pg_text(page["summary"]),
+        pg_text(page["status"]),
+        jsonb_text(page["source_chunk_indexes"]),
+        jsonb_text(page["source_unit_types"]),
+        vector_literal(page.get("embedding") or []) if page.get("embedding") else None,
+        jsonb_text(page["metadata"]),
+    )
+
+
+def upsert_compiled_pages(conn: Connection[Any], document_id: str, version_id: str, pages: list[dict[str, Any]]) -> None:
+    if not pages:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO ai_compiled_pages (
+              id, document_id, version_id, page_type, title, content_md, summary,
+              status, source_chunk_indexes, source_unit_types, embedding, metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::vector, %s::jsonb)
+            ON CONFLICT (version_id, page_type) DO UPDATE
+            SET title = EXCLUDED.title,
+                content_md = EXCLUDED.content_md,
+                summary = EXCLUDED.summary,
+                status = EXCLUDED.status,
+                source_chunk_indexes = EXCLUDED.source_chunk_indexes,
+                source_unit_types = EXCLUDED.source_unit_types,
+                embedding = EXCLUDED.embedding,
+                metadata = EXCLUDED.metadata,
+                updated_at = now()
+            """,
+            [compiled_page_row(page, document_id=document_id, version_id=version_id) for page in pages],
+        )
+
+
+def upsert_compiled_pages_tx(conn: Connection[Any], document_id: str, version_id: str, title: str, chunks: list[dict[str, Any]]) -> None:
+    conn.execute("DELETE FROM ai_compiled_pages WHERE version_id = %s", (version_id,))
+    pages = compiled_pages_from_chunks(title, chunks)
+    upsert_compiled_pages(conn, document_id, version_id, pages)
+
+
+def materialize_compiled_pages_for_compilation_plan_tx(conn: Connection[Any], plan: dict[str, Any]) -> dict[str, int]:
+    if str(plan.get("status") or "") != "approved":
+        return {"compiled_page_count": 0, "wiki_page_count": 0}
+    job = conn.execute(
+        """
+        SELECT j.document_id::text AS document_id,
+               j.version_id::text AS version_id,
+               d.title
+        FROM extraction_jobs j
+        JOIN ai_documents d ON d.id = j.document_id
+        WHERE j.id = %s
+        """,
+        (plan.get("job_id"),),
+    ).fetchone()
+    if not job:
+        return {"compiled_page_count": 0, "wiki_page_count": 0}
+    job_row = dict(job)
+    rows = conn.execute(
+        """
+        SELECT chunk_index,
+               section,
+               heading,
+               content,
+               metadata,
+               embedding::text AS embedding
+        FROM ai_chunks
+        WHERE version_id = %s
+        ORDER BY chunk_index
+        """,
+        (job_row["version_id"],),
+    ).fetchall()
+    chunks = [compiled_page_chunk_from_row(dict(row)) for row in rows]
+    pages = compiled_pages_from_chunks(
+        str(job_row.get("title") or ""),
+        chunks,
+        approved_compilation_plans=[plan],
+    )
+    upsert_compiled_pages(conn, str(job_row["document_id"]), str(job_row["version_id"]), pages)
+    return {
+        "compiled_page_count": len(pages),
+        "wiki_page_count": sum(1 for page in pages if page.get("page_type") != "document_overview"),
+    }
+
+
+def compiled_page_chunk_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "embedding": qdrant_store.parse_vector(row.get("embedding")),
+    }
+
+
+def chunk_unit_type(chunk: dict[str, Any]) -> str:
+    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    return str(metadata.get("unit_type") or chunk.get("section") or "")
+
+
+def first_non_empty_line(value: str) -> str:
+    return next((line.strip() for line in value.splitlines() if line.strip()), "")
+
+
+def embedding_model_spec_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    provider = pg_text(metadata.get("embedding_provider") or "local_hash")
+    model = pg_text(metadata.get("embedding_model") or "local_hash")
+    dimensions = int_or_default(metadata.get("embedding_dimensions") or settings.embedding_dimensions)
+    spec_id = pg_text(metadata.get("embedding_spec_id") or embedding_spec_id(provider, model, dimensions))
+    return {
+        "dimensions": dimensions,
+        "is_active": True,
+        "model": model,
+        "provider": provider,
+        "spec_id": spec_id,
+        "status": "active",
+    }
+
+
+def upsert_embedding_model_spec_tx(conn: Connection[Any], spec: dict[str, Any]) -> None:
+    if spec.get("is_active"):
+        conn.execute("UPDATE embedding_model_specs SET is_active = false WHERE is_active = true AND spec_id <> %s", (spec["spec_id"],))
+    conn.execute(
+        """
+        INSERT INTO embedding_model_specs (
+          spec_id, provider, model, dimensions, status, is_active, activated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, CASE WHEN %s THEN now() ELSE NULL END)
+        ON CONFLICT (spec_id) DO UPDATE
+        SET provider = EXCLUDED.provider,
+            model = EXCLUDED.model,
+            dimensions = EXCLUDED.dimensions,
+            status = EXCLUDED.status,
+            is_active = EXCLUDED.is_active,
+            activated_at = CASE WHEN EXCLUDED.is_active THEN COALESCE(embedding_model_specs.activated_at, now()) ELSE embedding_model_specs.activated_at END
+        """,
+        (
+            spec["spec_id"],
+            spec["provider"],
+            spec["model"],
+            spec["dimensions"],
+            spec["status"],
+            spec["is_active"],
+            spec["is_active"],
+        ),
+    )
+
+
+def embedding_migration_item_counts_tx(conn: Connection[Any], target_spec_id: str) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT
+          (
+            SELECT COUNT(*)
+            FROM ai_chunks
+            WHERE COALESCE(metadata->>'embedding_spec_id', '') <> %s
+          ) AS chunk_count,
+          (
+            SELECT COUNT(*)
+            FROM ai_compiled_pages
+            WHERE embedding IS NOT NULL
+              AND COALESCE(metadata->>'embedding_spec_id', '') <> %s
+          ) AS compiled_page_count
+        """,
+        (target_spec_id, target_spec_id),
+    ).fetchone()
+    chunk_count = int(row["chunk_count"] or 0)
+    compiled_page_count = int(row["compiled_page_count"] or 0)
+    return {
+        "chunk_count": chunk_count,
+        "compiled_page_count": compiled_page_count,
+        "total_items": chunk_count + compiled_page_count,
+    }
+
+
+def active_embedding_spec_id_tx(conn: Connection[Any]) -> str:
+    row = conn.execute(
+        """
+        SELECT spec_id
+        FROM embedding_model_specs
+        WHERE is_active = true
+        ORDER BY activated_at DESC NULLS LAST, created_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return ""
+    return str(row["spec_id"] if isinstance(row, dict) else row[0])
+
+
+def create_embedding_migration_plan(
+    *,
+    provider: str,
+    model: str,
+    dimensions: int,
+    source_spec_id: str = "",
+) -> dict[str, Any]:
+    target_spec_id = embedding_spec_id(pg_text(provider), pg_text(model), int(dimensions))
+    with connection() as conn:
+        conn.row_factory = dict_row
+        with conn.transaction():
+            upsert_embedding_model_spec_tx(
+                conn,
+                {
+                    "dimensions": int(dimensions),
+                    "is_active": False,
+                    "model": pg_text(model),
+                    "provider": pg_text(provider),
+                    "spec_id": target_spec_id,
+                    "status": "available",
+                },
+            )
+            clean_source_spec_id = pg_text(source_spec_id) or active_embedding_spec_id_tx(conn)
+            counts = embedding_migration_item_counts_tx(conn, target_spec_id)
+            status = "completed" if counts["total_items"] == 0 else "pending"
+            row = conn.execute(
+                """
+                INSERT INTO embedding_migration_jobs (
+                  id, source_spec_id, target_spec_id, status, total_items,
+                  processed_items, error, completed_at
+                )
+                VALUES (%s, %s, %s, %s, %s, 0, '', CASE WHEN %s = 'completed' THEN now() ELSE NULL END)
+                RETURNING id::text,
+                          source_spec_id,
+                          target_spec_id,
+                          status,
+                          total_items,
+                          processed_items,
+                          error,
+                          created_at,
+                          updated_at,
+                          completed_at
+                """,
+                (
+                    str(uuid.uuid4()),
+                    clean_source_spec_id,
+                    target_spec_id,
+                    status,
+                    counts["total_items"],
+                    status,
+                ),
+            ).fetchone()
+    return {**dict(row), "metadata": counts}
+
+
+def embedding_migration_spec_tx(conn: Connection[Any], target_spec_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT spec_id, provider, model, dimensions, status, is_active
+        FROM embedding_model_specs
+        WHERE spec_id = %s
+        """,
+        (target_spec_id,),
+    ).fetchone()
+    if not row:
+        raise LookupError("embedding_model_spec_not_found")
+    return dict(row)
+
+
+def embedding_migration_job_tx(conn: Connection[Any], job_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT j.id::text AS id,
+               j.source_spec_id,
+               j.target_spec_id,
+               j.status,
+               j.total_items,
+               j.processed_items,
+               j.error,
+               j.created_at,
+               j.updated_at,
+               j.completed_at,
+               s.provider AS target_provider,
+               s.model AS target_model,
+               s.dimensions AS target_dimensions
+        FROM embedding_migration_jobs j
+        JOIN embedding_model_specs s ON s.spec_id = j.target_spec_id
+        WHERE j.id = %s
+        FOR UPDATE
+        """,
+        (job_id,),
+    ).fetchone()
+    if not row:
+        raise LookupError("embedding_migration_job_not_found")
+    return dict(row)
+
+
+def list_embedding_migration_jobs_tx(
+    conn: Connection[Any],
+    *,
+    statuses: list[str] | tuple[str, ...] | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 20), 100))
+    clean_statuses = list(dict.fromkeys(pg_text(status) for status in (statuses or []) if pg_text(status)))
+    where_sql = ""
+    params: list[Any] = []
+    if clean_statuses:
+        where_sql = "WHERE j.status = ANY(%s::text[])"
+        params.append(clean_statuses)
+    params.append(safe_limit)
+    rows = conn.execute(
+        f"""
+        SELECT j.id::text AS id,
+               j.source_spec_id,
+               j.target_spec_id,
+               j.status,
+               j.total_items,
+               j.processed_items,
+               j.error,
+               j.created_at,
+               j.updated_at,
+               j.completed_at,
+               s.provider AS target_provider,
+               s.model AS target_model,
+               s.dimensions AS target_dimensions
+        FROM embedding_migration_jobs j
+        JOIN embedding_model_specs s ON s.spec_id = j.target_spec_id
+        {where_sql}
+        ORDER BY j.created_at ASC, j.id ASC
+        LIMIT %s
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_embedding_migration_jobs(
+    *,
+    statuses: list[str] | tuple[str, ...] | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        return list_embedding_migration_jobs_tx(conn, statuses=statuses, limit=limit)
+
+
+def embedding_migration_candidate_rows_tx(conn: Connection[Any], target_spec_id: str, limit: int) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 1000))
+    chunk_rows = conn.execute(
+        """
+        SELECT 'chunk' AS item_kind,
+               c.id::text AS item_id,
+               c.heading,
+               c.content,
+               c.section,
+               c.metadata
+        FROM ai_chunks c
+        WHERE COALESCE(c.metadata->>'embedding_spec_id', '') <> %s
+        ORDER BY c.created_at ASC
+        LIMIT %s
+        """,
+        (target_spec_id, safe_limit),
+    ).fetchall()
+    candidates = [dict(row) for row in chunk_rows]
+    remaining = safe_limit - len(candidates)
+    if remaining <= 0:
+        return candidates
+    page_rows = conn.execute(
+        """
+        SELECT 'compiled_page' AS item_kind,
+               p.id::text AS item_id,
+               p.title AS heading,
+               p.content_md AS content,
+               p.page_type AS section,
+               p.metadata
+        FROM ai_compiled_pages p
+        WHERE p.embedding IS NOT NULL
+          AND COALESCE(p.metadata->>'embedding_spec_id', '') <> %s
+        ORDER BY p.updated_at ASC
+        LIMIT %s
+        """,
+        (target_spec_id, remaining),
+    ).fetchall()
+    return [*candidates, *[dict(row) for row in page_rows]]
+
+
+def embedding_migration_text(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    unit_type = str(metadata.get("unit_type") or row.get("section") or "text_section")
+    if row.get("item_kind") == "compiled_page":
+        return "\n".join([str(row.get("heading") or ""), str(row.get("content") or "")]).strip()
+    return embedding_text_for_unit(str(row.get("heading") or ""), str(row.get("content") or ""), unit_type)
+
+
+def embedding_migration_metadata(spec: dict[str, Any], job_id: str) -> dict[str, Any]:
+    return {
+        "embedding_dimensions": int(spec["dimensions"]),
+        "embedding_migrated_at": datetime.now(timezone.utc).isoformat(),
+        "embedding_migration_job_id": job_id,
+        "embedding_model": str(spec["model"]),
+        "embedding_provider": str(spec["provider"]),
+        "embedding_spec_id": str(spec["spec_id"]),
+    }
+
+
+def update_embedding_migration_items_tx(
+    conn: Connection[Any],
+    rows: list[dict[str, Any]],
+    vectors: list[list[float]],
+    spec: dict[str, Any],
+    job_id: str,
+) -> None:
+    if len(rows) != len(vectors):
+        raise ValueError("embedding_migration_vector_count_mismatch")
+    metadata_payload = jsonb_text(embedding_migration_metadata(spec, job_id))
+    for row, vector in zip(rows, vectors):
+        item_id = str(row.get("item_id") or "")
+        if not item_id:
+            continue
+        if row.get("item_kind") == "compiled_page":
+            conn.execute(
+                """
+                UPDATE ai_compiled_pages
+                SET embedding = %s::vector,
+                    metadata = metadata || %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (vector_literal(vector), metadata_payload, item_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE ai_chunks
+                SET embedding = %s::vector,
+                    metadata = metadata || %s::jsonb
+                WHERE id = %s
+                """,
+                (vector_literal(vector), metadata_payload, item_id),
+            )
+
+
+def update_embedding_migration_job_tx(
+    conn: Connection[Any],
+    *,
+    job_id: str,
+    status: str,
+    processed_items: int | None = None,
+    total_items: int | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        UPDATE embedding_migration_jobs
+        SET status = %s,
+            processed_items = COALESCE(%s, processed_items),
+            total_items = COALESCE(%s, total_items),
+            error = %s,
+            completed_at = CASE WHEN %s = 'completed' THEN COALESCE(completed_at, now()) ELSE completed_at END,
+            updated_at = now()
+        WHERE id = %s
+        RETURNING id::text,
+                  source_spec_id,
+                  target_spec_id,
+                  status,
+                  total_items,
+                  processed_items,
+                  error,
+                  created_at,
+                  updated_at,
+                  completed_at
+        """,
+        (status, processed_items, total_items, pg_text(error), status, job_id),
+    ).fetchone()
+    if not row:
+        raise LookupError("embedding_migration_job_not_found")
+    return dict(row)
+
+
+def run_embedding_migration_job(job_id: str, *, batch_size: int = 100) -> dict[str, Any]:
+    safe_batch_size = max(1, min(int(batch_size or 100), 1000))
+    with connection() as conn:
+        conn.row_factory = dict_row
+        with conn.transaction():
+            job = embedding_migration_job_tx(conn, job_id)
+            if job["status"] == "completed":
+                return {**job, "metadata": {"processed_batch": 0, "remaining_items": 0}}
+            if int(job["target_dimensions"] or 0) != int(settings.embedding_dimensions):
+                error = "embedding_dimension_schema_mismatch"
+                updated = update_embedding_migration_job_tx(conn, job_id=job_id, status="failed", error=error)
+                return {**updated, "metadata": {"processed_batch": 0, "remaining_items": job["total_items"], "error": error}}
+            conn.execute(
+                "UPDATE embedding_migration_jobs SET status = 'in_progress', updated_at = now() WHERE id = %s",
+                (job_id,),
+            )
+            candidates = embedding_migration_candidate_rows_tx(conn, job["target_spec_id"], safe_batch_size)
+            spec = {
+                "dimensions": int(job["target_dimensions"]),
+                "model": str(job["target_model"]),
+                "provider": str(job["target_provider"]),
+                "spec_id": str(job["target_spec_id"]),
+            }
+
+    if not candidates:
+        with connection() as conn:
+            conn.row_factory = dict_row
+            with conn.transaction():
+                counts = embedding_migration_item_counts_tx(conn, spec["spec_id"])
+                updated = update_embedding_migration_job_tx(
+                    conn,
+                    job_id=job_id,
+                    status="completed" if counts["total_items"] == 0 else "in_progress",
+                    total_items=max(int(job["total_items"] or 0), int(job["processed_items"] or 0) + counts["total_items"]),
+                    error="",
+                )
+        return {**updated, "metadata": {**counts, "processed_batch": 0, "remaining_items": counts["total_items"]}}
+
+    vectors: list[list[float]] = []
+    try:
+        vectors = embed_texts([embedding_migration_text(row) for row in candidates], dimensions=int(spec["dimensions"]))
+        with connection() as conn:
+            conn.row_factory = dict_row
+            with conn.transaction():
+                latest_job = embedding_migration_job_tx(conn, job_id)
+                update_embedding_migration_items_tx(conn, candidates, vectors, spec, job_id)
+                processed_items = int(latest_job["processed_items"] or 0) + len(candidates)
+                counts = embedding_migration_item_counts_tx(conn, spec["spec_id"])
+                total_items = max(int(latest_job["total_items"] or 0), processed_items + counts["total_items"])
+                status = "completed" if counts["total_items"] == 0 else "in_progress"
+                updated = update_embedding_migration_job_tx(
+                    conn,
+                    job_id=job_id,
+                    status=status,
+                    processed_items=processed_items,
+                    total_items=total_items,
+                    error="",
+                )
+        return {
+            **updated,
+            "metadata": {
+                **counts,
+                "processed_batch": len(candidates),
+                "remaining_items": counts["total_items"],
+            },
+        }
+    except Exception as exc:
+        with connection() as conn:
+            conn.row_factory = dict_row
+            with conn.transaction():
+                updated = update_embedding_migration_job_tx(
+                    conn,
+                    job_id=job_id,
+                    status="failed",
+                    error=str(exc)[:500],
+                )
+        return {**updated, "metadata": {"processed_batch": 0, "remaining_items": len(candidates), "error": str(exc)[:500]}}
 
 
 def sync_unresolved_relations_tx(conn: Connection[Any], document_id: str, version_id: str, actor: str) -> int:
@@ -1608,7 +2478,425 @@ def persist_extraction_pipeline_artifacts(
                 """,
                 rows,
             )
+    map_unit_rows = map_unit_outputs_from_artifacts(artifacts)
+    if map_unit_rows:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO extraction_map_unit_outputs (
+                  id, job_id, unit_id, unit_index, unit_type, title, status, confidence,
+                  evidence_hash, source_element_ids, missing_source_element_ids,
+                  source_refs, source_ref_quality, warnings, attempt_count, last_error,
+                  started_at, completed_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s, %s, now(), CASE WHEN %s = 'completed' THEN now() ELSE NULL END)
+                ON CONFLICT (job_id, unit_id) DO UPDATE
+                SET unit_index = EXCLUDED.unit_index,
+                    unit_type = EXCLUDED.unit_type,
+                    title = EXCLUDED.title,
+                    status = EXCLUDED.status,
+                    confidence = EXCLUDED.confidence,
+                    evidence_hash = EXCLUDED.evidence_hash,
+                    source_element_ids = EXCLUDED.source_element_ids,
+                    missing_source_element_ids = EXCLUDED.missing_source_element_ids,
+                    source_refs = EXCLUDED.source_refs,
+                    source_ref_quality = EXCLUDED.source_ref_quality,
+                    warnings = EXCLUDED.warnings,
+                    attempt_count = EXCLUDED.attempt_count,
+                    last_error = EXCLUDED.last_error,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at,
+                    updated_at = now()
+                """,
+                [
+                    (
+                        str(uuid.uuid4()),
+                        job_id,
+                        row["unit_id"],
+                        row["unit_index"],
+                        row["unit_type"],
+                        row["title"],
+                        row["status"],
+                        row["confidence"],
+                        row["evidence_hash"],
+                        jsonb_text(row["source_element_ids"]),
+                        jsonb_text(row["missing_source_element_ids"]),
+                        jsonb_text(row["source_refs"]),
+                        row["source_ref_quality"],
+                        jsonb_text(row["warnings"]),
+                        row["attempt_count"],
+                        row["last_error"],
+                        row["status"],
+                    )
+                    for row in map_unit_rows
+                ],
+            )
+    compilation_plan_rows = compilation_plans_from_artifacts(artifacts)
+    if compilation_plan_rows:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO extraction_compilation_plans (
+                  id, job_id, plan_version, status, payload, operation_count,
+                  human_approval_required, source_coverage, review_gates, last_error
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s::jsonb, %s)
+                ON CONFLICT (job_id, plan_version) DO UPDATE
+                SET status = EXCLUDED.status,
+                    payload = EXCLUDED.payload,
+                    operation_count = EXCLUDED.operation_count,
+                    human_approval_required = EXCLUDED.human_approval_required,
+                    source_coverage = EXCLUDED.source_coverage,
+                    review_gates = EXCLUDED.review_gates,
+                    last_error = EXCLUDED.last_error,
+                    updated_at = now()
+                """,
+                [
+                    (
+                        str(uuid.uuid4()),
+                        job_id,
+                        row["plan_version"],
+                        row["status"],
+                        jsonb_text(row["payload"]),
+                        row["operation_count"],
+                        row["human_approval_required"],
+                        jsonb_text(row["source_coverage"]),
+                        jsonb_text(row["review_gates"]),
+                        row["last_error"],
+                    )
+                    for row in compilation_plan_rows
+                ],
+            )
+    reduce_item_rows = reduce_items_from_artifacts(artifacts)
+    if reduce_item_rows:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO extraction_reduce_items (
+                  id, job_id, item_kind, item_key, title, status, score,
+                  duplicate_count, source_unit_ids, evidence_hashes, payload
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
+                ON CONFLICT (job_id, item_key) DO UPDATE
+                SET title = EXCLUDED.title,
+                    status = EXCLUDED.status,
+                    score = EXCLUDED.score,
+                    duplicate_count = EXCLUDED.duplicate_count,
+                    source_unit_ids = EXCLUDED.source_unit_ids,
+                    evidence_hashes = EXCLUDED.evidence_hashes,
+                    payload = EXCLUDED.payload,
+                    updated_at = now()
+                """,
+                [
+                    (
+                        str(uuid.uuid4()),
+                        job_id,
+                        row["item_kind"],
+                        row["item_key"],
+                        row["title"],
+                        row["status"],
+                        row["score"],
+                        row["duplicate_count"],
+                        jsonb_text(row["source_unit_ids"]),
+                        jsonb_text(row["evidence_hashes"]),
+                        jsonb_text(row["payload"]),
+                    )
+                    for row in reduce_item_rows
+                ],
+            )
     return job_id
+
+
+def reduce_items_from_artifacts(artifacts: list[Any]) -> list[dict[str, Any]]:
+    items_by_key: dict[str, dict[str, Any]] = {}
+    for map_unit in map_unit_outputs_from_artifacts(artifacts):
+        if map_unit["status"] not in {"completed", "blocked"}:
+            continue
+        title = pg_text(map_unit.get("title"))
+        if not title:
+            continue
+        unit_type = pg_text(map_unit.get("unit_type") or "unknown")
+        item_kind = "claim"
+        item_key = reduce_item_key(item_kind, unit_type, title)
+        item = items_by_key.setdefault(
+            item_key,
+            {
+                "duplicate_count": 0,
+                "evidence_hashes": [],
+                "item_key": item_key,
+                "item_kind": item_kind,
+                "payload": {
+                    "source": "map_unit_extracts",
+                    "unit_type": unit_type,
+                    "source_element_ids": [],
+                    "source_ref_quality": map_unit.get("source_ref_quality") or "none",
+                },
+                "score": 0.0,
+                "source_unit_ids": [],
+                "status": "suggested",
+                "title": title,
+            },
+        )
+        item["duplicate_count"] += 1
+        item["score"] = max(float_or_default(item.get("score")), float_or_default(map_unit.get("confidence")))
+        append_unique(item["source_unit_ids"], map_unit.get("unit_id"))
+        append_unique(item["evidence_hashes"], map_unit.get("evidence_hash"))
+        source_element_ids = item["payload"].setdefault("source_element_ids", [])
+        for element_id in map_unit.get("source_element_ids", []):
+            append_unique(source_element_ids, element_id)
+    return list(items_by_key.values())
+
+
+def reduce_item_key(item_kind: str, unit_type: str, title: str) -> str:
+    normalized = normalize_phrase(" ".join([unit_type, title]))
+    return f"{item_kind}:{normalized[:240]}"
+
+
+def append_unique(items: list[Any], value: Any) -> None:
+    if value in (None, "", []):
+        return
+    if value not in items:
+        items.append(value)
+
+
+def compilation_plans_from_artifacts(artifacts: list[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or artifact.get("artifact_type") != "document_compilation_plan":
+            continue
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        rows.append(
+            {
+                "human_approval_required": bool(payload.get("human_approval_required", True)),
+                "last_error": pg_text(artifact.get("error")),
+                "operation_count": int_or_default(payload.get("operation_count")),
+                "payload": json_safe(payload),
+                "plan_version": pg_text(payload.get("plan_version") or "document_compilation_plan_v1"),
+                "review_gates": json_safe(payload.get("review_gates") if isinstance(payload.get("review_gates"), dict) else {}),
+                "source_coverage": json_safe(payload.get("source_coverage") if isinstance(payload.get("source_coverage"), dict) else {}),
+                "status": "pending_review" if bool(payload.get("human_approval_required", True)) else "approved",
+            }
+        )
+    return rows
+
+
+def map_unit_outputs_from_artifacts(artifacts: list[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or artifact.get("artifact_type") != "map_unit_extracts":
+            continue
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        units = payload.get("units") if isinstance(payload.get("units"), list) else []
+        for fallback_index, unit in enumerate(units):
+            if not isinstance(unit, dict):
+                continue
+            unit_index = int_or_default(unit.get("index"), fallback_index)
+            unit_id = pg_text(unit.get("unit_id") or f"unit_{unit_index + 1}")
+            rows.append(
+                {
+                    "attempt_count": 1 if pg_text(unit.get("status") or "completed") in {"completed", "failed", "blocked", "skipped"} else 0,
+                    "confidence": float_or_default(unit.get("confidence")),
+                    "evidence_hash": pg_text(unit.get("evidence_hash")),
+                    "last_error": pg_text(unit.get("error")),
+                    "missing_source_element_ids": json_list(unit.get("missing_source_element_ids")),
+                    "source_element_ids": json_list(unit.get("source_element_ids")),
+                    "source_ref_quality": pg_text(unit.get("source_ref_quality") or "none"),
+                    "source_refs": json_list(unit.get("source_refs")),
+                    "status": pg_text(unit.get("status") or "completed"),
+                    "title": pg_text(unit.get("title")),
+                    "unit_id": unit_id,
+                    "unit_index": unit_index,
+                    "unit_type": pg_text(unit.get("unit_type") or "unknown"),
+                    "warnings": json_list(unit.get("warnings")),
+                }
+            )
+    return rows
+
+
+MAP_UNIT_STATUSES = {"pending", "in_progress", "completed", "failed", "blocked", "skipped"}
+COMPILATION_PLAN_STATUSES = {"pending_review", "approved", "rejected", "superseded"}
+
+
+def update_extraction_map_unit_status(
+    *,
+    job_id: str,
+    unit_id: str,
+    status: str,
+    error: str = "",
+    warnings: list[Any] | None = None,
+) -> dict[str, Any]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        row = update_extraction_map_unit_status_tx(
+            conn,
+            job_id=job_id,
+            unit_id=unit_id,
+            status=status,
+            error=error,
+            warnings=warnings,
+        )
+    if not row:
+        raise LookupError("extraction_map_unit_not_found")
+    return row
+
+
+def update_extraction_map_unit_status_tx(
+    conn: Connection[Any],
+    *,
+    job_id: str,
+    unit_id: str,
+    status: str,
+    error: str = "",
+    warnings: list[Any] | None = None,
+) -> dict[str, Any]:
+    clean_status = pg_text(status)
+    if clean_status not in MAP_UNIT_STATUSES:
+        raise ValueError("invalid_extraction_map_unit_status")
+    result = conn.execute(
+        """
+        UPDATE extraction_map_unit_outputs
+        SET status = %s,
+            last_error = %s,
+            warnings = %s::jsonb,
+            attempt_count = attempt_count + CASE WHEN %s = 'in_progress' THEN 1 ELSE 0 END,
+            started_at = CASE WHEN %s = 'in_progress' THEN now() ELSE started_at END,
+            completed_at = CASE WHEN %s IN ('completed', 'blocked', 'skipped') THEN now() ELSE completed_at END,
+            updated_at = now()
+        WHERE job_id = %s
+          AND unit_id = %s
+        RETURNING id::text AS id,
+                  job_id::text AS job_id,
+                  unit_id,
+                  unit_index,
+                  unit_type,
+                  title,
+                  status,
+                  confidence,
+                  evidence_hash,
+                  source_element_ids,
+                  missing_source_element_ids,
+                  source_refs,
+                  source_ref_quality,
+                  warnings,
+                  attempt_count,
+                  last_error,
+                  started_at,
+                  completed_at,
+                  updated_at,
+                  created_at
+        """,
+        (
+            clean_status,
+            pg_text(error),
+            jsonb_text(warnings or []),
+            clean_status,
+            clean_status,
+            clean_status,
+            job_id,
+            unit_id,
+        ),
+    ).fetchone()
+    return dict(result) if result else {}
+
+
+def update_extraction_compilation_plan_status(
+    *,
+    plan_id: str,
+    status: str,
+    actor: str,
+    rejection_reason: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    with connection() as conn:
+        conn.row_factory = dict_row
+        with conn.transaction():
+            row = update_extraction_compilation_plan_status_tx(
+                conn,
+                plan_id=plan_id,
+                status=status,
+                actor=actor,
+                rejection_reason=rejection_reason,
+                error=error,
+            )
+            if row and row.get("status") == "approved":
+                row["compiled_pages"] = materialize_compiled_pages_for_compilation_plan_tx(conn, row)
+    if not row:
+        raise LookupError("extraction_compilation_plan_not_found")
+    return row
+
+
+def update_extraction_compilation_plan_status_tx(
+    conn: Connection[Any],
+    *,
+    plan_id: str,
+    status: str,
+    actor: str,
+    rejection_reason: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    clean_status = pg_text(status)
+    if clean_status not in COMPILATION_PLAN_STATUSES:
+        raise ValueError("invalid_extraction_compilation_plan_status")
+    result = conn.execute(
+        """
+        UPDATE extraction_compilation_plans
+        SET status = %s,
+            last_error = %s,
+            approved_by = CASE WHEN %s = 'approved' THEN %s ELSE approved_by END,
+            approved_at = CASE WHEN %s = 'approved' THEN now() ELSE approved_at END,
+            rejected_at = CASE WHEN %s = 'rejected' THEN now() ELSE rejected_at END,
+            rejection_reason = CASE WHEN %s = 'rejected' THEN %s ELSE rejection_reason END,
+            updated_at = now()
+        WHERE id = %s
+        RETURNING id::text AS id,
+                  job_id::text AS job_id,
+                  plan_version,
+                  status,
+                  payload,
+                  operation_count,
+                  human_approval_required,
+                  source_coverage,
+                  review_gates,
+                  last_error,
+                  created_at,
+                  updated_at,
+                  approved_at,
+                  approved_by,
+                  rejected_at,
+                  rejection_reason
+        """,
+        (
+            clean_status,
+            pg_text(error),
+            clean_status,
+            pg_text(actor),
+            clean_status,
+            clean_status,
+            clean_status,
+            pg_text(rejection_reason),
+            plan_id,
+        ),
+    ).fetchone()
+    return dict(result) if result else {}
+
+
+def json_list(value: Any) -> list[Any]:
+    return json_safe(value) if isinstance(value, list) else []
+
+
+def int_or_default(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def float_or_default(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
 
 
 def artifact_payload_value(artifacts: list[Any], artifact_type: str, key: str) -> Any:
@@ -1807,14 +3095,102 @@ def list_extraction_pipeline(version_id: str) -> list[dict[str, Any]]:
             """,
             (job_ids,),
         ).fetchall()
+        map_units = conn.execute(
+            """
+            SELECT id::text AS id,
+                   job_id::text AS job_id,
+                   unit_id,
+                   unit_index,
+                   unit_type,
+                   title,
+                   status,
+                   confidence,
+                   evidence_hash,
+                   source_element_ids,
+                   missing_source_element_ids,
+                   source_refs,
+                   source_ref_quality,
+                   warnings,
+                   attempt_count,
+                   last_error,
+                   started_at,
+                   completed_at,
+                   updated_at,
+                   created_at
+            FROM extraction_map_unit_outputs
+            WHERE job_id::text = ANY(%s)
+            ORDER BY job_id, unit_index, unit_id
+            """,
+            (job_ids,),
+        ).fetchall()
+        compilation_plans = conn.execute(
+            """
+            SELECT id::text AS id,
+                   job_id::text AS job_id,
+                   plan_version,
+                   status,
+                   payload,
+                   operation_count,
+                   human_approval_required,
+                   source_coverage,
+                   review_gates,
+                   last_error,
+                   created_at,
+                   updated_at,
+                   approved_at,
+                   approved_by,
+                   rejected_at,
+                   rejection_reason
+            FROM extraction_compilation_plans
+            WHERE job_id::text = ANY(%s)
+            ORDER BY created_at, plan_version
+            """,
+            (job_ids,),
+        ).fetchall()
+        reduce_items = conn.execute(
+            """
+            SELECT id::text AS id,
+                   job_id::text AS job_id,
+                   item_kind,
+                   item_key,
+                   title,
+                   status,
+                   score,
+                   duplicate_count,
+                   source_unit_ids,
+                   evidence_hashes,
+                   payload,
+                   created_at,
+                   updated_at
+            FROM extraction_reduce_items
+            WHERE job_id::text = ANY(%s)
+            ORDER BY job_id, item_kind, title
+            """,
+            (job_ids,),
+        ).fetchall()
     outputs_by_job: dict[str, list[dict[str, Any]]] = {}
     for output in outputs:
         item = dict(output)
         outputs_by_job.setdefault(item["job_id"], []).append(item)
+    map_units_by_job: dict[str, list[dict[str, Any]]] = {}
+    for map_unit in map_units:
+        item = dict(map_unit)
+        map_units_by_job.setdefault(item["job_id"], []).append(item)
+    compilation_plans_by_job: dict[str, list[dict[str, Any]]] = {}
+    for plan in compilation_plans:
+        item = dict(plan)
+        compilation_plans_by_job.setdefault(item["job_id"], []).append(item)
+    reduce_items_by_job: dict[str, list[dict[str, Any]]] = {}
+    for reduce_item in reduce_items:
+        item = dict(reduce_item)
+        reduce_items_by_job.setdefault(item["job_id"], []).append(item)
     return [
         {
             **dict(job),
             "outputs": outputs_by_job.get(job["id"], []),
+            "map_units": map_units_by_job.get(job["id"], []),
+            "compilation_plans": compilation_plans_by_job.get(job["id"], []),
+            "reduce_items": reduce_items_by_job.get(job["id"], []),
         }
         for job in jobs
     ]
@@ -5554,6 +6930,205 @@ def pgvector_search(vector: list[float], filters: RetrievalFilters, limit: int) 
         return [dict(row) for row in rows]
 
 
+COMPILED_PAGE_FILTER_UNIT_TYPES = {"compiled_document_overview", "compiled_wiki_page", "document_overview", "full_sop"}
+
+
+def compiled_page_filter_sql(filters: RetrievalFilters) -> tuple[str, list[Any]]:
+    clauses = ["d.status = 'active'"]
+    params: list[Any] = []
+
+    statuses = filters.status or ["published"]
+    clauses.append("v.status = ANY(%s)")
+    params.append(statuses)
+
+    if statuses == ["published"]:
+        clauses.append("d.current_version_id = v.id")
+        clauses.append("v.publish_state = 'published_ready'")
+
+    if filters.document_ids:
+        clauses.append("p.document_id = ANY(%s)")
+        params.append(filters.document_ids)
+    if filters.audience:
+        clauses.append("((d.metadata->'audience') ?| %s OR (p.metadata->'audience') ?| %s)")
+        params.append(filters.audience)
+        params.append(filters.audience)
+    if filters.visibility:
+        clauses.append("COALESCE(p.metadata->>'visibility', d.metadata->>'visibility', 'internal_only') = ANY(%s)")
+        params.append(filters.visibility)
+    if filters.scope:
+        clauses.append("COALESCE(p.metadata->>'scope', p.metadata->>'retrieval_scope', d.metadata->>'scope', 'generic') = ANY(%s)")
+        params.append(filters.scope)
+    if filters.policy_type:
+        clauses.append("COALESCE(p.metadata->>'policy_type', d.metadata->>'policy_type', p.metadata->>'unit_type', p.page_type) = ANY(%s)")
+        params.append(filters.policy_type)
+    if filters.authority_level:
+        clauses.append("COALESCE(p.metadata->>'authority_level', d.metadata->>'authority_level', 'policy') = ANY(%s)")
+        params.append(filters.authority_level)
+    if filters.tags:
+        clauses.append("((d.metadata->'tags') ?| %s OR (p.metadata->'tags') ?| %s)")
+        params.append(filters.tags)
+        params.append(filters.tags)
+    if filters.case_reasons:
+        clauses.append("((d.metadata->'case_reasons') ?| %s OR (p.metadata->'case_reasons') ?| %s)")
+        params.append(filters.case_reasons)
+        params.append(filters.case_reasons)
+    if filters.vertical:
+        clauses.append("(d.metadata->>'vertical' = ANY(%s) OR p.metadata->>'vertical' = ANY(%s))")
+        params.append(filters.vertical)
+        params.append(filters.vertical)
+    if filters.category:
+        clauses.append("(d.metadata->>'category' = ANY(%s) OR p.metadata->>'category' = ANY(%s))")
+        params.append(filters.category)
+        params.append(filters.category)
+    if filters.collections:
+        clauses.append("p.metadata->>'collection_slug' = ANY(%s)")
+        params.append(filters.collections)
+    if filters.task_types:
+        clauses.append("(p.metadata->'task_type') ?| %s")
+        params.append(filters.task_types)
+    if filters.unit_types:
+        requested = {str(item) for item in filters.unit_types}
+        compiled_unit_types: list[str] = []
+        if requested & {"compiled_document_overview", "document_overview", "full_sop"}:
+            compiled_unit_types.append("compiled_document_overview")
+        if "compiled_wiki_page" in requested:
+            compiled_unit_types.append("compiled_wiki_page")
+        if compiled_unit_types:
+            clauses.append("COALESCE(p.metadata->>'unit_type', 'compiled_document_overview') = ANY(%s)")
+            params.append(compiled_unit_types)
+        else:
+            clauses.append("FALSE")
+
+    return " AND ".join(clauses), params
+
+
+def pgvector_compiled_page_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0 or not vector:
+        return []
+    where_sql, params = compiled_page_filter_sql(filters)
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT p.id AS chunk_id,
+                   p.document_id,
+                   p.version_id,
+                   d.title,
+                   COALESCE(p.metadata->>'source_filename', d.source_filename) AS source_filename,
+                   v.version_number,
+                   v.status,
+                   v.publish_state,
+                   v.review_status,
+                   d.status AS document_status,
+                   v.effective_from,
+                   v.published_at,
+                   (d.current_version_id = v.id) AS is_current_version,
+                   -1 AS chunk_index,
+                   p.page_type AS section,
+                   p.title AS heading,
+                   p.content_md AS content,
+                   p.metadata
+                     || jsonb_build_object(
+                          'unit_type', COALESCE(p.metadata->>'unit_type', 'compiled_document_overview'),
+                          'chunk_type', COALESCE(p.metadata->>'chunk_type', p.metadata->>'unit_type', 'compiled_document_overview'),
+                          'retrieval_scope', 'document',
+                          'retrieval_layer', 'compiled_page',
+                          'review_status', 'approved',
+                          'extraction_status', 'structured',
+                          'publish_blocked', false,
+                          'compiled_page_id', p.id::text,
+                          'source_chunk_indexes', p.source_chunk_indexes,
+                          'source_unit_types', p.source_unit_types
+                        ) AS metadata,
+                   1 - (p.embedding <=> %s::vector) AS score
+            FROM ai_compiled_pages p
+            JOIN ai_documents d ON d.id = p.document_id
+            JOIN ai_document_versions v ON v.id = p.version_id
+            WHERE {where_sql}
+              AND p.embedding IS NOT NULL
+            ORDER BY p.embedding <=> %s::vector
+            LIMIT %s
+            """,
+            [vector_literal(vector), *params, vector_literal(vector), limit],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def hydrate_compiled_page_vector_hits(hits: list[dict[str, Any]], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+    page_ids = [str(hit.get("chunk_id") or "") for hit in hits if hit.get("chunk_id")]
+    if not page_ids or limit <= 0:
+        return []
+    score_by_id = {str(hit.get("chunk_id")): float(hit.get("score") or 0.0) for hit in hits if hit.get("chunk_id")}
+    order_by_id = {page_id: index for index, page_id in enumerate(page_ids)}
+    where_sql, params = compiled_page_filter_sql(filters)
+    with connection() as conn:
+        conn.row_factory = dict_row
+        rows = conn.execute(
+            f"""
+            SELECT p.id AS chunk_id,
+                   p.document_id,
+                   p.version_id,
+                   d.title,
+                   COALESCE(p.metadata->>'source_filename', d.source_filename) AS source_filename,
+                   v.version_number,
+                   v.status,
+                   v.publish_state,
+                   v.review_status,
+                   d.status AS document_status,
+                   v.effective_from,
+                   v.published_at,
+                   (d.current_version_id = v.id) AS is_current_version,
+                   -1 AS chunk_index,
+                   p.page_type AS section,
+                   p.title AS heading,
+                   p.content_md AS content,
+                   p.metadata
+                     || jsonb_build_object(
+                          'unit_type', COALESCE(p.metadata->>'unit_type', 'compiled_document_overview'),
+                          'chunk_type', COALESCE(p.metadata->>'chunk_type', p.metadata->>'unit_type', 'compiled_document_overview'),
+                          'retrieval_scope', 'document',
+                          'retrieval_layer', 'compiled_page',
+                          'review_status', 'approved',
+                          'extraction_status', 'structured',
+                          'publish_blocked', false,
+                          'compiled_page_id', p.id::text,
+                          'source_chunk_indexes', p.source_chunk_indexes,
+                          'source_unit_types', p.source_unit_types
+                        ) AS metadata
+            FROM ai_compiled_pages p
+            JOIN ai_documents d ON d.id = p.document_id
+            JOIN ai_document_versions v ON v.id = p.version_id
+            WHERE {where_sql}
+              AND p.id = ANY(%s::uuid[])
+            """,
+            [*params, page_ids],
+        ).fetchall()
+    hydrated: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        page_id = str(item.get("chunk_id"))
+        item["score"] = score_by_id.get(page_id, 0.0)
+        hydrated.append(item)
+    hydrated.sort(key=lambda item: order_by_id.get(str(item.get("chunk_id")), len(order_by_id)))
+    return hydrated[:limit]
+
+
+def compiled_page_vector_search(vector: list[float], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0 or not vector:
+        return []
+    backend = settings.vector_backend
+    if backend in {"dual", "qdrant"} and qdrant_store.qdrant_configured():
+        try:
+            hits = qdrant_store.search_compiled_pages(vector, filters, limit)
+            rows = hydrate_compiled_page_vector_hits(hits, filters, limit)
+            if rows or backend == "qdrant":
+                return rows
+        except Exception:
+            if backend == "qdrant":
+                raise
+    return pgvector_compiled_page_search(vector, filters, limit)
+
+
 def hydrate_vector_hits(hits: list[dict[str, Any]], filters: RetrievalFilters, limit: int) -> list[dict[str, Any]]:
     chunk_ids = [str(hit.get("chunk_id") or "") for hit in hits if hit.get("chunk_id")]
     if not chunk_ids or limit <= 0:
@@ -5654,7 +7229,48 @@ def qdrant_index_rows_for_version(version_id: str) -> list[dict[str, Any]]:
             """,
             (version_id, ["structured", "manually_curated"]),
         ).fetchall()
-        return [row for row in (dict(row) for row in rows) if production_indexable_chunk_row(row)]
+        chunk_rows = [row for row in (dict(row) for row in rows) if production_indexable_chunk_row(row)]
+        compiled_page_rows = conn.execute(
+            """
+            SELECT p.id AS chunk_id,
+                   p.document_id,
+                   p.version_id,
+                   d.title,
+                   COALESCE(p.metadata->>'source_filename', d.source_filename) AS source_filename,
+                   v.version_number,
+                   v.status,
+                   CASE WHEN v.status = 'published' THEN 'published_ready' ELSE v.publish_state END AS publish_state,
+                   v.review_status,
+                   d.status AS document_status,
+                   (d.current_version_id = v.id) AS is_current_version,
+                   -1 AS chunk_index,
+                   p.page_type AS section,
+                   p.title AS heading,
+                   p.content_md AS content,
+                   p.metadata
+                     || jsonb_build_object(
+                          'unit_type', COALESCE(p.metadata->>'unit_type', 'compiled_document_overview'),
+                          'chunk_type', COALESCE(p.metadata->>'chunk_type', p.metadata->>'unit_type', 'compiled_document_overview'),
+                          'retrieval_scope', 'document',
+                          'retrieval_layer', 'compiled_page',
+                          'review_status', 'approved',
+                          'extraction_status', 'structured',
+                          'publish_blocked', false,
+                          'compiled_page_id', p.id::text,
+                          'source_chunk_indexes', p.source_chunk_indexes,
+                          'source_unit_types', p.source_unit_types
+                        ) AS metadata,
+                   p.embedding::text AS embedding
+            FROM ai_compiled_pages p
+            JOIN ai_documents d ON d.id = p.document_id
+            JOIN ai_document_versions v ON v.id = p.version_id
+            WHERE p.version_id = %s
+              AND p.embedding IS NOT NULL
+            ORDER BY p.page_type ASC
+            """,
+            (version_id,),
+        ).fetchall()
+        return [*chunk_rows, *[dict(row) for row in compiled_page_rows]]
 
 
 def sync_qdrant_version(version_id: str) -> dict[str, Any]:

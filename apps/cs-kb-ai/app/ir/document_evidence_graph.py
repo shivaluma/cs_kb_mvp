@@ -56,7 +56,9 @@ def build_document_evidence_graph(
     )
 
     lower = filename.lower()
-    if lower.endswith((".xlsx", ".xlsm", ".xls")) or "sheets" in raw_context:
+    if is_image_asset(lower, content_type):
+        _add_image_asset_element(graph, filename, content_type, data, raw_text, raw_context)
+    elif lower.endswith((".xlsx", ".xlsm", ".xls")) or "sheets" in raw_context:
         _add_spreadsheet_elements(graph, filename, content_type, raw_context)
     elif lower.endswith(".md") or content_type in {"text/markdown", "text/x-markdown"}:
         _add_markdown_elements(graph, filename, content_type, raw_text)
@@ -65,12 +67,212 @@ def build_document_evidence_graph(
     else:
         _add_block_elements(graph, filename, content_type, blocks, default_kind="text")
 
+    _add_embedded_image_elements(graph, filename, raw_context)
+
     visual_layout = raw_context.get("visual_layout") if isinstance(raw_context.get("visual_layout"), dict) else {}
     if visual_layout:
         _add_visual_layout_elements(graph, filename, visual_layout)
 
     _add_precedence_relations(graph)
     return graph
+
+
+def is_image_asset(filename: str, content_type: str) -> bool:
+    return filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".tif", ".tiff")) or content_type.startswith("image/")
+
+
+def _add_image_asset_element(
+    graph: DocumentEvidenceGraph,
+    filename: str,
+    content_type: str,
+    data: bytes,
+    raw_text: str,
+    raw_context: dict[str, Any],
+) -> None:
+    container_id = "image_1"
+    source_ref = {
+        "source_type": "image",
+        "source_file": filename,
+        "mime_type": content_type,
+        "byte_size": len(data or b""),
+    }
+    graph.containers.append(
+        Container(
+            container_id=container_id,
+            kind="image",
+            parent_id="document",
+            order_index=1,
+            metadata=source_ref,
+        )
+    )
+    text = raw_text.strip() or f"Image asset uploaded: {filename}"
+    graph.source_elements.append(
+        SourceElement(
+            element_id="image_asset_1",
+            kind="image_asset",
+            container_id=container_id,
+            text=text,
+            confidence=0.6,
+            provenance=Provenance(
+                parser_name="image_asset_parser",
+                parser_version=IR_PARSER_VERSION,
+                extraction_method="visual_asset",
+                source_locator=source_ref,
+                raw_excerpt_hash=excerpt_hash(text),
+            ),
+            metadata={
+                "requires_caption": True,
+                "source_refs": [source_ref],
+            },
+        )
+    )
+    for caption in _image_caption_entries(raw_context):
+        _add_image_caption_element(
+            graph,
+            container_id=container_id,
+            source_ref=source_ref,
+            describes_element_id="image_asset_1",
+            text=_caption_text(caption),
+            confidence=_caption_confidence(caption),
+            model=str(caption.get("model") or ""),
+        )
+
+
+def _add_embedded_image_elements(graph: DocumentEvidenceGraph, filename: str, raw_context: dict[str, Any]) -> None:
+    images = raw_context.get("embedded_images") if isinstance(raw_context.get("embedded_images"), list) else []
+    for index, image in enumerate(images, start=1):
+        if not isinstance(image, dict):
+            continue
+        image_id = str(image.get("image_id") or image.get("id") or f"image_{index}").strip()
+        slug = _slug(image_id) or str(index)
+        element_id = f"embedded_image_{slug}"
+        container_id = element_id
+        bbox = _bbox(image.get("bbox"))
+        page_number = _int(image.get("page") or image.get("page_number"))
+        source_ref = {
+            "source_type": "embedded_image",
+            "source_file": filename,
+            "image_id": image_id,
+            "page": page_number,
+            "bbox": bbox,
+            "mime_type": image.get("mime_type") or image.get("content_type") or "",
+            "byte_size": image.get("byte_size") or image.get("size") or 0,
+        }
+        source_ref = {key: value for key, value in source_ref.items() if value not in (None, "", [])}
+        graph.containers.append(
+            Container(
+                container_id=container_id,
+                kind="image",
+                parent_id="document",
+                page_number=page_number,
+                bbox=bbox,
+                order_index=index,
+                metadata=source_ref,
+            )
+        )
+        text = str(image.get("alt_text") or image.get("description") or f"Embedded image: {image_id}").strip()
+        graph.source_elements.append(
+            SourceElement(
+                element_id=element_id,
+                kind="image_asset",
+                container_id=container_id,
+                text=text,
+                bbox=bbox,
+                page_number=page_number,
+                confidence=float(image.get("confidence") or 0.6),
+                provenance=Provenance(
+                    parser_name="embedded_image_parser",
+                    parser_version=IR_PARSER_VERSION,
+                    extraction_method="embedded_visual_asset",
+                    source_locator=source_ref,
+                    raw_excerpt_hash=excerpt_hash(text),
+                ),
+                metadata={
+                    "requires_caption": True,
+                    "source_refs": [source_ref],
+                },
+            )
+        )
+        caption_text = str(image.get("caption") or "").strip()
+        if caption_text:
+            _add_image_caption_element(
+                graph,
+                container_id=container_id,
+                source_ref=source_ref,
+                describes_element_id=element_id,
+                text=caption_text,
+                confidence=float(image.get("caption_confidence") or image.get("confidence") or 0.75),
+                model=str(image.get("caption_model") or image.get("model") or ""),
+            )
+
+
+def _add_image_caption_element(
+    graph: DocumentEvidenceGraph,
+    *,
+    container_id: str,
+    source_ref: dict[str, Any],
+    describes_element_id: str,
+    text: str,
+    confidence: float,
+    model: str,
+) -> None:
+    caption_text = text.strip()
+    if not caption_text:
+        return
+    element_id = f"image_caption_{sum(1 for element in graph.source_elements if element.kind == 'image_caption') + 1}"
+    provenance = Provenance(
+        parser_name="image_caption_parser",
+        parser_version=IR_PARSER_VERSION,
+        extraction_method="visual_caption",
+        source_locator=source_ref,
+        raw_excerpt_hash=excerpt_hash(caption_text),
+    )
+    graph.source_elements.append(
+        SourceElement(
+            element_id=element_id,
+            kind="image_caption",
+            container_id=container_id,
+            text=caption_text,
+            confidence=confidence,
+            provenance=provenance,
+            metadata={
+                "caption_status": "generated",
+                "describes_element_id": describes_element_id,
+                "model": model,
+                "source_refs": [source_ref],
+            },
+        )
+    )
+    graph.relations.append(
+        Relation(
+            relation_id=f"describes_{element_id}_{describes_element_id}",
+            kind="describes",
+            source_id=element_id,
+            target_id=describes_element_id,
+            confidence=confidence,
+            provenance=provenance,
+        )
+    )
+
+
+def _image_caption_entries(raw_context: dict[str, Any]) -> list[dict[str, Any]]:
+    captions = raw_context.get("image_captions") if isinstance(raw_context.get("image_captions"), list) else []
+    output = [caption for caption in captions if isinstance(caption, dict) and _caption_text(caption)]
+    single_caption = raw_context.get("image_caption")
+    if isinstance(single_caption, str) and single_caption.strip():
+        output.append({"text": single_caption.strip()})
+    return output
+
+
+def _caption_text(caption: dict[str, Any]) -> str:
+    return str(caption.get("text") or caption.get("caption") or caption.get("description") or "").strip()
+
+
+def _caption_confidence(caption: dict[str, Any]) -> float:
+    try:
+        return float(caption.get("confidence") or 0.75)
+    except (TypeError, ValueError):
+        return 0.75
 
 
 def _add_block_elements(

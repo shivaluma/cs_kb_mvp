@@ -69,6 +69,58 @@ class RepositoryVectorBackendTest(unittest.TestCase):
         self.assertIn("COALESCE(c.metadata->>'source_evidence_only', 'false') <> 'true'", fake.query)
         self.assertIn("COALESCE(c.metadata->>'unit_type', '') NOT IN ('source_evidence_section', 'visual_source_block')", fake.query)
         self.assertIn(["structured", "manually_curated"], fake.params)
+        self.assertIn("FROM ai_compiled_pages p", fake.query)
+        self.assertIn("'retrieval_layer', 'compiled_page'", fake.query)
+
+    def test_compiled_page_vector_search_uses_compiled_pages_and_published_filters(self) -> None:
+        fake = RecordingConnection()
+
+        @contextmanager
+        def fake_connection():
+            yield fake
+
+        with patch("app.repository.connection", fake_connection):
+            rows = repository.compiled_page_vector_search([0.1, 0.2], RetrievalFilters(), 5)
+
+        self.assertEqual(rows, [])
+        self.assertIn("FROM ai_compiled_pages p", fake.query)
+        self.assertIn("p.embedding IS NOT NULL", fake.query)
+        self.assertIn("p.embedding <=> %s::vector", fake.query)
+        self.assertIn("d.current_version_id = v.id", fake.query)
+        self.assertIn("v.publish_state = 'published_ready'", fake.query)
+        self.assertIn("'compiled_document_overview'", fake.query)
+
+    def test_compiled_page_vector_search_can_filter_wiki_pages(self) -> None:
+        fake = RecordingConnection()
+
+        @contextmanager
+        def fake_connection():
+            yield fake
+
+        with patch("app.repository.connection", fake_connection):
+            rows = repository.compiled_page_vector_search(
+                [0.1, 0.2],
+                RetrievalFilters(unit_types=["compiled_wiki_page"]),
+                5,
+            )
+
+        self.assertEqual(rows, [])
+        self.assertIn("COALESCE(p.metadata->>'unit_type', 'compiled_document_overview') = ANY(%s)", fake.query)
+        self.assertIn(["compiled_wiki_page"], fake.params)
+
+    def test_compiled_page_vector_search_uses_qdrant_when_configured(self) -> None:
+        hydrated = [{"chunk_id": "page-1", "score": 0.82}]
+        with patch("app.repository.settings.vector_backend", "dual"), \
+            patch("app.repository.qdrant_store.qdrant_configured", return_value=True), \
+            patch("app.repository.qdrant_store.search_compiled_pages", return_value=[{"chunk_id": "page-1", "score": 0.82}]) as qdrant_search, \
+            patch("app.repository.hydrate_compiled_page_vector_hits", return_value=hydrated) as hydrate, \
+            patch("app.repository.pgvector_compiled_page_search") as pgvector_search:
+            rows = repository.compiled_page_vector_search([0.1, 0.2], RetrievalFilters(), 5)
+
+        self.assertEqual(rows, hydrated)
+        qdrant_search.assert_called_once()
+        hydrate.assert_called_once()
+        pgvector_search.assert_not_called()
 
     def test_qdrant_post_filter_rejects_workflow_chunk_without_bbox(self) -> None:
         self.assertFalse(
@@ -97,8 +149,8 @@ class RecordingConnection:
         self.row_factory = None
 
     def execute(self, query: str, params: tuple[object, ...]) -> "RecordingConnection":
-        self.query = query
-        self.params = params
+        self.query = f"{self.query}\n{query}" if self.query else query
+        self.params = (*self.params, *params)
         return self
 
     def fetchall(self) -> list[dict[str, object]]:

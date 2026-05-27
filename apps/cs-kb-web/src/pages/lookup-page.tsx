@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 
 import { RouteLoading } from "@/components/route-loading";
 import { defaultFilters } from "@/constants";
@@ -7,6 +8,7 @@ import { useCollections, useRecordKBEvent } from "@/hooks/api/kb-index";
 import { useAISuggest, useSearch, useSearchAutocomplete, useSearchFilterOptions, useSOP } from "@/hooks/api/search";
 import { useUrlSearch } from "@/hooks/use-url-search";
 import { compactFilters, optionizeFilterValues, toSearchResult } from "@/lib/format";
+import { buildSopSourceLink, SOP_SOURCE_STORAGE_KEY } from "@/lib/sop-source-link";
 import { useFeedback } from "@/providers/feedback-context";
 import type { AISuggestion, FilterOption, FilterState, Macro, RetrievalResult, SOP } from "@/types";
 
@@ -15,6 +17,7 @@ const LookupWorkspace = lazy(() =>
 );
 
 export function LookupPage() {
+  const navigate = useNavigate();
   const { getParam, setParams } = useUrlSearch();
   const { reportError, reportNotice } = useFeedback();
   const query = getParam("q", "");
@@ -239,6 +242,35 @@ export function LookupPage() {
     setParams({ chunk: match.chunk_id });
   }
 
+  function openDocumentSource(match: RetrievalResult) {
+    const link = buildSopSourceLink(match, query);
+    if (!link) {
+      selectDocumentMatch(match);
+      return;
+    }
+    const rank = semanticResults.findIndex((result) => result.chunk_id === match.chunk_id) + 1;
+    sessionStorage.setItem(SOP_SOURCE_STORAGE_KEY, JSON.stringify(match));
+    eventMutation.mutate({
+      action: "full_sop_open",
+      entity_type: "chunk",
+      entity_id: match.chunk_id,
+      metadata: {
+        search_event_id: searchEventId,
+        query,
+        rank: rank > 0 ? rank : undefined,
+        target_title: match.heading || match.title,
+        document_title: match.title,
+        sop_id: link.sopId,
+        surface: "lookup_source_card",
+      },
+    });
+    void navigate({
+      to: "/sop/$sopId",
+      params: { sopId: link.sopId },
+      search: link.search as never,
+    });
+  }
+
   async function copyMacro(macro: Macro) {
     setCopied("");
     setCopyError("");
@@ -278,6 +310,7 @@ export function LookupPage() {
         onAskAI={askAI}
         onCopyMacro={copyMacro}
         onOpenSOP={openSOP}
+        onOpenSourceMatch={openDocumentSource}
         onRunSearch={() => runSearch()}
         onSuggestionSelect={(suggestion) => {
           setQuery(suggestion);

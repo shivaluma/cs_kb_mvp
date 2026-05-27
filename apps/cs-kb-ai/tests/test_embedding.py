@@ -82,6 +82,18 @@ class EmbeddingClientTest(unittest.TestCase):
         self.assertEqual(len(vector), 1536)
         self.assertGreater(sum(abs(value) for value in vector), 0)
 
+    def test_embedding_runtime_metadata_has_stable_spec_id(self) -> None:
+        with patch.object(embedding.settings, "embedding_provider", "openrouter"), \
+            patch.object(embedding.settings, "embedding_api_key", "key"), \
+            patch.object(embedding.settings, "embedding_model", "openai/text-embedding-3-small"), \
+            patch.object(embedding.settings, "embedding_dimensions", 1536):
+            metadata = embedding.embedding_runtime_metadata()
+
+        self.assertEqual(metadata["embedding_provider"], "openrouter")
+        self.assertEqual(metadata["embedding_model"], "openai/text-embedding-3-small")
+        self.assertEqual(metadata["embedding_dimensions"], 1536)
+        self.assertEqual(metadata["embedding_spec_id"], "openrouter:openai/text-embedding-3-small:1536")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -135,6 +135,32 @@ export function sourceDisplayLabel(displayUnitType: string) {
   return "SOP source";
 }
 
+export function sourceMatchHint(group: SourceDisplayGroup) {
+  if (group.sourceResolutionStatus && group.sourceResolutionStatus !== "resolved") {
+    return "Open the SOP to verify the source";
+  }
+  const tableHighlight = group.highlights.find((highlight) => highlight.match_strategy === "table_row_anchor");
+  if (tableHighlight) {
+    const section = group.matches[0]?.sectionTitle || group.category || "this source";
+    return `Matched a table row in ${section}`;
+  }
+  if (group.highlights.length) {
+    const section = group.matches[0]?.sectionTitle || group.category || "this source";
+    return `Matched highlighted text in ${section}`;
+  }
+  if (group.fallbackExcerpts.length) {
+    return "Matched a relevant excerpt";
+  }
+  return "Matched published SOP text";
+}
+
+export function sourceMatchFacts(match: SourceDisplayMatch, options: { debug?: boolean } = {}) {
+  return [
+    match.sectionTitle,
+    options.debug ? match.unitType : "",
+  ].filter(Boolean);
+}
+
 function createSourceDisplayGroup(result: RetrievalResult, context: DisplayContext): SourceDisplayGroup {
   const highlights = normalizeHighlightsForResult(result, context);
   return {

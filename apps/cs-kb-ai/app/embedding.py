@@ -43,12 +43,20 @@ def remote_embedding_configured() -> bool:
 
 def embedding_runtime_metadata() -> dict[str, object]:
     remote_enabled = remote_embedding_configured()
+    provider = settings.embedding_provider if remote_enabled else "local_hash"
+    model = settings.embedding_model if remote_enabled else "local_hash"
+    dimensions = settings.embedding_dimensions
     return {
-        "embedding_provider": settings.embedding_provider if remote_enabled else "local_hash",
-        "embedding_model": settings.embedding_model if remote_enabled else "local_hash",
-        "embedding_dimensions": settings.embedding_dimensions,
+        "embedding_provider": provider,
+        "embedding_model": model,
+        "embedding_dimensions": dimensions,
+        "embedding_spec_id": embedding_spec_id(provider, model, dimensions),
         "embedded_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def embedding_spec_id(provider: str, model: str, dimensions: int) -> str:
+    return f"{provider}:{model}:{dimensions}"
 
 
 def local_hash_embedding(text: str, dims: int) -> list[float]:

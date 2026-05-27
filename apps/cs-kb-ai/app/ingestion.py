@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from difflib import SequenceMatcher
@@ -21,6 +22,7 @@ from app.openrouter import (
     extract_workflow_units_v2,
     finish_ai_breakdown_capture,
     format_source_evidence_view,
+    describe_image_asset,
     refine_extracted_units,
     start_ai_breakdown_capture,
     suggest_document_metadata,
@@ -37,9 +39,11 @@ from app.text_processing import (
     classify_document,
     ensure_full_sop_layer,
     extract_docx_structure,
+    extract_docx_embedded_images,
     extract_spreadsheet,
     extract_text,
     is_docx_file,
+    is_image_file,
     is_spreadsheet_file,
     normalize_cell_text,
     render_pdf_pages_as_data_urls,
@@ -60,6 +64,9 @@ from app.visual_layout import (
 )
 from app.workflow_v3 import extract_step_code as workflow_v3_extract_step_code
 from app.workflow_v3 import visible_step_codes_from_sources as workflow_v3_visible_step_codes_from_sources
+
+
+MAX_DOCX_EMBEDDED_IMAGE_CAPTION_BYTES = 4 * 1024 * 1024
 
 
 CONDITION_ACTION_SIGNALS = [
@@ -186,6 +193,7 @@ def prepare_document_version(
     evidence_units = extract_semantic_units(evidence_graph)
     evidence_graph.semantic_units = evidence_units
     semantic_validation = verify_semantic_units(evidence_units)
+    map_unit_payload = map_unit_extracts_payload(evidence_graph, evidence_units)
     adjudication_report = adjudicate_disagreements(evidence_graph)
     workflow_validation = (
         validate_workflow_graph(evidence_graph)
@@ -208,6 +216,11 @@ def prepare_document_version(
             "map",
             "document_evidence_graph",
             evidence_graph_artifact(evidence_graph, evidence_profile),
+        ),
+        stage_artifact(
+            "map",
+            "map_unit_extracts",
+            map_unit_payload,
         ),
         stage_artifact(
             "observe",
@@ -437,6 +450,13 @@ def prepare_document_version(
     source_chunks = attach_evidence_metadata_to_legacy_chunks(source_chunks, evidence_graph)
     if evidence_blockers:
         source_chunks = block_chunks_for_evidence_validation(source_chunks, evidence_blockers)
+    pipeline_artifacts.append(
+        stage_artifact(
+            "plan",
+            "document_compilation_plan",
+            document_compilation_plan_payload(classification, source_chunks, map_unit_payload),
+        )
+    )
     chunk_support_validation = validate_chunks_supported(source_chunks)
     pipeline_artifacts.append(
         stage_artifact(
@@ -499,6 +519,15 @@ def prepare_document_version(
 
     chunks = embed_chunks(source_chunks, metadata.model_dump(), enrichment, filename)
     pipeline_artifacts.append(stage_artifact("refine", "draft_units", draft_units_payload(source_chunks)))
+    reduce_reconcile_verification = reduce_reconcile_verification_payload(chunks)
+    pipeline_artifacts.append(
+        stage_artifact(
+            "verify",
+            "reduce_reconcile_verification",
+            reduce_reconcile_verification,
+            status="failed" if reduce_reconcile_verification["conflict_count"] else "completed",
+        )
+    )
     verification_report = verification_report_payload(chunks, classification.document_type)
     pipeline_artifacts.append(stage_artifact("verify", "verification_report", verification_report, status="failed" if verification_report["hard_blockers"] else "completed"))
     pipeline_artifacts.append(stage_artifact("verify", "publish_readiness_report", verification_report, status="failed" if verification_report["hard_blockers"] else "completed"))
@@ -522,13 +551,68 @@ def extract_raw_evidence(filename: str, content_type: str, data: bytes) -> tuple
         return raw_text, warnings, {"spreadsheet_chunks": spreadsheet_chunks, "sheets": spreadsheet_rows(filename.lower(), data)}
     if is_docx_file(filename.lower(), content_type):
         raw_text, blocks, tables = extract_docx_structure(data, filename=filename)
-        return raw_text, [], {"docx_blocks": blocks, "docx_tables": tables}
+        raw_context: dict[str, Any] = {"docx_blocks": blocks, "docx_tables": tables}
+        embedded_images = extract_docx_embedded_images(
+            data,
+            filename=filename,
+            include_data_url=True,
+            max_data_url_bytes=MAX_DOCX_EMBEDDED_IMAGE_CAPTION_BYTES,
+        )
+        if embedded_images:
+            embedded_images, image_warnings = caption_docx_embedded_images(filename, embedded_images)
+            raw_context["embedded_images"] = embedded_images
+            return raw_text, image_warnings, raw_context
+        return raw_text, [], raw_context
     raw_text, warnings = extract_text(filename, content_type, data)
-    return raw_text, warnings, {}
+    raw_context: dict[str, Any] = {}
+    if is_image_file(filename.lower(), content_type):
+        caption, caption_warnings, caption_error = describe_image_asset(
+            filename=filename,
+            content_type=content_type,
+            image_data_url=image_data_url(content_type, data),
+        )
+        warnings.extend(caption_warnings)
+        if caption:
+            raw_context["image_captions"] = [caption]
+        if caption_error and caption_error != "openrouter_disabled":
+            raw_context["image_caption_error"] = caption_error
+    return raw_text, warnings, raw_context
+
+
+def caption_docx_embedded_images(filename: str, embedded_images: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    captioned_images: list[dict[str, Any]] = []
+    for image in embedded_images:
+        clean_image = dict(image)
+        image_data_url = str(clean_image.pop("image_data_url", "") or "")
+        omitted_reason = str(clean_image.pop("image_data_omitted_reason", "") or "")
+        if omitted_reason:
+            clean_image["caption_error"] = omitted_reason
+            warnings.append(omitted_reason)
+        if image_data_url:
+            caption, caption_warnings, caption_error = describe_image_asset(
+                filename=f"{filename}:{clean_image.get('image_id') or 'embedded_image'}",
+                content_type=str(clean_image.get("mime_type") or ""),
+                image_data_url=image_data_url,
+            )
+            warnings.extend(caption_warnings)
+            if caption:
+                clean_image["caption"] = str(caption.get("text") or "")
+                clean_image["caption_confidence"] = caption.get("confidence")
+                clean_image["caption_model"] = caption.get("model")
+            if caption_error and caption_error != "openrouter_disabled":
+                clean_image["caption_error"] = caption_error
+        captioned_images.append(clean_image)
+    return captioned_images, list(dict.fromkeys(warnings))
 
 
 def is_pdf_file(filename: str, content_type: str) -> bool:
     return filename.lower().endswith(".pdf") or content_type == "application/pdf"
+
+
+def image_data_url(content_type: str, data: bytes) -> str:
+    mime_type = content_type if content_type.startswith("image/") else "image/png"
+    return f"data:{mime_type};base64,{base64.b64encode(data or b'').decode('ascii')}"
 
 
 def parse_document_blocks(filename: str, content_type: str, raw_text: str, raw_context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5402,23 +5486,49 @@ def detect_refinement_conflicts(chunks: list[Any]) -> list[dict[str, Any]]:
     conflicts: list[dict[str, Any]] = []
     by_case: dict[str, list[Any]] = {}
     for chunk in chunks:
-        metadata = chunk.metadata or {}
-        unit_type = str(metadata.get("unit_type") or chunk.section or "")
+        metadata = chunk_metadata(chunk)
+        unit_type = str(metadata.get("unit_type") or chunk_value(chunk, "section") or "")
         if unit_type not in {"policy_rule", "exception_rule", "threshold_rule"}:
             continue
         service = str(metadata.get("service") or metadata.get("service_label") or "")
-        case_type = str(metadata.get("case_type") or metadata.get("case_name") or chunk.heading)
+        case_type = str(metadata.get("case_type") or metadata.get("case_name") or chunk_value(chunk, "heading"))
         key = normalized_key(f"{service} {case_type}")
         by_case.setdefault(key, []).append(chunk)
 
     for key, items in by_case.items():
-        applies_values = {item.metadata.get("rounding_applies") for item in items if "rounding_applies" in item.metadata}
-        thresholds = {item.metadata.get("rounding_threshold") for item in items if item.metadata.get("rounding_threshold")}
+        metadata_items = [chunk_metadata(item) for item in items]
+        applies_values = {metadata.get("rounding_applies") for metadata in metadata_items if "rounding_applies" in metadata}
+        thresholds = {metadata.get("rounding_threshold") for metadata in metadata_items if metadata.get("rounding_threshold")}
         if True in applies_values and False in applies_values:
-            conflicts.append({"type": "rounding_apply_conflict", "case_key": key, "titles": [item.heading for item in items]})
+            conflicts.append({"type": "rounding_apply_conflict", "case_key": key, "titles": [chunk_value(item, "heading") for item in items]})
         if len(thresholds) > 1:
-            conflicts.append({"type": "threshold_conflict", "case_key": key, "thresholds": sorted(thresholds), "titles": [item.heading for item in items]})
+            conflicts.append({"type": "threshold_conflict", "case_key": key, "thresholds": sorted(thresholds), "titles": [chunk_value(item, "heading") for item in items]})
     return conflicts
+
+
+def chunk_metadata(chunk: Any) -> dict[str, Any]:
+    metadata = chunk.get("metadata") if isinstance(chunk, dict) else getattr(chunk, "metadata", {})
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def chunk_value(chunk: Any, key: str) -> Any:
+    if isinstance(chunk, dict):
+        return chunk.get(key, "")
+    return getattr(chunk, key, "")
+
+
+def reduce_reconcile_verification_payload(chunks: list[Any]) -> dict[str, Any]:
+    conflicts = detect_refinement_conflicts(chunks)
+    return {
+        "status": "failed" if conflicts else "passed",
+        "conflict_count": len(conflicts),
+        "conflicts": conflicts,
+        "review_required": bool(conflicts),
+        "checks": {
+            "policy_conflicts_detected": bool(conflicts),
+            "conflicting_case_keys": [conflict.get("case_key") for conflict in conflicts if conflict.get("case_key")],
+        },
+    }
 
 
 def evaluate_refinement_report(chunks: list[Any], document_type: str) -> dict[str, Any]:
@@ -6094,6 +6204,60 @@ def source_blocks_payload(filename: str, content_type: str, raw_text: str, block
     }
 
 
+def map_unit_extracts_payload(evidence_graph: Any, evidence_units: list[Any]) -> dict[str, Any]:
+    element_by_id = evidence_graph.element_map()
+    mapped_source_element_ids: set[str] = set()
+    units: list[dict[str, Any]] = []
+    blocked_unit_count = 0
+
+    for index, unit in enumerate(evidence_units):
+        source_element_ids = [str(element_id) for element_id in getattr(unit, "source_element_ids", []) if element_id]
+        valid_source_element_ids = [element_id for element_id in source_element_ids if element_id in element_by_id]
+        missing_source_element_ids = [element_id for element_id in source_element_ids if element_id not in element_by_id]
+        mapped_source_element_ids.update(valid_source_element_ids)
+        status = "blocked" if not valid_source_element_ids or getattr(unit, "validation_status", "") in {"blocked", "failed"} else "completed"
+        if status == "blocked":
+            blocked_unit_count += 1
+        source_refs = list(getattr(unit, "fields", {}).get("source_refs") or [])
+        if not source_refs:
+            for element_id in valid_source_element_ids:
+                element = element_by_id[element_id]
+                refs = element.metadata.get("source_refs") if isinstance(element.metadata, dict) else []
+                if isinstance(refs, list):
+                    source_refs.extend(ref for ref in refs if isinstance(ref, dict))
+        units.append(
+            {
+                "confidence": getattr(unit, "confidence", 0.0),
+                "evidence_hash": evidence_graph.evidence_hash(valid_source_element_ids),
+                "index": index,
+                "missing_source_element_ids": missing_source_element_ids,
+                "source_element_ids": source_element_ids,
+                "source_ref_quality": source_ref_quality_from_refs(source_refs),
+                "source_refs": source_refs[:12],
+                "status": status,
+                "title": str(getattr(unit, "fields", {}).get("title") or getattr(unit, "unit_type", ""))[:180],
+                "unit_id": getattr(unit, "unit_id", f"unit_{index + 1}"),
+                "unit_type": getattr(unit, "unit_type", "unknown"),
+                "warnings": list(getattr(unit, "warnings", []) or [])[:20],
+            }
+        )
+
+    source_element_ids = [str(element.element_id) for element in evidence_graph.source_elements]
+    unmapped_source_element_ids = [element_id for element_id in source_element_ids if element_id not in mapped_source_element_ids]
+    preview_limit = 300
+    return {
+        "blocked_unit_count": blocked_unit_count,
+        "mapped_source_element_count": len(mapped_source_element_ids),
+        "source_element_count": len(source_element_ids),
+        "truncated": len(units) > preview_limit,
+        "unit_count": len(evidence_units),
+        "unit_preview_limit": preview_limit,
+        "units": units[:preview_limit],
+        "unmapped_source_element_count": len(unmapped_source_element_ids),
+        "unmapped_source_element_ids": unmapped_source_element_ids[:200],
+    }
+
+
 def source_block_quality_checks(blocks: list[dict[str, Any]]) -> dict[str, bool]:
     table_blocks = [block for block in blocks if isinstance(block, dict) and str(block.get("type") or "").startswith("docx_table")]
     table_rows = [block for block in blocks if isinstance(block, dict) and block.get("type") == "docx_table_row"]
@@ -6215,6 +6379,66 @@ def draft_units_payload(source_chunks: list[Any]) -> dict[str, Any]:
             }
             for chunk in source_chunks[:120]
         ],
+    }
+
+
+def document_compilation_plan_payload(classification: Any, source_chunks: list[Any], map_unit_payload: dict[str, Any]) -> dict[str, Any]:
+    unit_type_counts: dict[str, int] = {}
+    operations: list[dict[str, Any]] = []
+    publish_blocked_candidate_count = 0
+    missing_source_evidence_count = 0
+    for index, chunk in enumerate(source_chunks):
+        metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+        unit_type = str(metadata.get("unit_type") or chunk.section or "text_section")
+        unit_type_counts[unit_type] = unit_type_counts.get(unit_type, 0) + 1
+        source_element_ids = metadata.get("source_element_ids") if isinstance(metadata.get("source_element_ids"), list) else []
+        source_refs = metadata.get("source_refs") if isinstance(metadata.get("source_refs"), list) else []
+        publish_eligible = metadata.get("publish_eligible", True) is not False
+        if not publish_eligible or metadata.get("publish_blocked"):
+            publish_blocked_candidate_count += 1
+        if not source_element_ids and not source_refs:
+            missing_source_evidence_count += 1
+        operations.append(
+            {
+                "blocked_reasons": list(metadata.get("blocked_reasons") or [])[:12] if isinstance(metadata.get("blocked_reasons"), list) else [],
+                "evidence_hash_present": bool(metadata.get("evidence_hash")),
+                "index": index,
+                "operation": "create_or_update_unit",
+                "publish_eligible": publish_eligible,
+                "retrieval_scope": metadata.get("retrieval_scope") or "unit",
+                "review_status": metadata.get("review_status") or "needs_review",
+                "risk_level": metadata.get("risk_level") or risk_level_for_document_type(classification.document_type),
+                "source_element_count": len(source_element_ids),
+                "source_ref_quality": metadata.get("source_ref_quality") or source_ref_quality_from_refs(source_refs),
+                "title": str(chunk.heading or unit_type.replace("_", " ").title())[:180],
+                "unit_type": unit_type,
+            }
+        )
+    return {
+        "document_type": classification.document_type,
+        "human_approval_required": True,
+        "metadata_suggestions": {
+            "risk_level": risk_level_for_document_type(classification.document_type),
+            "source_type": classification.source_type,
+            "structure_type": getattr(classification, "structure_type", ""),
+            "sub_type": getattr(classification, "sub_type", ""),
+        },
+        "operation_count": len(source_chunks),
+        "operations": operations[:200],
+        "plan_version": "document_compilation_plan_v1",
+        "review_gates": {
+            "approval_required_before_publish": True,
+            "missing_source_evidence_count": missing_source_evidence_count,
+            "publish_blocked_candidate_count": publish_blocked_candidate_count,
+            "requires_source_coverage_review": int(map_unit_payload.get("unmapped_source_element_count") or 0) > 0,
+        },
+        "source_coverage": {
+            "mapped_source_element_count": int(map_unit_payload.get("mapped_source_element_count") or 0),
+            "source_element_count": int(map_unit_payload.get("source_element_count") or 0),
+            "unmapped_source_element_count": int(map_unit_payload.get("unmapped_source_element_count") or 0),
+        },
+        "truncated": len(operations) > 200,
+        "unit_type_counts": unit_type_counts,
     }
 
 
@@ -6659,6 +6883,7 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
     warnings: list[str] = []
     metadata_items = [chunk.get("metadata") or {} for chunk in chunks]
     quality_checks = extraction_quality_checks(chunks, metadata_items)
+    reduce_reconcile = reduce_reconcile_verification_payload(chunks)
     has_full_sop = any(str(metadata.get("unit_type") or "") == "full_sop" or str(metadata.get("retrieval_scope") or "") == "document" for metadata in metadata_items)
     atomic_units = [
         metadata for metadata in metadata_items
@@ -6679,6 +6904,8 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
         hard_blockers.append("degraded_units_require_manual_curation")
     if any(metadata.get("index_eligible") is True and str(metadata.get("review_status")) != "approved" for metadata in metadata_items):
         hard_blockers.append("draft_units_trying_to_index")
+    if reduce_reconcile["conflict_count"]:
+        hard_blockers.append("conflicting_policy_units")
     if not any("alias" in json.dumps(metadata, ensure_ascii=False).lower() for metadata in metadata_items):
         warnings.append("weak_aliases")
     if not any("related" in json.dumps(metadata, ensure_ascii=False).lower() for metadata in metadata_items):
@@ -6687,6 +6914,7 @@ def verification_report_payload(chunks: list[dict[str, Any]], document_type: str
         "coverage_score": max(0, 100 - len(hard_blockers) * 20 - len(warnings) * 5),
         "checks": quality_checks,
         "hard_blockers": list(dict.fromkeys(hard_blockers)),
+        "reduce_reconcile": reduce_reconcile,
         "warnings": list(dict.fromkeys(warnings)),
     }
 

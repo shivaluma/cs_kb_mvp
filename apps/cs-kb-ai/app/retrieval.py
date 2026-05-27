@@ -91,6 +91,7 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
     ranking_debug: dict[str, Any] = {}
     lexical_rows: list[dict[str, Any]] = []
     vector_rows: list[dict[str, Any]] = []
+    compiled_page_rows: list[dict[str, Any]] = []
     effective_candidate_mode = request.mode
     vector_failure = ""
     if ranking_mode == "ai_chat":
@@ -117,6 +118,7 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
                 "ranking_mode": ranking_mode,
                 "keyword_candidate_count": len(lexical_rows),
                 "vector_candidate_count": 0,
+                "compiled_page_candidate_count": len(compiled_page_rows),
                 "vector_failure": vector_failure,
             },
             warnings=trace_warnings,
@@ -162,8 +164,22 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         try:
             vector = embed_text(normalized_query)
             vector_rows = repository.vector_search(vector, candidate_filters, vector_limit)
+            if request.include_compiled_pages:
+                compiled_page_rows = repository.compiled_page_vector_search(
+                    vector,
+                    candidate_filters,
+                    min(vector_limit, max(request.limit, 2)),
+                )
+                vector_rows = merge_vector_context_rows(vector_rows, compiled_page_rows)
             if not vector_rows and applied_query_filters:
                 vector_rows = repository.vector_search(vector, request.filters, vector_limit)
+                if request.include_compiled_pages:
+                    compiled_page_rows = repository.compiled_page_vector_search(
+                        vector,
+                        request.filters,
+                        min(vector_limit, max(request.limit, 2)),
+                    )
+                    vector_rows = merge_vector_context_rows(vector_rows, compiled_page_rows)
                 warnings.append("query_understanding_filters_relaxed:no_vector_candidates")
         except EmbeddingProviderError:
             vector_failure = "embedding_unavailable"
@@ -211,6 +227,7 @@ def retrieve(request: RetrievalRequest, include_relation_expansion: bool = True)
         "query_understanding_used": query_understanding.source == "model",
         "keyword_candidate_count": len(lexical_rows),
         "vector_candidate_count": len(vector_rows),
+        "compiled_page_candidate_count": len(compiled_page_rows),
         "vector_failure": vector_failure,
         "effective_candidate_mode": effective_candidate_mode,
         "merged_candidate_count": len(candidates),
@@ -421,6 +438,18 @@ def merge_keyword_backfill_rows(primary_rows: list[dict[str, Any]], backfill_row
         if len(output) >= limit:
             break
     return output[:limit], added
+
+
+def merge_vector_context_rows(primary_rows: list[dict[str, Any]], supplemental_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output = [dict(row) for row in primary_rows]
+    seen = {str(row.get("chunk_id") or row.get("id") or "") for row in output}
+    for row in supplemental_rows:
+        chunk_id = str(row.get("chunk_id") or row.get("id") or "")
+        if not chunk_id or chunk_id in seen:
+            continue
+        output.append(dict(row))
+        seen.add(chunk_id)
+    return output
 
 
 def meili_ai_chunk_search(query: str, filters: RetrievalFilters, limit: int, debug: bool = False) -> list[dict[str, Any]]:

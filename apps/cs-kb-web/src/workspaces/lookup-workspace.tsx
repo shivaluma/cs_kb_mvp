@@ -31,7 +31,8 @@ import {
 } from "@/components/common";
 import { OperationalFeedbackButtons } from "@/components/operational-feedback";
 import { formatDate } from "@/lib/format";
-import { groupResultsByDisplaySource, type SourceDisplayGroup } from "@/lib/source-display";
+import { sopResultActionLabel, sopResultFacts, sopResultMatchHint } from "@/lib/lookup-result-ui";
+import { groupResultsByDisplaySource, sourceMatchFacts, type SourceDisplayGroup } from "@/lib/source-display";
 import { isDebugUiEnabled } from "@/lib/ui-mode";
 import { cn } from "@/lib/utils";
 import type { AISuggestion, FilterOption, FilterState, Macro, RetrievalResult, SearchResult, SOP } from "@/types";
@@ -50,6 +51,7 @@ export function LookupWorkspace({
   onAskAI,
   onCopyMacro,
   onOpenSOP,
+  onOpenSourceMatch,
   onRunSearch,
   onSelectDocumentMatch,
   onSuggestionSelect,
@@ -76,6 +78,7 @@ export function LookupWorkspace({
   onAskAI: () => void;
   onCopyMacro: (macro: Macro) => void;
   onOpenSOP: (id: string) => void;
+  onOpenSourceMatch: (match: RetrievalResult) => void;
   onRunSearch: () => void;
   onSelectDocumentMatch: (match: RetrievalResult) => void;
   onSuggestionSelect: (value: string) => void;
@@ -124,7 +127,7 @@ export function LookupWorkspace({
   }, [booting, loading, searchStartedAt]);
 
   function openFullSop(match: RetrievalResult) {
-    onSelectDocumentMatch(match);
+    onOpenSourceMatch(match);
   }
 
   function copyAnswer(text: string) {
@@ -252,6 +255,7 @@ export function LookupWorkspace({
                       {listSource.map((item) => (
                         <SopResultRow
                           item={item}
+                          debug={debugEnabled}
                           key={item.sop_id}
                           onCopyAnswer={() => copyAnswer(item.snippet)}
                           onOpen={() => onOpenSOP(item.sop_id)}
@@ -267,7 +271,7 @@ export function LookupWorkspace({
                         <div className="rounded-lg border bg-muted/15 p-3" key={`${item.sop_id}-${item.version}`}>
                           <div className="flex items-start justify-between gap-3">
                             <h3 className="min-w-0 text-sm font-semibold leading-snug">{item.title}</h3>
-                            <Badge variant="outline">{Math.round(item.confidence * 100)}%</Badge>
+                            <Badge variant="secondary">AI suggested</Badge>
                           </div>
                           <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                             <Badge variant="secondary">grounded</Badge>
@@ -393,16 +397,21 @@ function ResultGroup({
 }
 
 function SopResultRow({
+  debug,
   item,
   onCopyAnswer,
   onOpen,
   selected,
 }: {
+  debug: boolean;
   item: SearchResult;
   onCopyAnswer: () => void;
   onOpen: () => void;
   selected: boolean;
 }) {
+  const facts = sopResultFacts(item, { debug });
+  const matchHint = sopResultMatchHint(item);
+
   return (
     <div
       className={cn(
@@ -417,12 +426,13 @@ function SopResultRow({
         type="button"
       >
         <h4 className="min-w-0 text-sm font-semibold leading-snug">{item.title}</h4>
+        <p className="mt-1 text-xs font-medium text-foreground/80">{matchHint}</p>
         <p className="mt-1 line-clamp-2 text-sm leading-snug text-muted-foreground">{item.snippet}</p>
-        <MetaLine className="mt-1.5" items={[`v${item.version}`, item.category, item.vertical, formatDate(item.updated_at)]} />
+        <MetaLine className="mt-1.5" items={facts} />
       </button>
       <div className="flex items-center gap-1 border-t bg-muted/10 px-2 py-1.5">
         <Button onClick={onOpen} size="xs" type="button" variant="ghost">
-          Open source
+          {sopResultActionLabel()}
         </Button>
         <Button onClick={onCopyAnswer} size="xs" type="button" variant="ghost">
           <Copy data-icon="inline-start" className="size-3" />
@@ -440,6 +450,7 @@ function countActiveFilters(filters: FilterState) {
 function DocumentMatchDetail({ group, query, searchEventId }: { group: SourceDisplayGroup; query: string; searchEventId: string }) {
   const primary = group.matches[0]?.result;
   const facts = primary ? operationalFacts(primary.metadata) : [];
+  const debugEnabled = isDebugUiEnabled();
 
   return (
     <article className="rounded-xl border bg-card">
@@ -457,7 +468,7 @@ function DocumentMatchDetail({ group, query, searchEventId }: { group: SourceDis
               {group.collections.length ? <span className="text-muted-foreground/70"> · {group.collections.join(", ")}</span> : null}
             </p>
           </div>
-          {isDebugUiEnabled() ? (
+          {debugEnabled ? (
             <div className="shrink-0 text-right text-[11px] text-muted-foreground">
               <div>score</div>
               <div className="font-medium tabular-nums text-foreground">{group.score.toFixed(4)}</div>
@@ -480,9 +491,9 @@ function DocumentMatchDetail({ group, query, searchEventId }: { group: SourceDis
                 <div className="rounded-lg border bg-muted/20 px-3 py-2" key={match.chunkId}>
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="min-w-0 text-sm font-medium">{match.title}</p>
-                    <Badge variant="outline">{Math.round(match.score * 100)}%</Badge>
+                    {debugEnabled ? <Badge variant="outline">{Math.round(match.score * 100)}%</Badge> : null}
                   </div>
-                  <MetaLine className="mt-1" items={[match.sectionTitle, match.unitType]} />
+                  <MetaLine className="mt-1" items={sourceMatchFacts(match, { debug: debugEnabled })} />
                 </div>
               ))}
             </div>

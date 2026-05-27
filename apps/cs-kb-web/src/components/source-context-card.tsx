@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MetaLine } from "@/components/common";
 import { formatDate } from "@/lib/format";
-import { blockMatchesHighlight, highlightedSegments, sourceDisplayLabel, type SourceDisplayGroup } from "@/lib/source-display";
+import { blockMatchesHighlight, highlightedSegments, sourceDisplayLabel, sourceMatchHint, type SourceDisplayGroup } from "@/lib/source-display";
 import { isDebugUiEnabled } from "@/lib/ui-mode";
 import { cn } from "@/lib/utils";
 
@@ -107,6 +107,7 @@ export function SourceContextCard({
               {group.matches.length > 1 ? <Badge variant="outline">{group.matches.length} matches</Badge> : null}
             </div>
             <h3 className="mt-2 text-sm font-semibold leading-snug">{group.title}</h3>
+            <p className="mt-1 text-xs font-medium text-foreground/80">{sourceMatchHint(group)}</p>
             {primaryMatch?.sectionTitle ? (
               <p className="mt-1 truncate text-xs text-muted-foreground">{primaryMatch.sectionTitle}</p>
             ) : null}

@@ -20,6 +20,16 @@ class QdrantStoreTest(unittest.TestCase):
                 {"key": "publish_blocked", "match": {"value": False}},
             ],
         )
+        self.assertEqual(
+            query_filter["must_not"],
+            [{"key": "retrieval_layer", "match": {"value": "compiled_page"}}],
+        )
+
+    def test_compiled_page_filter_targets_compiled_layer(self) -> None:
+        query_filter = qdrant_store.build_filter(RetrievalFilters(), retrieval_layer="compiled_page")
+
+        self.assertIn({"key": "retrieval_layer", "match": {"value": "compiled_page"}}, query_filter["must"])
+        self.assertNotIn("must_not", query_filter)
 
     def test_filter_maps_metadata_lists_to_payload_conditions(self) -> None:
         query_filter = qdrant_store.build_filter(
@@ -81,6 +91,25 @@ class QdrantStoreTest(unittest.TestCase):
         self.assertEqual(payload["authority_level"], "policy")
         self.assertEqual(payload["collections"], ["cs-core"])
         self.assertEqual(payload["source_ref_quality"], "exact")
+        self.assertEqual(payload["retrieval_layer"], "chunk")
+
+    def test_payload_from_row_records_compiled_page_layer(self) -> None:
+        payload = qdrant_store.payload_from_row(
+            {
+                "chunk_id": "page-1",
+                "section": "document_overview",
+                "metadata": {
+                    "unit_type": "compiled_document_overview",
+                    "retrieval_layer": "compiled_page",
+                    "retrieval_scope": "document",
+                    "review_status": "approved",
+                    "extraction_status": "structured",
+                },
+            }
+        )
+
+        self.assertEqual(payload["retrieval_layer"], "compiled_page")
+        self.assertEqual(payload["unit_type"], "compiled_document_overview")
 
     def test_parse_vector_text_accepts_pgvector_text(self) -> None:
         self.assertEqual(qdrant_store.parse_vector("[0.1, -0.2, 3]"), [0.1, -0.2, 3.0])

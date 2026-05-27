@@ -16,6 +16,7 @@ import {
 } from "@tabler/icons-react";
 
 import type { FilterOption, FilterState, SynonymDraft, UploadState } from "@/types";
+import { buildNavGroups, commandGroupSpecs, documentWorkflowStepIds, sidebarGroupSpecs } from "@/lib/navigation-model";
 
 export const workspacePaths = {
   dashboard: "/",
@@ -214,27 +215,11 @@ export const navItems = [
   },
 ] as const;
 
-export const documentWorkflowStepIds = ["documentUpload", "documentQueue", "documents"] as const;
 export const documentWorkflowItems = documentWorkflowStepIds.map((id) => navItems.find((item) => item.id === id)!);
 
-export const navGroups = [
-  {
-    label: "CS workspace",
-    items: navItems.filter((item) => item.section === "agent"),
-  },
-  {
-    label: "Knowledge library",
-    items: navItems.filter((item) => item.section === "library"),
-  },
-  {
-    label: "Review and governance",
-    items: navItems.filter((item) => item.section === "ops" && !documentWorkflowStepIds.includes(item.id as never)),
-  },
-  {
-    label: "Admin debug",
-    items: navItems.filter((item) => item.section === "ai"),
-  },
-] as const;
+export const sidebarNavGroups = buildNavGroups(navItems, sidebarGroupSpecs);
+export const commandNavGroups = buildNavGroups(navItems, commandGroupSpecs);
+export const navGroups = sidebarNavGroups;
 
 export function pathForWorkspace(workspace: Workspace) {
   return workspacePaths[workspace];

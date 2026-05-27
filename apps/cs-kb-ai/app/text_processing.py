@@ -5,6 +5,7 @@ import io
 import base64
 import re
 import unicodedata
+import zipfile
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +39,16 @@ DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessin
 ROMAN_SECTION_RE = re.compile(r"^\s*([IVXLCDM]+)[.)]\s+(.+?)\s*$", re.IGNORECASE)
 NUMBERED_SECTION_RE = re.compile(r"^\s*(\d{1,2})[.)]\s*(.+?)\s*$")
 DOCX_TEXT_HEADING_RE = re.compile(r"^\s*(?:đối với|doi voi)\s+(.+?)\s*$", re.IGNORECASE)
+DOCX_IMAGE_MIME_TYPES = {
+    ".bmp": "image/bmp",
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".webp": "image/webp",
+}
 DOCX_PROHIBITION_RE = re.compile(r"(tuyệt\s+đối\s+không|không\s+chủ\s+động\s+cung\s+cấp|quy\s+trình\s+xử\s+lý\s+nội\s+bộ|chế\s+tài|chấm\s+lỗi)", re.IGNORECASE)
 INLINE_BULLET_MARKER_RE = re.compile(
     r"(^|\s)([-*•‣▪])\s+(?=(?:nếu|neu|kh|tx|cs|không|khong|chỉ|chi|trường hợp|truong hop)\b)",
@@ -337,6 +348,43 @@ def extract_docx_structure(data: bytes, filename: str = "") -> tuple[str, list[d
         raw_lines.extend(str(block.get("text") or "") for block in table_blocks if str(block.get("text") or "").strip())
         tables.append(table_payload)
     return normalize_whitespace("\n".join(raw_lines)), blocks, tables
+
+
+def extract_docx_embedded_images(
+    data: bytes,
+    filename: str = "",
+    *,
+    include_data_url: bool = False,
+    max_data_url_bytes: int | None = None,
+) -> list[dict[str, Any]]:
+    images: list[dict[str, Any]] = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            for name in archive.namelist():
+                if not name.startswith("word/media/") or name.endswith("/"):
+                    continue
+                image_name = name.rsplit("/", 1)[-1]
+                extension = "." + image_name.rsplit(".", 1)[-1].lower() if "." in image_name else ""
+                mime_type = DOCX_IMAGE_MIME_TYPES.get(extension)
+                if not mime_type:
+                    continue
+                payload = archive.read(name)
+                image = {
+                    "byte_size": len(payload),
+                    "image_id": image_name,
+                    "mime_type": mime_type,
+                    "source_file": filename,
+                    "source_path": name,
+                }
+                if include_data_url:
+                    if max_data_url_bytes is None or len(payload) <= max_data_url_bytes:
+                        image["image_data_url"] = f"data:{mime_type};base64,{base64.b64encode(payload).decode('ascii')}"
+                    else:
+                        image["image_data_omitted_reason"] = "embedded_image_too_large_for_caption"
+                images.append(image)
+    except zipfile.BadZipFile:
+        return []
+    return images
 
 
 def iter_docx_body_blocks(doc: Any) -> list[tuple[str, DocxParagraph | DocxTable]]:

@@ -39,6 +39,7 @@ import { API_BASE_URL } from "@/config";
 import { workspacePaths } from "@/constants";
 import { nextReviewDueIso, withReviewFrequencyDates } from "@/lib/date";
 import { formatDate } from "@/lib/format";
+import { sourceSurfaceIntro, uploadMetadataDisclosureState } from "@/lib/source-workflow-ui";
 import { cn } from "@/lib/utils";
 import {
   workflowDecisionBranchBadge,
@@ -94,6 +95,35 @@ type DocumentStep =
   | "view"
   | "workflowGraph"
   | "workflowRequirements";
+const advancedDocumentSteps = [
+  "assign",
+  "evidence",
+  "kbIndex",
+  "sop",
+  "backendGate",
+  "quality",
+  "pipeline",
+  "chunks",
+] as const satisfies readonly DocumentStep[];
+const documentStepLabels: Record<DocumentStep, string> = {
+  assign: "Assign",
+  backendGate: "API gate",
+  chunks: "Chunks",
+  evidence: "Evidence",
+  kbIndex: "Index",
+  pipeline: "Jobs",
+  publish: "Publish",
+  quality: "Quality",
+  readiness: "Ready",
+  sop: "Overview",
+  units: "Units",
+  view: "Source",
+  workflowGraph: "Graph",
+  workflowRequirements: "Requirements",
+};
+function isAdvancedDocumentStep(step: DocumentStep) {
+  return (advancedDocumentSteps as readonly string[]).includes(step);
+}
 type ReviewFilter = "needs_review" | "reviewed" | "approved" | "rejected" | "source_refs" | "atomic" | "all";
 type RequiredWorkflowUnit = {
   key: string;
@@ -232,6 +262,10 @@ export function DocumentsWorkspace({
   const [requiredUnitFocus, setRequiredUnitFocus] = useState<RequiredWorkflowUnit | null>(null);
   const activeDocuments = documents.filter((document) => document.status === "active");
   const archivedDocuments = documents.filter((document) => document.status === "archived");
+  const sourceCounts = { activeCount: activeDocuments.length, archivedCount: archivedDocuments.length };
+  const uploadIntro = sourceSurfaceIntro("upload", sourceCounts);
+  const queueIntro = sourceSurfaceIntro("queue", sourceCounts);
+  const uploadMetadataDetails = uploadMetadataDisclosureState(upload);
   const visibleDocuments = documents.filter((document) => {
     if (sourceFilter === "all") {
       return true;
@@ -499,6 +533,10 @@ export function DocumentsWorkspace({
   }
 
   const isReviewSurface = surface === "review";
+  const advancedDocumentStepSelected = isAdvancedDocumentStep(documentStep);
+  const advancedDocumentLabel = advancedDocumentStepSelected
+    ? `Advanced: ${documentStepLabels[documentStep]}`
+    : "Advanced inspection";
 
   return (
     <div
@@ -513,19 +551,11 @@ export function DocumentsWorkspace({
         <Card className="rounded-xl">
           <CardHeader className="border-b pb-4">
             <div>
-              <CardTitle>New source</CardTitle>
-              <CardDescription>Step 1 of 3: upload as draft. Review and publish happen after extraction.</CardDescription>
+              <CardTitle>{uploadIntro.title}</CardTitle>
+              <CardDescription>{uploadIntro.description}</CardDescription>
             </div>
           </CardHeader>
           <CardContent className="flex flex-col gap-4 pt-4">
-            <StepRail
-              current="upload"
-              steps={[
-                { key: "upload", label: "Upload" },
-                { key: "queue", label: "Queue" },
-                { key: "review", label: "Review" },
-              ]}
-            />
             <div className="grid grid-cols-2 gap-2 rounded-lg border bg-muted/15 p-1">
               <Button
                 onClick={() => setSourceMode("file")}
@@ -667,8 +697,13 @@ export function DocumentsWorkspace({
             ) : null}
 
             <Field label="Title" value={upload.title} onChange={(title) => setUpload((current) => ({ ...current, title }))} placeholder="Quy định xác minh tài khoản" />
-            <details className="order-20 rounded-lg border bg-muted/10 p-3">
-              <summary className="cursor-pointer text-sm font-medium">Optional metadata</summary>
+            <details className="order-20 rounded-lg border bg-muted/10 p-3" open={uploadMetadataDetails.open || undefined}>
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
+                <span>{uploadMetadataDetails.label}</span>
+                <Badge variant={uploadMetadataDetails.badge === "AI suggestion" ? "secondary" : "outline"}>
+                  {uploadMetadataDetails.badge}
+                </Badge>
+              </summary>
               <div className="mt-3 space-y-4">
                 <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
                   <Field label="Vertical" value={upload.vertical} onChange={(vertical) => setUpload((current) => ({ ...current, vertical }))} />
@@ -853,8 +888,8 @@ export function DocumentsWorkspace({
           <CardHeader className="border-b pb-4">
             <div className="flex items-start justify-between gap-2">
               <div>
-                <CardTitle>Source queue</CardTitle>
-                <CardDescription>Step 2 of 3: choose a source to review. {activeDocuments.length} active, {archivedDocuments.length} archived.</CardDescription>
+                <CardTitle>{queueIntro.title}</CardTitle>
+                <CardDescription>{queueIntro.description}</CardDescription>
               </div>
               <div className="flex items-center gap-1">
                 <Button asChild size="sm" type="button" variant="outline">
@@ -865,14 +900,6 @@ export function DocumentsWorkspace({
                 </Button>
               </div>
             </div>
-            <StepRail
-              current="queue"
-              steps={[
-                { key: "upload", label: "Upload" },
-                { key: "queue", label: "Queue" },
-                { key: "review", label: "Review" },
-              ]}
-            />
             <div className="mt-3 grid grid-cols-3 gap-1 rounded-lg border bg-muted/15 p-1">
               {(["active", "archived", "all"] as const).map((filter) => (
                 <Button
@@ -998,14 +1025,6 @@ export function DocumentsWorkspace({
                 )}
               </div>
             </div>
-            <StepRail
-              current="review"
-              steps={[
-                { key: "upload", label: "Upload" },
-                { key: "queue", label: "Queue" },
-                { key: "review", label: "Review" },
-              ]}
-            />
           </CardHeader>
           <CardContent className="pt-4">
             {selectedIsArchived ? (
@@ -1048,10 +1067,8 @@ export function DocumentsWorkspace({
         <Tabs className="space-y-4" onValueChange={(value) => setDocumentStep(value as DocumentStep)} value={documentStep}>
           <div className="sticky top-4 z-20 rounded-xl border bg-background/95 p-2 shadow-sm backdrop-blur">
             <TabsList className="flex h-auto w-full flex-wrap gap-1 bg-muted/30 p-1">
-              <TabsTrigger className="min-w-20 flex-1" value="view">Source</TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1" value="assign">Assign</TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1" value="evidence">Evidence</TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1 gap-2" value="units">
+              <TabsTrigger className="min-w-24 flex-1" value="view">Source</TabsTrigger>
+              <TabsTrigger className="min-w-24 flex-1 gap-2" value="units">
                 Units
                 {pendingReviewCount ? (
                   <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
@@ -1079,34 +1096,46 @@ export function DocumentsWorkspace({
                   ) : null}
                 </TabsTrigger>
               ) : null}
-              {showKbIndexTab ? (
-                <TabsTrigger className="min-w-20 flex-1 gap-2" value="kbIndex">
-                  Index
-                  {kbIndexPlan?.summary?.unresolved_target_count ? (
-                    <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                      {String(kbIndexPlan.summary.unresolved_target_count)}
-                    </span>
-                  ) : null}
-                </TabsTrigger>
-              ) : null}
-              <TabsTrigger className="min-w-20 flex-1" value="sop">SOP</TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1 gap-2" value="backendGate">
-                API
-                <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                  {publishReadinessLoading ? "..." : publishReadiness ? publishReadiness.ready ? "ok" : publishReadiness.failure_count : "-"}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1 gap-2" value="readiness">
+              <TabsTrigger className="min-w-24 flex-1 gap-2" value="readiness">
                 Ready
                 <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
                   {readinessChecks.filter((check) => check.passed).length}/{readinessChecks.length}
                 </span>
               </TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1" value="quality">Quality</TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1" value="publish">Publish</TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1" value="pipeline">Jobs</TabsTrigger>
-              <TabsTrigger className="min-w-20 flex-1" value="chunks">Chunks</TabsTrigger>
+              <TabsTrigger className="min-w-24 flex-1" value="publish">Publish</TabsTrigger>
             </TabsList>
+            <details className="mt-2 rounded-lg border bg-muted/15 px-3 py-2" open={advancedDocumentStepSelected || undefined}>
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                <span>{advancedDocumentLabel}</span>
+                <Badge variant={advancedDocumentStepSelected ? "secondary" : "outline"}>
+                  {advancedDocumentStepSelected ? "open" : "optional"}
+                </Badge>
+              </summary>
+              <div className="mt-2 flex flex-wrap gap-1 border-t pt-2">
+                <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="assign">Assign</TabsTrigger>
+                <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="evidence">Evidence</TabsTrigger>
+                {showKbIndexTab ? (
+                  <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="kbIndex">
+                    Index
+                    {kbIndexPlan?.summary?.unresolved_target_count ? (
+                      <span className="ml-1 rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        {String(kbIndexPlan.summary.unresolved_target_count)}
+                      </span>
+                    ) : null}
+                  </TabsTrigger>
+                ) : null}
+                <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="sop">Overview</TabsTrigger>
+                <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="backendGate">
+                  API
+                  <span className="ml-1 rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    {publishReadinessLoading ? "..." : publishReadiness ? publishReadiness.ready ? "ok" : publishReadiness.failure_count : "-"}
+                  </span>
+                </TabsTrigger>
+                <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="quality">Quality</TabsTrigger>
+                <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="pipeline">Jobs</TabsTrigger>
+                <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="chunks">Chunks</TabsTrigger>
+              </div>
+            </details>
           </div>
 
           <TabsContent className="mt-0 space-y-4" value="view">
@@ -2158,40 +2187,6 @@ function ValidationPill({ text, valid }: { text: string; valid: boolean }) {
     <div className={cn("rounded-lg border px-2 py-1 text-[11px]", valid ? "bg-secondary text-secondary-foreground" : "border-destructive/30 bg-destructive/10 text-destructive")}>
       {valid ? "OK" : "Block"}: {text}
     </div>
-  );
-}
-
-function StepRail({
-  current,
-  steps,
-}: {
-  current: string;
-  steps: Array<{ key: string; label: string }>;
-}) {
-  const currentIndex = Math.max(0, steps.findIndex((step) => step.key === current));
-  return (
-    <ol className="grid gap-2 rounded-lg border bg-muted/15 p-2 sm:grid-cols-3">
-      {steps.map((step, index) => {
-        const state = index < currentIndex ? "done" : index === currentIndex ? "current" : "next";
-        return (
-          <li className="grid grid-cols-[1.75rem_minmax(0,1fr)] items-center gap-2" key={step.key}>
-            <span
-              className={cn(
-                "flex size-6 items-center justify-center rounded-full border text-[11px] font-semibold tabular-nums",
-                state === "current" && "border-primary bg-primary text-primary-foreground",
-                state === "done" && "bg-secondary text-secondary-foreground",
-                state === "next" && "bg-background text-muted-foreground",
-              )}
-            >
-              {index + 1}
-            </span>
-            <span className={cn("truncate text-xs font-medium", state === "next" ? "text-muted-foreground" : "text-foreground")}>
-              {step.label}
-            </span>
-          </li>
-        );
-      })}
-    </ol>
   );
 }
 
