@@ -1424,19 +1424,17 @@ def normalize_source_evidence_formatter_payload(
 ) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     if isinstance(parsed, list):
-        sections = normalize_source_evidence_array_sections(parsed)
-        markdown = render_source_evidence_sections_markdown(sections)
-        warnings.append("model_returned_array_normalized_to_object")
+        warnings.append("model_returned_array_rejected_to_raw_text")
         return (
             {
                 "title": document_title,
-                "markdown": markdown or raw_text.strip(),
-                "sections": sections,
-                "warnings": ["model_returned_array_normalized_to_object"],
+                "markdown": raw_text.strip(),
+                "sections": [],
+                "warnings": ["model_returned_array_rejected_to_raw_text"],
                 "coverage_report": {
                     "raw_text_chars": len(raw_text),
-                    "formatted_chars": len(markdown or raw_text.strip()),
-                    "normalization": "array_to_object",
+                    "formatted_chars": len(raw_text.strip()),
+                    "normalization": "array_rejected_to_raw_text",
                 },
             },
             warnings,
@@ -1631,11 +1629,12 @@ def format_source_evidence_view(
     raw_text: str,
     document_type: str,
     source_type: str,
+    page_images: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str], str]:
     if not enabled():
         record_ai_breakdown({"filename": filename, "flow": "source_evidence_view", "status": "skipped", "skip_reason": "openrouter_disabled"})
         return {}, ["openrouter_source_evidence_formatter_disabled"], "openrouter_disabled"
-    if not raw_text.strip():
+    if not raw_text.strip() and not page_images:
         record_ai_breakdown({"filename": filename, "flow": "source_evidence_view", "status": "skipped", "skip_reason": "raw_text_empty"})
         return {}, ["source_evidence_formatter_empty_raw_text"], "raw_text_empty"
 
@@ -1649,6 +1648,8 @@ def format_source_evidence_view(
         "- For messy real-world tables, prefer HTML tables over Markdown tables. Use `colspan`/`rowspan` for merged cells and hierarchical headers.\n"
         "- If a table continues across pages or repeated headers appear, preserve the row order and repeated header evidence; add a warning instead of dropping rows.\n"
         "- If layout is uncertain, preserve the raw text inside the closest div wrapper and add a warning. Never summarize away source evidence.\n"
+        "- If page images are supplied, treat the image as the source of truth. Use raw extraction only as an auxiliary hint when it conflicts with visible text.\n"
+        "- For workflow diagrams, preserve visible node labels, lane names, phase headers, Yes/No branch labels, scripts, annotations, phone numbers, emails, and file references as visible source text. Do not replace the diagram with a prose summary.\n"
         "- sections may be empty; the pipeline can derive sections from the div wrappers. If you fill sections, use {title, markdown, layout_label, bbox, bbox_order, confidence}.\n"
         "- coverage_report includes raw_text_chars, formatted_chars, omitted_or_uncertain_areas, source_preservation_notes, table_layout_notes.\n\n"
         f"Filename: {filename}\n"
@@ -1656,11 +1657,18 @@ def format_source_evidence_view(
         f"Detected source_type: {source_type}\n\n"
         f"Raw extraction:\n{raw_text[:60000]}"
     )
+    user_content: str | list[dict[str, Any]]
+    if page_images:
+        user_content = [{"type": "text", "text": formatting_prompt}]
+        user_content.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in page_images[:3])
+    else:
+        user_content = formatting_prompt
+
     payload = apply_reasoning_effort({
-        "model": settings.openrouter_refine_model,
+        "model": settings.openrouter_vision_model if page_images else settings.openrouter_refine_model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": formatting_prompt},
+            {"role": "system", "content": MULTIMODAL_LAYOUT_PARSER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.05,
@@ -1672,6 +1680,7 @@ def format_source_evidence_view(
         prompt=formatting_prompt,
         raw_text=raw_text,
         temperature=0.05,
+        page_images=page_images,
     )
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",

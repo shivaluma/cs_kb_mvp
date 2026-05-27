@@ -216,7 +216,7 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(ai_breakdown["payload"]["attempts"][0]["raw_response"]["text"], "{\"units\":[]}")
 
     def test_source_evidence_view_artifact_is_persisted_for_review_ui(self) -> None:
-        def fake_source_formatter(filename: str, raw_text: str, document_type: str, source_type: str):
+        def fake_source_formatter(filename: str, raw_text: str, document_type: str, source_type: str, **_kwargs):
             openrouter.record_ai_breakdown(
                 {
                     "flow": "source_evidence_view",
@@ -315,6 +315,51 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertEqual(chunks[0].metadata["source_refs"][0]["page"], 1)
         self.assertEqual(chunks[0].metadata["source_refs"][0]["bbox"], [50.0, 100.0, 950.0, 180.0])
         self.assertEqual(chunks[0].metadata["source_ref_quality"], "bbox")
+
+    def test_workflow_source_evidence_rejects_array_summary_layout_sections(self) -> None:
+        raw_text = (
+            "[page 1]\n"
+            "KH/TX liên h ệ Be qua CIA, Non-voice in app, Chat social\n"
+            "1. Vấn đề cần hỗ trợ là hỏi thông tin chung?\n"
+            "2. Cung cấp thông tin theo quy định\n"
+            "3. KH/TX liên hệ qua Chat social\n"
+        )
+        classification = ingestion.classify_document(
+            "All_Quy trình xác minh tài khoản KH TX.pdf",
+            "application/pdf",
+            raw_text,
+        )
+        payload = {
+            "formatter": "ai_multimodal_layout_parser",
+            "model": "google/gemini-3.1-flash-lite-preview",
+            "markdown": "## Quy trình xác minh\nQuy trình áp dụng cho các kênh chat.",
+            "sections": [
+                {
+                    "title": "Quy trình xác minh",
+                    "markdown": "Quy trình áp dụng cho các kênh chat.",
+                    "confidence": 0.5,
+                }
+            ],
+            "coverage_report": {
+                "raw_text_chars": len(raw_text),
+                "formatted_chars": 55,
+                "normalization": "array_to_object",
+            },
+        }
+
+        chunks, report = ingestion.build_source_evidence_section_chunks(
+            filename="All_Quy trình xác minh tài khoản KH TX.pdf",
+            raw_text=raw_text,
+            classification=classification,
+            source_view_payload=payload,
+            raw_context={},
+            existing_chunks=[],
+        )
+
+        self.assertNotEqual(report["source_text_kind"], "layout_sections")
+        self.assertEqual(report["source_text_kind"], "raw_text")
+        self.assertTrue(chunks)
+        self.assertIn("KH/TX liên h ệ Be", chunks[0].content)
 
     def test_excel_multiple_dated_sheets_creates_candidate_rows_with_scope(self) -> None:
         ingestion.extract_rule_table_units = lambda _filename, _raw_text: ([], ["openrouter_invalid_json"])

@@ -269,6 +269,10 @@ def prepare_document_version(
 
     source_view_payload: dict[str, Any] = {}
     if raw_text.strip() and classification.document_type in AI_STRUCTURED_DOCUMENT_TYPES:
+        source_view_page_images: list[str] = []
+        if filename.lower().endswith(".pdf") or content_type == "application/pdf":
+            source_view_page_images, source_view_render_warnings = render_pdf_pages_as_data_urls(data)
+            warnings.extend([f"source_evidence_{warning}" for warning in source_view_render_warnings])
         source_view_token = start_ai_breakdown_capture()
         try:
             source_view_payload, source_view_warnings, source_view_error = format_source_evidence_view(
@@ -276,6 +280,7 @@ def prepare_document_version(
                 raw_text=raw_text,
                 document_type=classification.document_type,
                 source_type=classification.source_type,
+                page_images=source_view_page_images,
             )
         finally:
             source_view_breakdowns = finish_ai_breakdown_capture(source_view_token)
@@ -6599,14 +6604,25 @@ def build_source_evidence_section_chunks(
         }
 
     layout_sections = payload.get("sections") if isinstance(payload.get("sections"), list) else []
-    layout_chunks = build_layout_source_evidence_chunks(
-        filename=filename,
+    layout_chunks: list[Chunk] = []
+    if source_evidence_layout_sections_are_trusted(
         classification=classification,
+        payload=payload,
         sections=layout_sections,
-        existing_count=len(existing_chunks),
-        formatter=str(payload.get("formatter") or "unknown_formatter"),
-        model=str(payload.get("model") or ""),
-    )
+        raw_text=raw_text,
+        formatted_text=formatted_text,
+    ):
+        layout_chunks = build_layout_source_evidence_chunks(
+            filename=filename,
+            classification=classification,
+            sections=layout_sections,
+            existing_count=len(existing_chunks),
+            formatter=str(payload.get("formatter") or "unknown_formatter"),
+            model=str(payload.get("model") or ""),
+        )
+    elif layout_sections and str(raw_text or "").strip():
+        formatted_text = ""
+        source_text = str(raw_text or "").strip()
     if layout_chunks:
         return layout_chunks[:80], {
             "status": "completed",
@@ -6699,6 +6715,51 @@ def build_source_evidence_section_chunks(
         "coverage_report": coverage_report,
     }
     return source_chunks, report
+
+
+def source_evidence_layout_sections_are_trusted(
+    *,
+    classification: Any,
+    payload: dict[str, Any],
+    sections: list[Any],
+    raw_text: str,
+    formatted_text: str,
+) -> bool:
+    if not sections:
+        return False
+
+    coverage_report = payload.get("coverage_report") if isinstance(payload.get("coverage_report"), dict) else {}
+    normalization = str(coverage_report.get("normalization") or "").strip().lower()
+    payload_warnings = [str(warning) for warning in payload.get("warnings", [])] if isinstance(payload.get("warnings"), list) else []
+    if normalization in {"array_to_object", "array_rejected_to_raw_text"}:
+        return False
+    if "model_returned_array_normalized_to_object" in payload_warnings:
+        return False
+    if "model_returned_array_rejected_to_raw_text" in payload_warnings:
+        return False
+
+    if getattr(classification, "document_type", "") != "workflow_diagram":
+        return True
+
+    has_layout_evidence = any(
+        isinstance(section, dict)
+        and (
+            (isinstance(section.get("bbox"), list) and len(section.get("bbox") or []) >= 4)
+            or bool(str(section.get("layout_label") or "").strip())
+        )
+        for section in sections
+    )
+    if has_layout_evidence:
+        return True
+
+    raw_chars = len(str(raw_text or "").strip())
+    try:
+        formatted_chars = int(coverage_report.get("formatted_chars") or len(formatted_text or ""))
+    except (TypeError, ValueError):
+        formatted_chars = len(formatted_text or "")
+    if raw_chars and formatted_chars < max(300, int(raw_chars * 0.75)):
+        return False
+    return False
 
 
 def build_layout_source_evidence_chunks(

@@ -5,7 +5,7 @@ from io import BytesIO
 
 from docx import Document
 
-from app import ingestion
+from app import ingestion, openrouter
 from app.openrouter import apply_reasoning_effort, normalize_source_evidence_formatter_payload, source_evidence_raw_fallback
 from app.retrieval import to_result
 from app.schemas import DisplayContext, DisplayHighlight, SourceAnchor
@@ -120,7 +120,7 @@ def test_docx_style_headings_override_numbered_heading_heuristic() -> None:
     assert target["section_path"] == ["4. Khiếu nại đối tượng còn lại"]
 
 
-def test_formatter_normalizes_array_and_preserves_raw_fallback() -> None:
+def test_formatter_rejects_array_summary_and_preserves_raw_fallback() -> None:
     parsed, warnings = normalize_source_evidence_formatter_payload(
         [{"title": "Email", "content": "Mail: Open / Mở đầu\nMacro: Xin chào anh/chị + Tên"}],
         document_title="Quy định phản hồi",
@@ -128,9 +128,10 @@ def test_formatter_normalizes_array_and_preserves_raw_fallback() -> None:
     )
 
     assert parsed["title"] == "Quy định phản hồi"
-    assert "## Email" in parsed["markdown"]
-    assert parsed["sections"][0]["title"] == "Email"
-    assert "model_returned_array_normalized_to_object" in warnings
+    assert parsed["markdown"] == "raw source"
+    assert parsed["sections"] == []
+    assert parsed["coverage_report"]["normalization"] == "array_rejected_to_raw_text"
+    assert "model_returned_array_rejected_to_raw_text" in warnings
 
     object_payload, object_warnings = normalize_source_evidence_formatter_payload(
         {"title": "Doc", "markdown": "Body", "sections": [], "warnings": [], "coverage_report": {}},
@@ -172,6 +173,62 @@ def test_formatter_extracts_div_wrapped_layout_sections_and_google_bboxes() -> N
     assert parsed["sections"][1]["layout_label"] == "Table"
     assert 'colspan="2"' in parsed["sections"][1]["markdown"]
     assert 'rowspan="2"' in parsed["sections"][1]["markdown"]
+
+
+def test_source_evidence_formatter_sends_page_images_for_visual_pdfs(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_completion(payload: dict[str, object], _headers: dict[str, str]) -> str:
+        captured["payload"] = payload
+        return (
+            '{"title":"Workflow","format":"markdown_div_wrapped","bbox_order":"google_yxyx",'
+            '"markdown":"<div data-bbox=\\"[100,50,180,950]\\" data-label=\\"Text\\">1. KH/TX liên hệ Be qua Chat social</div>",'
+            '"sections":[],"warnings":[],"coverage_report":{}}'
+        )
+
+    monkeypatch.setattr(openrouter, "enabled", lambda: True)
+    monkeypatch.setattr(openrouter, "completion_content", fake_completion)
+    output, warnings, error = openrouter.format_source_evidence_view(
+        "workflow.pdf",
+        "KH/TX liên h ệ Be qua Chat social",
+        "workflow_diagram",
+        "diagram_pdf",
+        page_images=["data:image/jpeg;base64,abc"],
+    )
+
+    user_content = captured["payload"]["messages"][1]["content"]  # type: ignore[index]
+    assert isinstance(user_content, list)
+    assert user_content[0]["type"] == "text"
+    assert user_content[1] == {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}}
+    assert output["sections"][0]["bbox"] == [50.0, 100.0, 950.0, 180.0]
+    assert "source_evidence_sections_extracted_from_div_wrappers" in warnings
+    assert error == ""
+
+
+def test_source_evidence_formatter_uses_parser_system_prompt(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_completion(payload: dict[str, object], _headers: dict[str, str]) -> str:
+        captured["payload"] = payload
+        return (
+            '{"title":"Workflow","format":"markdown_div_wrapped","bbox_order":"google_yxyx",'
+            '"markdown":"<div data-bbox=\\"[100,50,180,950]\\" data-label=\\"Text\\">1. KH/TX liên hệ Be</div>",'
+            '"sections":[],"warnings":[],"coverage_report":{}}'
+        )
+
+    monkeypatch.setattr(openrouter, "enabled", lambda: True)
+    monkeypatch.setattr(openrouter, "completion_content", fake_completion)
+    openrouter.format_source_evidence_view(
+        "workflow.pdf",
+        "KH/TX liên h ệ Be",
+        "workflow_diagram",
+        "diagram_pdf",
+        page_images=["data:image/jpeg;base64,abc"],
+    )
+
+    system_content = captured["payload"]["messages"][0]["content"]  # type: ignore[index]
+    assert "You are a document parser" in system_content
+    assert "bản nháp SOP" not in system_content
 
 
 def test_reasoning_effort_is_added_to_openrouter_payloads() -> None:
@@ -305,8 +362,8 @@ class SOPParentChildChunkingTest(unittest.TestCase):
     def test_docx_style_headings_override_numbered_heading_heuristic(self) -> None:
         test_docx_style_headings_override_numbered_heading_heuristic()
 
-    def test_formatter_normalizes_array_and_preserves_raw_fallback(self) -> None:
-        test_formatter_normalizes_array_and_preserves_raw_fallback()
+    def test_formatter_rejects_array_summary_and_preserves_raw_fallback(self) -> None:
+        test_formatter_rejects_array_summary_and_preserves_raw_fallback()
 
     def test_formatter_extracts_div_wrapped_layout_sections_and_google_bboxes(self) -> None:
         test_formatter_extracts_div_wrapped_layout_sections_and_google_bboxes()
