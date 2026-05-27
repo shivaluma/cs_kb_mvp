@@ -728,6 +728,19 @@ def try_ai_structuring(
                         warnings.append(f"workflow_extraction_flow:{selected['flow']}")
                         if selected["flow"] != "semantic_workflow_structuring":
                             return mark_structured_chunks(selected_chunks), warnings, ""
+                    review_candidate = select_workflow_review_candidate(flow_candidates)
+                    if review_candidate:
+                        retained_chunks = apply_workflow_selection_metadata(review_candidate["chunks"], review_candidate)
+                        warnings.extend(workflow_selection_warnings(flow_candidates, review_candidate))
+                        warnings.append(f"workflow_review_flow_retained:{review_candidate['flow']}")
+                        review_error = workflow_graph_review_required_error_for_candidate(review_candidate, "ai_failure")
+                        return mark_degraded_chunks(
+                            retained_chunks,
+                            classification,
+                            review_error,
+                            "workflow_graph_requires_review",
+                            "degraded_structured_draft",
+                        ), warnings, review_error
                     warnings.append("semantic_workflow_structuring_used_after_ai_failure")
                     if llm_warnings:
                         warnings.append(f"ai_workflow_structuring_rejected:{','.join(llm_warnings[:3])}")
@@ -761,6 +774,20 @@ def try_ai_structuring(
                         warnings.extend(workflow_selection_warnings(flow_candidates, selected))
                         warnings.append(f"workflow_extraction_flow:{selected['flow']}")
                         return mark_structured_chunks(selected_chunks), warnings, ""
+                    review_candidate = select_workflow_review_candidate(flow_candidates)
+                    if review_candidate:
+                        retained_chunks = apply_workflow_selection_metadata(review_candidate["chunks"], review_candidate)
+                        warnings.extend(workflow_selection_warnings(flow_candidates, review_candidate))
+                        warnings.append(f"workflow_review_flow_retained:{review_candidate['flow']}")
+                        warnings.append(f"ai_workflow_structuring_rejected:{quality_error or fidelity_error}")
+                        review_error = workflow_graph_review_required_error_for_candidate(review_candidate, quality_error or fidelity_error)
+                        return mark_degraded_chunks(
+                            retained_chunks,
+                            classification,
+                            review_error,
+                            "workflow_graph_requires_review",
+                            "degraded_structured_draft",
+                        ), warnings, review_error
                     warnings.append("semantic_workflow_structuring_used_after_ai_quality_reject")
                     warnings.append(f"ai_workflow_structuring_rejected:{quality_error or fidelity_error}")
                     review_error = workflow_graph_review_required_error(flow_candidates, quality_error or fidelity_error)
@@ -3160,6 +3187,49 @@ def select_workflow_flow_candidate(candidates: list[dict[str, Any]]) -> dict[str
     )
 
 
+def select_workflow_review_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    graph_first = [candidate for candidate in candidates if workflow_candidate_has_reviewable_graph(candidate)]
+    if not graph_first:
+        return None
+    flow_priority = {
+        "workflow_v3_graph_primary": 4,
+        "workflow_v2_vision_primary": 3,
+        "workflow_legacy": 2,
+        "semantic_workflow_structuring": 0,
+    }
+    return max(
+        graph_first,
+        key=lambda candidate: (
+            flow_priority.get(str(candidate.get("flow")), 0),
+            int(workflow_review_graph_edge_count(candidate)),
+            int(workflow_review_graph_node_count(candidate)),
+            float(candidate.get("overall_fidelity_score") or 0),
+        ),
+    )
+
+
+def workflow_candidate_has_reviewable_graph(candidate: dict[str, Any]) -> bool:
+    flow = str(candidate.get("flow") or "")
+    if flow == "semantic_workflow_structuring":
+        return False
+    graph = workflow_graph_from_chunks(candidate.get("chunks", []))
+    if not graph:
+        return False
+    return workflow_review_graph_node_count(candidate) >= 2 and workflow_review_graph_edge_count(candidate) >= 1
+
+
+def workflow_review_graph_node_count(candidate: dict[str, Any]) -> int:
+    graph = workflow_graph_from_chunks(candidate.get("chunks", []))
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    return len(nodes)
+
+
+def workflow_review_graph_edge_count(candidate: dict[str, Any]) -> int:
+    graph = workflow_graph_from_chunks(candidate.get("chunks", []))
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    return len(edges)
+
+
 def workflow_selection_warnings(candidates: list[dict[str, Any]], selected: dict[str, Any]) -> list[str]:
     compact_scores = [
         {
@@ -3196,6 +3266,16 @@ def workflow_graph_review_required_error(candidates: list[dict[str, Any]], reaso
         )
         return f"workflow_graph_requires_review:{detail}"
     return f"workflow_graph_requires_review:{reason or 'topology_review_required'}"
+
+
+def workflow_graph_review_required_error_for_candidate(candidate: dict[str, Any], reason: str) -> str:
+    detail = (
+        candidate.get("quality_error")
+        or candidate.get("fidelity_error")
+        or reason
+        or "topology_review_required"
+    )
+    return f"workflow_graph_requires_review:{detail}"
 
 
 def apply_workflow_selection_metadata(chunks: list[Any], selected: dict[str, Any]) -> list[Any]:

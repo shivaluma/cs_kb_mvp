@@ -1355,6 +1355,80 @@ class IngestionDegradedDraftTest(unittest.TestCase):
         self.assertIn("semantic_workflow_structuring_used_after_ai_failure", warnings)
         self.assertIn("workflow_graph_requires_review", ai_error)
 
+    def test_workflow_quality_reject_keeps_best_graph_candidate_for_review_instead_of_semantic_fallback(self) -> None:
+        classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
+        source_ref = {"source_type": "pdf_diagram", "source_file": "workflow.pdf", "page": 1, "bbox": [1, 2, 3, 4]}
+        graph = {
+            "workflow_id": "workflow",
+            "title": "Inbound call workflow",
+            "start_node_id": "node_8",
+            "nodes": [
+                {"id": "node_8", "type": "decision", "step_code": "8", "title": "8. KH đồng ý cung cấp?", "content": "8. KH đồng ý cung cấp?", "question": "KH đồng ý cung cấp?", "source_refs": [source_ref]},
+                {"id": "node_8_1", "type": "action", "step_code": "8.1", "title": "8.1 Note email", "content": "8.1 Note email KH cung cấp", "source_refs": [source_ref]},
+                {"id": "node_8_2", "type": "action", "step_code": "8.2", "title": "8.2 Thông báo không cung cấp email", "content": "8.2 Thông báo KH không cung cấp email thì Be chỉ phản hồi qua SĐT đăng ký.", "source_refs": [source_ref]},
+            ],
+            "edges": [
+                {"from_node": "node_8", "to_node": "node_8_1", "condition": "yes", "source_refs": [source_ref]},
+                {"from_node": "node_8", "to_node": "node_8_2", "condition": "no", "source_refs": [source_ref]},
+            ],
+            "annotations": [],
+            "uncertain_edges": [],
+            "graph_confidence": 0.72,
+            "validation_errors": ["workflow_v3_action_missing_terminal_or_outgoing:8.2"],
+            "repair_report": {"missing_terminal_edges": ["8.2"], "repair_applied": False},
+            "source_refs": [source_ref],
+        }
+        v3_units = [
+            {"unit_type": "full_sop", "title": "Inbound call workflow", "content": "Source workflow text", "confidence": 0.72, "metadata": {"retrieval_scope": "document", "source_refs": [source_ref]}},
+            {"unit_type": "workflow_graph", "title": "Inbound call workflow graph", "content": "Graph with decision 8 and branches 8.1/8.2", "confidence": 0.72, "metadata": {"retrieval_scope": "graph", "workflow_graph": graph, "source_refs": [source_ref]}},
+            {"unit_type": "workflow_step", "title": "8.2 Thông báo không cung cấp email", "content": graph["nodes"][2]["content"], "confidence": 0.72, "metadata": {"retrieval_scope": "unit", "workflow_node_id": "node_8_2", "source_refs": [source_ref]}},
+        ]
+        semantic_refinement = {
+            "workflow_graph_candidate": {
+                "workflow_id": "semantic_bad",
+                "title": "Semantic fallback",
+                "nodes": [{"id": "sem_script", "type": "decision", "semantic_node_type": "decision", "title": "Script greeting?", "content": "Script greeting?", "source_refs": [source_ref]}],
+                "edges": [],
+                "uncertain_edges": [{"from_node": "sem_script", "to_node": "sem_script", "condition": "next", "confidence": 0.2}],
+                "annotations": [],
+                "graph_confidence": 0.45,
+                "topology_review_required": True,
+                "source_refs": [source_ref],
+            },
+            "pages": [{"page": 1, "semantic_nodes": [{"id": "sem_script", "semantic_node_type": "decision", "title": "Script greeting?", "content": "Script greeting?", "source_refs": [source_ref]}], "annotations": []}],
+        }
+
+        ingestion.extract_workflow_units_v3 = lambda _filename, _raw_text, page_images=None, visual_context=None: (
+            v3_units,
+            ["openrouter_workflow_v3_extraction_used", "workflow_v3_fidelity_blocker:workflow_v3_action_missing_terminal_or_outgoing:8.2"],
+            {},
+        )
+        ingestion.extract_workflow_units_v2 = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_workflow_v2_disabled"])
+        ingestion.extract_workflow_units = lambda _filename, _raw_text, page_images=None, visual_context=None: ([], ["openrouter_workflow_legacy_disabled"])
+        ingestion.render_pdf_pages_as_data_urls = lambda _data: (["data:image/jpeg;base64,abc"], [])
+
+        chunks, warnings, ai_error = ingestion.try_ai_structuring(
+            filename="workflow.pdf",
+            content_type="application/pdf",
+            data=b"%PDF-1.4",
+            raw_text="8. KH đồng ý cung cấp?\n8.1 Note email KH cung cấp\n8.2 Thông báo KH không cung cấp email",
+            classification=classification,
+            visual_layout={"summary": {"shape_candidate_count": 3}},
+            raw_context={"workflow_semantic_refinement": semantic_refinement},
+        )
+
+        self.assertNotEqual(chunks, [])
+        self.assertTrue(all(chunk.metadata.get("extraction_status") == "degraded" for chunk in chunks))
+        self.assertTrue(all(chunk.metadata.get("publish_blocked") for chunk in chunks))
+        sections = [chunk.section for chunk in chunks]
+        self.assertIn("workflow_graph", sections)
+        self.assertIn("workflow_step", sections)
+        self.assertNotIn("candidate_decision", sections)
+        self.assertIn("workflow_review_flow_retained:workflow_v3_graph_primary", warnings)
+        graph_chunk = next(chunk for chunk in chunks if chunk.section == "workflow_graph")
+        self.assertEqual(graph_chunk.metadata["workflow_graph"]["workflow_id"], "workflow")
+        self.assertIn("workflow_graph_requires_review", ai_error)
+
     def test_workflow_ai_without_atomic_units_is_not_structured_success(self) -> None:
         classification = type("Classification", (), {"document_type": "workflow_diagram", "source_type": "diagram_pdf", "confidence": 0.78})()
 
