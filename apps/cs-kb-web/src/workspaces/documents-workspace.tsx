@@ -1111,7 +1111,7 @@ export function DocumentsWorkspace({
                   {advancedDocumentStepSelected ? "open" : "optional"}
                 </Badge>
               </summary>
-              <div className="mt-2 flex flex-wrap gap-1 border-t pt-2">
+              <TabsList className="mt-2 flex h-auto w-full flex-wrap justify-start gap-1 rounded-none border-t bg-transparent p-0 pt-2">
                 <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="assign">Assign</TabsTrigger>
                 <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="evidence">Evidence</TabsTrigger>
                 {showKbIndexTab ? (
@@ -1134,7 +1134,7 @@ export function DocumentsWorkspace({
                 <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="quality">Quality</TabsTrigger>
                 <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="pipeline">Jobs</TabsTrigger>
                 <TabsTrigger className="h-8 flex-none rounded-md px-3 text-xs" value="chunks">Chunks</TabsTrigger>
-              </div>
+              </TabsList>
             </details>
           </div>
 
